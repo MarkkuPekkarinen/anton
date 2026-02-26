@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -42,13 +41,9 @@ class MindsQueryClient:
             verify=self.verify_ssl,
         )
 
-    @staticmethod
-    def _normalize_sql_for_match(sql: str) -> str:
-        return " ".join(sql.strip().strip(";").split()).lower()
-
     # ── Datasources + Data Catalog ───────────────────────────────
 
-    def _list_datasources(self, client: httpx.Client) -> list[dict[str, Any]]:
+    def _list_datasources(self, client) -> list[dict[str, Any]]:
         r = client.get("/api/v1/datasources")
         r.raise_for_status()
         data = r.json()
@@ -58,7 +53,7 @@ class MindsQueryClient:
 
     def _get_datasource_catalog(
         self,
-        client: httpx.Client,
+        client,
         datasource_name: str,
         *,
         mind_filter: str | None = None,
@@ -79,7 +74,7 @@ class MindsQueryClient:
             raise RuntimeError(f"Unexpected catalog payload: {type(payload)}")
         return payload
 
-    def _get_mind_details(self, client: httpx.Client) -> dict[str, Any]:
+    def _get_mind_details(self, client) -> dict[str, Any]:
         """Fetch Mind metadata from GET /api/v1/minds/{mind_name}."""
         r = client.get(f"/api/v1/minds/{self.mind_name}")
         r.raise_for_status()
@@ -176,156 +171,95 @@ class MindsQueryClient:
                 result["prompt_template"] = prompt_template
             return result
 
-    # ── Conversations / exports (internal) ───────────────────────
+    # ── Conversation management ──────────────────────────────────
 
-    def _list_conversations(self, client: httpx.Client) -> list[dict[str, Any]]:
+    def _ensure_conversation(self, client) -> str:
+        """Get or create a dedicated conversation for anton queries.
+
+        Looks for an existing conversation with metadata.topic == "anton queries".
+        Creates one if not found. Returns the conversation ID.
+        """
         r = client.get("/api/v1/conversations/")
         r.raise_for_status()
-        data = r.json()
-        if not isinstance(data, list):
-            raise RuntimeError(f"Unexpected conversations payload: {type(data)}")
-        return data
-
-    def _list_items(self, client: httpx.Client, conversation_id: str) -> list[dict[str, Any]]:
-        r = client.get(f"/api/v1/conversations/{conversation_id}/items/")
-        r.raise_for_status()
-        payload = r.json()
-        if isinstance(payload, dict) and isinstance(payload.get("data"), list):
-            return payload["data"]
-        if isinstance(payload, list):
-            return payload
-        keys = list(payload.keys()) if isinstance(payload, dict) else None
-        raise RuntimeError(f"Unexpected items payload: {type(payload)} keys={keys}")
-
-    def _export_csv_text(self, client: httpx.Client, conversation_id: str, item_id: str) -> str:
-        r = client.get(f"/api/v1/conversations/{conversation_id}/items/{item_id}/export")
-        r.raise_for_status()
-        return r.text
-
-    def _conversations_for_mind(self, conversations: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for c in conversations:
-            if not isinstance(c, dict):
-                continue
-            if c.get("metadata", {}).get("model_name") == self.mind_name:
-                out.append(c)
-        return out
-
-    def _pick_latest_conversation_id(self, client: httpx.Client) -> str:
-        convs = self._conversations_for_mind(self._list_conversations(client))
-        if not convs:
-            raise RuntimeError(f"No conversations found for mind {self.mind_name!r} after running query")
-
-        def _ts(c: dict[str, Any]) -> str:
-            return c.get("created_at") or ""
-
-        return sorted(convs, key=_ts, reverse=True)[0]["id"]
-
-    def _find_existing_item_for_sql(
-        self,
-        client: httpx.Client,
-        sql: str,
-        *,
-        conversation_id: str | None = None,
-        search_limit_conversations: int = 25,
-    ) -> dict[str, str] | None:
-        target = self._normalize_sql_for_match(sql)
-        convs = self._conversations_for_mind(self._list_conversations(client))
-        if conversation_id is not None:
-            convs = [c for c in convs if c.get("id") == conversation_id]
-        else:
-            convs = convs[:search_limit_conversations]
-        for c in convs:
-            cid = c.get("id")
-            if not cid:
-                continue
-            items = self._list_items(client, cid)
-            for it in reversed(items):
-                if not isinstance(it, dict) or it.get("role") != "assistant":
+        convs = r.json()
+        if isinstance(convs, list):
+            for c in convs:
+                if not isinstance(c, dict):
                     continue
-                sq = it.get("sql_query")
-                if not sq or sq == "None":
-                    continue
-                if self._normalize_sql_for_match(str(sq)) == target:
-                    iid = it.get("id")
-                    if iid:
-                        return {"conversation_id": cid, "item_id": iid}
-        return None
+                meta = c.get("metadata") or {}
+                if meta.get("topic") == "anton queries" and c.get("id"):
+                    return c["id"]
 
-    def _find_exportable_item_in_conversation(
-        self,
-        client: httpx.Client,
-        conversation_id: str,
-        target_sql: str,
-    ) -> str | None:
-        items = self._list_items(client, conversation_id)
-        for it in reversed(items):
-            if not isinstance(it, dict) or it.get("role") != "assistant":
-                continue
-            sq = it.get("sql_query")
-            if not sq or sq == "None":
-                continue
-            if self._normalize_sql_for_match(str(sq)) == target_sql:
-                return it.get("id")
-        for it in reversed(items):
-            if not isinstance(it, dict) or it.get("role") != "assistant":
-                continue
-            sq = it.get("sql_query")
-            if sq and sq != "None" and it.get("id"):
-                return it["id"]
-        return None
+        # Not found — create one
+        r = client.post(
+            "/api/v1/conversations",
+            json={"metadata": {"topic": "anton queries"}},
+        )
+        r.raise_for_status()
+        new_conv = r.json()
+        conv_id = new_conv.get("id")
+        if not conv_id:
+            raise RuntimeError(f"Created conversation but got no id: {new_conv}")
+        return conv_id
 
     # ── Query execution (private) ────────────────────────────────
 
-    def _run_query_df(
-        self,
-        sql: str,
-        *,
-        conversation_id: str | None = None,
-        reuse_existing: bool = True,
-        poll_s: float = 0.25,
-        max_wait_s: float = 300.0,
-    ) -> pd.DataFrame:
+    def _run_query_df(self, sql: str):
         """Execute a SQL string via the Mind and return a DataFrame."""
         from io import StringIO
         import pandas as pd
+
         with self._client() as client:
-            if reuse_existing:
-                found = self._find_existing_item_for_sql(client, sql, conversation_id=conversation_id)
-                if found:
-                    csv_text = self._export_csv_text(client, found["conversation_id"], found["item_id"])
-                    return pd.read_csv(StringIO(csv_text))
+            conv_id = self._ensure_conversation(client)
+
             if self.progress_fn:
                 self.progress_fn("submitting query...")
+
             r = client.post(
                 "/api/v1/responses/",
                 json={
                     "model": self.mind_name,
                     "input": sql,
-                    "tool_query": True,
+                    "conversation": conv_id,
                     "stream": False,
                 },
             )
             r.raise_for_status()
-            conv_id = conversation_id or self._pick_latest_conversation_id(client)
-            target = self._normalize_sql_for_match(sql)
-            deadline = time.time() + max_wait_s
-            start = time.time()
-            last_items: list[dict[str, Any]] | None = None
-            while time.time() < deadline:
-                last_items = self._list_items(client, conv_id)
-                candidate_id = self._find_exportable_item_in_conversation(client, conv_id, target)
-                if candidate_id:
-                    csv_text = self._export_csv_text(client, conv_id, candidate_id)
-                    return pd.read_csv(StringIO(csv_text))
-                if self.progress_fn:
-                    elapsed = int(time.time() - start)
-                    self.progress_fn(f"waiting for query results... {elapsed}s")
-                time.sleep(poll_s)
-            raise RuntimeError(
-                f"Timed out waiting for exportable assistant item in conversation {conv_id}. "
-                f"Last items seen: {last_items}"
-            )
+            resp = r.json()
+
+            # Try structured query_result first
+            output_items = resp.get("output") or []
+            for item in output_items:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "query_result":
+                    cols = item.get("column_names") or []
+                    rows = item.get("data") or []
+                    return pd.DataFrame(rows, columns=cols)
+
+            # Fallback: find a message with an id and try /export
+            for item in output_items:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "message" and item.get("id"):
+                    try:
+                        export_r = client.get(
+                            f"/api/v1/conversations/{conv_id}/items/{item['id']}/export"
+                        )
+                        export_r.raise_for_status()
+                        return pd.read_csv(StringIO(export_r.text))
+                    except Exception:
+                        continue
+
+            # Neither worked — raise with whatever text the Mind returned
+            texts = []
+            for item in output_items:
+                if isinstance(item, dict):
+                    content = item.get("content") or item.get("text") or ""
+                    if content:
+                        texts.append(str(content))
+            detail = "; ".join(texts) if texts else str(resp)
+            raise RuntimeError(f"No query result in Mind response: {detail}")
 
     # ── Public: native queries ───────────────────────────────────
 
@@ -333,12 +267,7 @@ class MindsQueryClient:
         self,
         native_query: str,
         datasource_name: str,
-        *,
-        conversation_id: str | None = None,
-        reuse_existing: bool = True,
-        poll_s: float = 0.25,
-        max_wait_s: float = 300.0,
-    ) -> pd.DataFrame:
+    ):
         """Run a native query against a datasource and return the result as a DataFrame.
 
         Wraps native_query as::
@@ -348,10 +277,4 @@ class MindsQueryClient:
         nq = native_query.strip().rstrip(";")
         nq_escaped = nq.replace("'", "''")
         wrapped = f"SELECT * FROM {datasource_name}('{nq_escaped}')"
-        return self._run_query_df(
-            wrapped,
-            conversation_id=conversation_id,
-            reuse_existing=reuse_existing,
-            poll_s=poll_s,
-            max_wait_s=max_wait_s,
-        )
+        return self._run_query_df(wrapped)

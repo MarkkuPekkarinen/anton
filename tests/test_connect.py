@@ -64,23 +64,12 @@ class TestHandleConnect:
             },
         ]
 
-        # Mind details response (for the allow_direct_queries check)
-        mind_details_response = MagicMock()
-        mind_details_response.raise_for_status = MagicMock()
-        mind_details_response.json.return_value = {
-            "name": "my_mind",
-            "model_name": "gpt-4",
-            "provider": "openai",
-            "parameters": {"allow_direct_queries": True},
-            "datasources": [{"name": "my_db"}],
-        }
-
         mock_list_response = MagicMock()
         mock_list_response.raise_for_status = MagicMock()
         mock_list_response.json.return_value = minds_response
 
         mock_client = AsyncMock()
-        mock_client.get = AsyncMock(side_effect=[mock_list_response, mind_details_response])
+        mock_client.get = AsyncMock(return_value=mock_list_response)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
@@ -176,22 +165,12 @@ class TestHandleConnect:
             },
         ]
 
-        mind_details_response = MagicMock()
-        mind_details_response.raise_for_status = MagicMock()
-        mind_details_response.json.return_value = {
-            "name": "test_mind",
-            "model_name": "gpt-4",
-            "provider": "openai",
-            "parameters": {"allow_direct_queries": True},
-            "datasources": [{"name": "ds1"}],
-        }
-
         mock_list_response = MagicMock()
         mock_list_response.raise_for_status = MagicMock()
         mock_list_response.json.return_value = minds_response
 
         mock_client = AsyncMock()
-        mock_client.get = AsyncMock(side_effect=[mock_list_response, mind_details_response])
+        mock_client.get = AsyncMock(return_value=mock_list_response)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
 
@@ -207,6 +186,6 @@ class TestHandleConnect:
         conn = json.loads(conn_raw)
         assert conn["url"] == "https://terbase.dev.mdb.ai"
 
-        # Verify the first GET was called with the https:// prefixed URL
+        # Verify the GET was called with the https:// prefixed URL
         first_call = mock_client.get.call_args_list[0]
         assert first_call.args[0] == "https://terbase.dev.mdb.ai/api/v1/minds/"

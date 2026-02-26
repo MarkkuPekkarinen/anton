@@ -745,44 +745,7 @@ async def _handle_connect(
     model_name = selected_mind.get("model_name", "")
     provider = selected_mind.get("provider", "mindsdb")
 
-    # 5. Ensure allow_direct_queries is enabled on the Mind
-    try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True, verify=verify_ssl) as client:
-            headers = {"Authorization": f"Bearer {api_key}"}
-            mind_resp = await client.get(
-                f"{url}/api/v1/minds/{mind_name}",
-                headers=headers,
-            )
-            mind_resp.raise_for_status()
-            mind_details = mind_resp.json()
-            params = mind_details.get("parameters") or {}
-            if not params.get("allow_direct_queries"):
-                params["allow_direct_queries"] = True
-                update_body = {"parameters": params}
-                # Preserve name and model_name so they aren't erased
-                if mind_details.get("model_name"):
-                    update_body["model_name"] = mind_details["model_name"]
-                if mind_details.get("provider"):
-                    update_body["provider"] = mind_details["provider"]
-                # Preserve datasources list (API expects {"name": ...} objects)
-                ds_list = mind_details.get("datasources")
-                if ds_list:
-                    update_body["datasources"] = [
-                        {"name": d["name"]} if isinstance(d, dict) else {"name": d}
-                        for d in ds_list
-                        if (d.get("name") if isinstance(d, dict) else d)
-                    ]
-                put_resp = await client.put(
-                    f"{url}/api/v1/minds/{mind_name}",
-                    headers=headers,
-                    json=update_body,
-                )
-                put_resp.raise_for_status()
-                console.print("[anton.muted]Enabled direct queries on Mind.[/]")
-    except Exception as exc:
-        console.print(f"[anton.warning]Could not enable direct queries: {exc}[/]")
-
-    # 6. Store connection info
+    # 5. Store connection info
     connection = json.dumps({
         "url": url,
         "api_key": api_key,

@@ -4,11 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from io import StringIO
 from typing import Any
-
-import httpx
-import pandas as pd
 
 
 @dataclass
@@ -30,7 +26,8 @@ class MindsQueryClient:
 
     # ── HTTP helpers ─────────────────────────────────────────────
 
-    def _client(self) -> httpx.Client:
+    def _client(self):  # -> httpx.Client
+        import httpx
         return httpx.Client(
             base_url=self.mindsserver_url.rstrip("/"),
             headers={
@@ -260,6 +257,8 @@ class MindsQueryClient:
         max_wait_s: float = 10.0,
     ) -> pd.DataFrame:
         """Execute a SQL string via the Mind and return a DataFrame."""
+        from io import StringIO
+        import pandas as pd
         with self._client() as client:
             if reuse_existing:
                 found = self._find_existing_item_for_sql(client, sql, conversation_id=conversation_id)

@@ -1124,7 +1124,10 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
             except KeyboardInterrupt:
                 display.abort()
                 console.print()
-                break
+                console.print("[anton.muted]Cancelled.[/]")
+                console.print()
+                # Cancel the turn but stay in the chat loop
+                continue
             except Exception as exc:
                 display.abort()
                 console.print(f"[anton.error]Error: {exc}[/]")

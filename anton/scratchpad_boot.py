@@ -447,7 +447,7 @@ while True:
                 # EOF — parent closed stdin
                 eof = True
                 break
-            stripped = line.rstrip("\n")
+            stripped = line.rstrip("\r\n")
             if stripped == _CELL_DELIM:
                 break
             lines.append(line)

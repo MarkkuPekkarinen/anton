@@ -525,7 +525,7 @@ class Scratchpad:
                 yield {"stdout": "", "stderr": "", "error": "Process exited unexpectedly."}
                 return
 
-            line = raw.decode().rstrip("\n")
+            line = raw.decode().rstrip("\r\n")
 
             # Progress marker — yield to caller, don't store
             if line.startswith(_PROGRESS_MARKER):

@@ -133,39 +133,37 @@ if (Confirm-Step "Allow scratchpad internet access? (requires admin)") {
         New-Item -ItemType Directory -Path $scratchpadVenvsDir -Force | Out-Null
     }
 
-    # Windows Firewall doesn't support wildcards in program paths, so we
-    # allow the entire directory via a rule for each existing venv, plus
-    # a broad rule using the uv-managed tool python as a fallback.
-    # The most practical approach: allow any python.exe under scratchpad-venvs.
-    # We do this by adding a rule per existing venv and documenting how to
-    # add rules for new ones. For a fresh install, we add the directory rule.
-    try {
-        # Remove old single-venv rule if it exists (from previous installs)
-        Start-Process -FilePath "netsh" `
-            -ArgumentList "advfirewall firewall delete rule name=`"Anton Scratchpad`"" `
-            -Verb RunAs -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue
+    # Build a single script with ALL netsh commands so we only trigger
+    # one UAC elevation prompt instead of one per rule.
+    $fwCommands = @()
 
-        # Add rules for any existing scratchpad venvs
-        $added = 0
-        if (Test-Path $scratchpadVenvsDir) {
-            Get-ChildItem -Path $scratchpadVenvsDir -Directory | ForEach-Object {
-                $pyExe = Join-Path $_.FullName "Scripts\python.exe"
-                if (Test-Path $pyExe) {
-                    Start-Process -FilePath "netsh" `
-                        -ArgumentList "advfirewall firewall add rule name=`"Anton Scratchpad - $($_.Name)`" dir=out action=allow program=`"$pyExe`"" `
-                        -Verb RunAs -Wait -WindowStyle Hidden
-                    $added++
-                }
+    # Remove old single-venv rule if it exists (from previous installs)
+    $fwCommands += "netsh advfirewall firewall delete rule name=`"Anton Scratchpad`" 2>`$null"
+
+    # Add rules for any existing scratchpad venvs
+    $added = 0
+    if (Test-Path $scratchpadVenvsDir) {
+        Get-ChildItem -Path $scratchpadVenvsDir -Directory | ForEach-Object {
+            $pyExe = Join-Path $_.FullName "Scripts\python.exe"
+            if (Test-Path $pyExe) {
+                $fwCommands += "netsh advfirewall firewall add rule name=`"Anton Scratchpad - $($_.Name)`" dir=out action=allow program=`"$pyExe`""
+                $added++
             }
         }
+    }
 
-        # Also add a rule for the uv tool python (used to create venvs)
-        $uvToolPython = Join-Path $HOME ".local\share\uv\tools\anton\Scripts\python.exe"
-        if (Test-Path $uvToolPython) {
-            Start-Process -FilePath "netsh" `
-                -ArgumentList "advfirewall firewall add rule name=`"Anton Tool Python`" dir=out action=allow program=`"$uvToolPython`"" `
-                -Verb RunAs -Wait -WindowStyle Hidden
-        }
+    # Also add a rule for the uv tool python (used to create venvs)
+    $uvToolPython = Join-Path $HOME ".local\share\uv\tools\anton\Scripts\python.exe"
+    if (Test-Path $uvToolPython) {
+        $fwCommands += "netsh advfirewall firewall add rule name=`"Anton Tool Python`" dir=out action=allow program=`"$uvToolPython`""
+    }
+
+    try {
+        # Run all firewall commands in a single elevated PowerShell — one UAC prompt
+        $script = $fwCommands -join "; "
+        Start-Process -FilePath "powershell" `
+            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$script`"" `
+            -Verb RunAs -Wait -WindowStyle Hidden
 
         Write-Host "  Firewall rules added ($added scratchpad venvs)" -ForegroundColor Green
         Write-Host "  Note: New scratchpads will create venvs automatically." -ForegroundColor Yellow

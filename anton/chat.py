@@ -639,6 +639,7 @@ async def _handle_connect(
     console.print()
     console.print("[anton.muted]Testing connection...[/]")
 
+    verify_ssl = True
     try:
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             resp = await client.get(
@@ -648,9 +649,38 @@ async def _handle_connect(
             resp.raise_for_status()
             minds = resp.json()
     except Exception as exc:
-        console.print(f"[anton.error]Connection failed: {exc}[/]")
-        console.print()
-        return
+        if "CERTIFICATE_VERIFY_FAILED" in str(exc) or "SSL" in type(exc).__name__:
+            console.print("[anton.warning]SSL certificate verification failed (self-signed cert?).[/]")
+            trust = Prompt.ask(
+                "Trust this server and skip SSL verification?",
+                choices=["y", "n"],
+                default="n",
+                console=console,
+            )
+            if trust == "y":
+                verify_ssl = False
+                try:
+                    async with httpx.AsyncClient(
+                        timeout=30, follow_redirects=True, verify=False
+                    ) as client:
+                        resp = await client.get(
+                            f"{url}/api/v1/minds/",
+                            headers={"Authorization": f"Bearer {api_key}"},
+                        )
+                        resp.raise_for_status()
+                        minds = resp.json()
+                except Exception as exc2:
+                    console.print(f"[anton.error]Connection failed: {exc2}[/]")
+                    console.print()
+                    return
+            else:
+                console.print(f"[anton.error]Connection failed: {exc}[/]")
+                console.print()
+                return
+        else:
+            console.print(f"[anton.error]Connection failed: {exc}[/]")
+            console.print()
+            return
 
     if not minds:
         console.print("[anton.error]No Minds found on this server.[/]")
@@ -681,7 +711,7 @@ async def _handle_connect(
 
     # 5. Ensure allow_direct_queries is enabled on the Mind
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True, verify=verify_ssl) as client:
             headers = {"Authorization": f"Bearer {api_key}"}
             mind_resp = await client.get(
                 f"{url}/api/v1/minds/{mind_name}",
@@ -723,6 +753,7 @@ async def _handle_connect(
         "mind_name": mind_name,
         "model_name": model_name,
         "provider": provider,
+        "verify_ssl": verify_ssl,
     })
     workspace.set_secret("MINDS_CONNECTION", connection)
     workspace.set_secret("MINDS_API_KEY", api_key)
@@ -915,6 +946,7 @@ class _EscapeWatcher:
         self._on_cancel = on_cancel
         self._task: asyncio.Task | None = None
         self._old_settings: list | None = None
+        self._stop = False
 
     async def __aenter__(self) -> _EscapeWatcher:
         if sys.platform != "win32" and sys.stdin.isatty():
@@ -922,14 +954,36 @@ class _EscapeWatcher:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
+        self._stop = True
         if self._task is not None:
             self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
+        # Drain any leftover bytes (e.g. partial CPR responses) so they
+        # don't leak into the next prompt_toolkit input session.
+        self._drain_stdin()
+
+    @staticmethod
+    def _drain_stdin() -> None:
+        import fcntl
+
+        fd = sys.stdin.fileno()
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+        try:
+            while True:
+                try:
+                    if not os.read(fd, 1024):
+                        break
+                except BlockingIOError:
+                    break
+        finally:
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags)
 
     async def _watch(self) -> None:
+        import select
         import termios
         import tty
 
@@ -938,8 +992,17 @@ class _EscapeWatcher:
         try:
             tty.setcbreak(fd)
             loop = asyncio.get_running_loop()
-            while True:
-                ch = await loop.run_in_executor(None, lambda: os.read(fd, 1))
+            while not self._stop:
+                # Use select with a short timeout so the executor thread
+                # can check the stop flag and exit cleanly — a bare
+                # os.read() blocks forever and survives task cancellation,
+                # which causes it to steal bytes from the next prompt.
+                ready = await loop.run_in_executor(
+                    None, lambda: select.select([fd], [], [], 0.1)[0]
+                )
+                if not ready:
+                    continue
+                ch = os.read(fd, 1)
                 if ch == b"\x1b":
                     if self._on_cancel is not None:
                         self._on_cancel()

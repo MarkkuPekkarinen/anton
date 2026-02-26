@@ -182,10 +182,12 @@ if _minds_connection_raw:
         _minds_mind_name = _minds_conn.get("mind_name", "")
         if _minds_url and _minds_api_key and _minds_mind_name:
             from anton.minds_query import MindsQueryClient
+            _minds_verify_ssl = _minds_conn.get("verify_ssl", True)
             _minds_client_instance = MindsQueryClient(
                 mindsserver_url=_minds_url,
                 api_key=_minds_api_key,
                 mind_name=_minds_mind_name,
+                verify_ssl=_minds_verify_ssl,
             )
             namespace["minds_client"] = _minds_client_instance
     except Exception:

@@ -23,6 +23,7 @@ class MindsQueryClient:
     api_key: str
     mind_name: str
     timeout_s: float = 60.0
+    verify_ssl: bool = True
 
     # ── HTTP helpers ─────────────────────────────────────────────
 
@@ -37,6 +38,7 @@ class MindsQueryClient:
             },
             follow_redirects=True,
             timeout=self.timeout_s,
+            verify=self.verify_ssl,
         )
 
     @staticmethod

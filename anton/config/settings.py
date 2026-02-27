@@ -38,7 +38,7 @@ class AntonSettings(BaseSettings):
 
     context_dir: str = ".anton/context"
 
-    memory_mode: str = "copilot"  # autopilot | copilot | manual | off
+    memory_mode: str = "autopilot"  # autopilot | copilot | off
 
     theme: str = "auto"
 

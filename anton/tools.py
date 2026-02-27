@@ -184,7 +184,12 @@ SCRATCHPAD_TOOL = {
 # ---------------------------------------------------------------------------
 
 async def handle_memorize(session: ChatSession, tc_input: dict) -> str:
-    """Process a memorize tool call and return a result string."""
+    """Process a memorize tool call and return a result string.
+
+    Encoding is fire-and-forget so it never blocks scratchpad execution.
+    """
+    import asyncio
+
     if session._cortex is None:
         return "Memory system not available."
 
@@ -223,23 +228,20 @@ async def handle_memorize(session: ChatSession, tc_input: dict) -> str:
     if not engrams:
         return "No valid entries provided."
 
-    # Check encoding gate for each engram
-    auto_encode = [e for e in engrams if not session._cortex.encoding_gate(e)]
-    needs_confirm = [e for e in engrams if session._cortex.encoding_gate(e)]
+    # Always encode immediately via fire-and-forget — the LLM explicitly
+    # chose to memorize these, so we never interrupt the user mid-turn
+    # with confirmation prompts.  Confirmations are reserved for the
+    # post-turn consolidator (lessons extracted from scratchpad sessions).
+    async def _encode_bg(cortex, entries):
+        try:
+            await cortex.encode(entries)
+        except Exception:
+            pass  # Best-effort; don't disrupt the conversation
 
-    actions: list[str] = []
-    if auto_encode:
-        results = await session._cortex.encode(auto_encode)
-        actions.extend(results)
+    asyncio.create_task(_encode_bg(session._cortex, engrams))
 
-    if needs_confirm:
-        # Queue for confirmation (handled in chat loop)
-        if not hasattr(session, "_pending_memory_confirmations"):
-            session._pending_memory_confirmations = []
-        session._pending_memory_confirmations.extend(needs_confirm)
-        actions.append(f"{len(needs_confirm)} memory entries pending user confirmation.")
-
-    return "Memory updated: " + "; ".join(actions) if actions else "No changes made."
+    descriptions = [f"Encoded {e.kind}: {e.text}" for e in engrams]
+    return "Memory updated: " + "; ".join(descriptions)
 
 
 async def prepare_scratchpad_exec(session: ChatSession, tc_input: dict):

@@ -89,7 +89,7 @@ You can always ask Anton to explain what it did. Ask it to dump its scratchpad a
 
 Anton remembers your identity, behavioral rules (always/never/when), semantic lessons, and domain expertise — stored as human-readable markdown at two scopes (global and per-project). After scratchpad sessions, it automatically extracts lessons from errors and long runs.
 
-Configure the encoding mode via `/setup` or `ANTON_MEMORY_MODE` (autopilot / copilot / manual / off). Default: **copilot** — auto-saves high-confidence memories, confirms ambiguous ones.
+Configure the encoding mode via `/setup` or `/memory` or `ANTON_MEMORY_MODE` (autopilot / copilot / off). Default: **autopilot** — Anton decides what to remember, no confirmation needed.
 
 For the full architecture, file formats, and developer guide, see **[anton/README.md](anton/README.md)**.
 
@@ -113,7 +113,7 @@ All data lives in `.anton/` in the current working directory. Override with `ant
 ANTON_ANTHROPIC_API_KEY  # Anthropic API key
 ANTON_PLANNING_MODEL     # Model for planning (default: claude-sonnet-4-6)
 ANTON_CODING_MODEL       # Model for coding (default: claude-haiku-4-5-20251001)
-ANTON_MEMORY_MODE        # Memory encoding mode (default: copilot)
+ANTON_MEMORY_MODE        # Memory encoding mode (default: autopilot)
 ```
 
 Env loading order: `cwd/.env` → `.anton/.env` → `~/.anton/.env`

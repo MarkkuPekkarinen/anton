@@ -192,29 +192,29 @@ Anton has a tool called `memorize` that it can call during conversation to encod
 
 ## Memory Modes — The Encoding Gate
 
-Like the Locus Coeruleus-Norepinephrine system that controls how aggressively the brain writes new memories, Anton has four memory modes:
+Like the Locus Coeruleus-Norepinephrine system that controls how aggressively the brain writes new memories, Anton has three memory modes:
 
 | Mode | Behavior | Brain Analog |
 |------|----------|---|
-| **autopilot** | Anton decides what to save, no confirmation | High tonic NE — broad encoding |
-| **copilot** (default) | Auto-save high-confidence memories, confirm ambiguous ones | Moderate NE — selective encoding |
-| **manual** | Always ask before saving | Low tonic NE — deliberate encoding |
+| **autopilot** (default) | Anton decides what to save, no confirmation | High tonic NE — broad encoding |
+| **copilot** | Auto-save high-confidence memories, confirm ambiguous ones after the answer | Moderate NE — selective encoding |
 | **off** | Never save (still reads existing memory) | Suppressed — encoding blocked |
 
-Configure via `/setup` in the chat or `ANTON_MEMORY_MODE` environment variable.
+Configure via `/setup`, `/memory`, or the `ANTON_MEMORY_MODE` environment variable.
 
 **The encoding gate logic** (in `cortex.py`):
 ```python
 def encoding_gate(self, engram: Engram) -> bool:
     """Returns True if user confirmation is needed."""
     if self.mode == "autopilot": return False   # never confirm
-    if self.mode == "manual":    return True    # always confirm
     if self.mode == "off":       return False   # won't reach encoding anyway
     # copilot: auto-encode high confidence, confirm rest
     return engram.confidence != "high"
 ```
 
-**Confirmation UX** (in `chat.py`, before the user prompt):
+**Important design rule:** Memory confirmations are *never* shown during scratchpad execution or while Anton is composing an answer. They only appear after the user has received their full response, right before the next prompt. This ensures memory never interrupts the workflow.
+
+**Confirmation UX** (copilot mode, after the answer):
 ```
 Lessons learned from this session:
   1. [always] Call progress() before long API calls in scratchpad
@@ -441,7 +441,7 @@ The memory system is wired into `ChatSession` and `_chat_loop()`:
    → Show pending memory confirmations → user approves/rejects/picks
 
 9. /setup wizard:
-   → Memory mode selection (autopilot/copilot/manual/off)
+   → Memory mode selection (autopilot/copilot/off)
    → Persisted to ANTON_MEMORY_MODE in .anton/.env
 
 10. _rebuild_session():

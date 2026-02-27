@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -95,6 +96,7 @@ class TestMemorizeTool:
 
         session = ChatSession(mock_llm, cortex=cortex)
         reply = await session.turn("always use httpx instead of requests")
+        await asyncio.sleep(0)  # Let fire-and-forget encode task run
 
         assert "noted" in reply.lower() or "reference" in reply.lower()
 
@@ -120,6 +122,7 @@ class TestMemorizeTool:
 
         session = ChatSession(mock_llm, cortex=cortex)
         await session.turn("coingecko rate limits at 50 per minute")
+        await asyncio.sleep(0)  # Let fire-and-forget encode task run
 
         global_dir, project_dir = memory_dirs
         lessons_path = global_dir / "lessons.md"

@@ -699,7 +699,6 @@ def _handle_memory(
     mode_labels = {
         "autopilot": "Autopilot — Anton decides what to remember",
         "copilot": "Co-pilot — save obvious, confirm ambiguous",
-        "manual": "Manual — always confirm before saving",
         "off": "Off — never save (still reads existing)",
     }
     mode_label = mode_labels.get(settings.memory_mode, settings.memory_mode)
@@ -775,19 +774,18 @@ def _handle_memory(
     if change == "y":
         console.print()
         console.print("[anton.cyan]Memory modes:[/]")
-        console.print(r"  [bold]1[/]  Autopilot — Anton decides what to remember       [dim]\[high NE][/]")
-        console.print(r"  [bold]2[/]  Co-pilot — save obvious, confirm ambiguous        [dim]\[recommended][/]")
-        console.print(r"  [bold]3[/]  Manual — always confirm before saving             [dim]\[low NE][/]")
-        console.print(r"  [bold]4[/]  Off — never save memory (still reads existing)    [dim]\[suppressed][/]")
+        console.print(r"  [bold]1[/]  Autopilot — Anton decides what to remember       [dim]\[recommended][/]")
+        console.print(r"  [bold]2[/]  Co-pilot — save obvious, confirm ambiguous        [dim]\[selective][/]")
+        console.print(r"  [bold]3[/]  Off — never save memory (still reads existing)    [dim]\[suppressed][/]")
         console.print()
 
-        mode_map = {"1": "autopilot", "2": "copilot", "3": "manual", "4": "off"}
-        current_mode_num = {"autopilot": "1", "copilot": "2", "manual": "3", "off": "4"}.get(
-            settings.memory_mode, "2"
+        mode_map = {"1": "autopilot", "2": "copilot", "3": "off"}
+        current_mode_num = {"autopilot": "1", "copilot": "2", "off": "3"}.get(
+            settings.memory_mode, "1"
         )
         mode_choice = Prompt.ask(
             "Memory mode",
-            choices=["1", "2", "3", "4"],
+            choices=["1", "2", "3"],
             default=current_mode_num,
             console=console,
         )
@@ -887,19 +885,18 @@ async def _handle_setup(
     # --- Memory Mode ---
     console.print()
     console.print("[anton.cyan]Memory modes:[/]")
-    console.print(r"  [bold]1[/]  Autopilot — Anton decides what to remember       [dim]\[high NE][/]")
-    console.print(r"  [bold]2[/]  Co-pilot — save obvious, confirm ambiguous        [dim]\[recommended][/]")
-    console.print(r"  [bold]3[/]  Manual — always confirm before saving             [dim]\[low NE][/]")
-    console.print(r"  [bold]4[/]  Off — never save memory (still reads existing)    [dim]\[suppressed][/]")
+    console.print(r"  [bold]1[/]  Autopilot — Anton decides what to remember       [dim]\[recommended][/]")
+    console.print(r"  [bold]2[/]  Co-pilot — save obvious, confirm ambiguous        [dim]\[selective][/]")
+    console.print(r"  [bold]3[/]  Off — never save memory (still reads existing)    [dim]\[suppressed][/]")
     console.print()
 
-    mode_map = {"1": "autopilot", "2": "copilot", "3": "manual", "4": "off"}
-    current_mode_num = {"autopilot": "1", "copilot": "2", "manual": "3", "off": "4"}.get(
-        settings.memory_mode, "2"
+    mode_map = {"1": "autopilot", "2": "copilot", "3": "off"}
+    current_mode_num = {"autopilot": "1", "copilot": "2", "off": "3"}.get(
+        settings.memory_mode, "1"
     )
     mode_choice = Prompt.ask(
         "Memory mode",
-        choices=["1", "2", "3", "4"],
+        choices=["1", "2", "3"],
         default=current_mode_num,
         console=console,
     )

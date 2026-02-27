@@ -73,7 +73,7 @@ class Cortex:
         self,
         global_dir: Path,
         project_dir: Path,
-        mode: str = "copilot",
+        mode: str = "autopilot",
         llm_client: LLMClient | None = None,
     ) -> None:
         """Initialize the executive with two hippocampal stores.
@@ -81,7 +81,7 @@ class Cortex:
         Args:
             global_dir: Path to ~/.anton/memory/ (cross-project memories)
             project_dir: Path to <project>/.anton/memory/ (project-specific)
-            mode: Memory mode — autopilot|copilot|manual|off (encoding gate)
+            mode: Memory mode — autopilot|copilot|off (encoding gate)
             llm_client: For LLM-assisted operations (profile extraction, compaction)
         """
         self.global_hc = Hippocampus(global_dir)
@@ -208,13 +208,13 @@ class Cortex:
         Brain analog: the Locus Coeruleus-NE system modulating encoding gain.
         - autopilot (high NE): encode everything → never confirm
         - copilot (moderate NE): auto-encode high-confidence, confirm ambiguous
-        - manual (low NE): always confirm
         - off (suppressed ACh): never encode (but also never writes)
+
+        Confirmations are always deferred until after the user has received
+        their answer — never shown during scratchpad execution or mid-turn.
         """
         if self.mode == "autopilot":
             return False
-        if self.mode == "manual":
-            return True
         if self.mode == "off":
             return False  # Won't reach encoding anyway
         # copilot: auto-encode high confidence user-sourced, confirm rest

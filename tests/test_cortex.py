@@ -111,11 +111,11 @@ class TestEncodingGate:
         engram = Engram(text="test", kind="lesson", scope="global", confidence="low")
         assert cortex.encoding_gate(engram) is False
 
-    def test_manual_always_confirms(self, dirs):
+    def test_off_never_confirms(self, dirs):
         g, p = dirs
-        cortex = Cortex(global_dir=g, project_dir=p, mode="manual")
+        cortex = Cortex(global_dir=g, project_dir=p, mode="off")
         engram = Engram(text="test", kind="lesson", scope="global", confidence="high")
-        assert cortex.encoding_gate(engram) is True
+        assert cortex.encoding_gate(engram) is False
 
     def test_copilot_confirms_low_confidence(self, dirs):
         g, p = dirs

@@ -157,7 +157,7 @@ def _ensure_workspace(settings) -> None:
     Boot logic:
     1. If $PWD/.anton exists → use it (local project), boot straight away
     2. If $HOME/.anton exists → use it (global project), boot straight away
-    3. Neither exists → ask user: new local project or global project
+    3. Neither exists → create local $PWD/.anton and boot
     """
     from anton.workspace import Workspace
 
@@ -178,33 +178,10 @@ def _ensure_workspace(settings) -> None:
         global_ws.apply_env_to_process()
         return
 
-    # 3. Neither exists → ask user
-    console.print()
-    cwd_display = str(local_path)
-    console.print("[anton.cyan]Where should Anton store its data?[/]")
-    console.print(f"  [bold]1[/]  This folder  [dim]({cwd_display}/.anton)[/]")
-    console.print(f"  [bold]2[/]  Global        [dim](~/.anton)[/]")
-    console.print()
-    choice = Prompt.ask(
-        "Select",
-        choices=["1", "2"],
-        default="1",
-        console=console,
-    )
-
-    if choice == "1":
-        console.print(f"[anton.muted]  Creating project workspace in {cwd_display}/.anton[/]")
-        ws = local_ws
-    else:
-        console.print(f"[anton.muted]  Creating global workspace in ~/.anton[/]")
-        settings.resolve_workspace(str(global_path))
-        ws = global_ws
-
-    actions = ws.initialize()
-    for action in actions:
-        console.print(f"[anton.muted]  {action}[/]")
-    ws.apply_env_to_process()
-    console.print()
+    # 3. Neither exists → create local workspace automatically
+    local_ws.initialize()
+    local_ws.apply_env_to_process()
+    console.print(f"[anton.muted]  workspace is {local_path}/.anton[/]")
 
 
 @app.callback(invoke_without_command=True)

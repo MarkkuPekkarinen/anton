@@ -961,6 +961,28 @@ class _EscapeWatcher:
             termios.tcsetattr(fd, termios.TCSADRAIN, self._old_settings)
 
 
+class _ClosingSpinner:
+    """Animated spinner shown while scratchpad processes are being killed."""
+
+    def __init__(self, console: Console) -> None:
+        self._console = console
+        self._live: object | None = None
+
+    def start(self) -> None:
+        from rich.live import Live
+        from rich.spinner import Spinner
+        from rich.text import Text
+
+        spinner = Spinner("dots", text=Text(" Closing scratchpad processes…", style="anton.muted"))
+        self._live = Live(spinner, console=self._console, refresh_per_second=12, transient=True)
+        self._live.start()
+
+    def stop(self) -> None:
+        if self._live is not None:
+            self._live.stop()
+            self._live = None
+
+
 def run_chat(console: Console, settings: AntonSettings) -> None:
     """Launch the interactive chat REPL."""
     asyncio.run(_chat_loop(console, settings))
@@ -1178,7 +1200,18 @@ async def _chat_loop(console: Console, settings: AntonSettings) -> None:
             except KeyboardInterrupt:
                 display.abort()
                 session.repair_history()
-                console.print()
+                # Kill any running scratchpad processes (they may have
+                # spawned subprocesses that would otherwise be orphaned).
+                if session._scratchpads.list_pads():
+                    console.print()
+                    _closing = _ClosingSpinner(console)
+                    _closing.start()
+                    try:
+                        await session._scratchpads.cancel_all_running()
+                    finally:
+                        _closing.stop()
+                else:
+                    console.print()
                 console.print("[anton.muted]Cancelled.[/]")
                 console.print()
                 # Cancel the turn but stay in the chat loop

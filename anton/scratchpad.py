@@ -372,6 +372,9 @@ class Scratchpad:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                # Own session so os.killpg() kills the whole process tree
+                # (grandchildren spawned by user code, pip installs, etc.)
+                start_new_session=(sys.platform != "win32"),
             )
         except (FileNotFoundError, PermissionError, OSError) as exc:
             # Python binary is missing or broken — nuke venv and raise
@@ -447,7 +450,7 @@ class Scratchpad:
                 else:
                     result_data = item
         except asyncio.TimeoutError as exc:
-            self._proc.kill()
+            self._kill_tree()
             await self._proc.wait()
             cell = Cell(
                 code=code,
@@ -676,11 +679,37 @@ class Scratchpad:
         self.cells = [summary_cell] + recent
         return True
 
+    async def cancel_running(self) -> None:
+        """Kill the current execution and restart the subprocess.
+
+        Called when the user cancels (ESC / Ctrl-C) during a running cell.
+        Kills the entire process tree, records a cancelled cell, then restarts
+        so the scratchpad is ready for the next use.
+        """
+        if self._proc is None or self._proc.returncode is not None:
+            return
+        self._kill_tree()
+        try:
+            await asyncio.wait_for(self._proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            pass
+        # Record the cancelled execution
+        self.cells.append(Cell(
+            code="# (cancelled by user)",
+            stdout="",
+            stderr="",
+            error="Cancelled by user.",
+            description="Cancelled",
+        ))
+        # Restart so the pad is usable again
+        self._proc = None
+        await self.start()
+
     async def _stop_process(self) -> None:
         """Kill the subprocess and delete the boot script, but keep the venv."""
         if self._proc is not None and self._proc.returncode is None:
             try:
-                self._proc.kill()
+                self._kill_tree()
                 await self._proc.wait()
             except ProcessLookupError:
                 pass
@@ -691,6 +720,25 @@ class Scratchpad:
             except OSError:
                 pass
             self._boot_path = None
+
+    def _kill_tree(self) -> None:
+        """Kill the subprocess and all its children via process group."""
+        if self._proc is None or self._proc.returncode is not None:
+            return
+        pid = self._proc.pid
+        if sys.platform != "win32":
+            # Kill the entire process group (subprocess + grandchildren)
+            import signal
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                # Fallback: kill just the direct child
+                try:
+                    self._proc.kill()
+                except ProcessLookupError:
+                    pass
+        else:
+            self._proc.kill()
 
     async def reset(self) -> None:
         """Kill the process, clear cells, restart.
@@ -805,6 +853,11 @@ class ScratchpadManager:
 
     def list_pads(self) -> list[str]:
         return list(self._pads.keys())
+
+    async def cancel_all_running(self) -> None:
+        """Cancel running executions in all scratchpads and restart them."""
+        for pad in self._pads.values():
+            await pad.cancel_running()
 
     async def close_all(self) -> None:
         """Cleanup all scratchpads on session end."""

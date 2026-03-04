@@ -1712,6 +1712,13 @@ async def _chat_loop(console: Console, settings: AntonSettings, *, resume: bool 
         if resumed_id:
             current_session_id = resumed_id
 
+    # First-run: if no Minds datasource is configured, launch the setup wizard
+    if not settings.minds_datasource:
+        session = await _handle_setup_minds(
+            console, settings, workspace, state,
+            self_awareness, cortex, session, episodic=episodic,
+        )
+
     console.print("[anton.muted] Chat with Anton. Type '/help' for commands or 'exit' to quit.[/]")
     console.print(f"[anton.cyan_dim] {'━' * 40}[/]")
     console.print()

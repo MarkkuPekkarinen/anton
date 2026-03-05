@@ -739,20 +739,39 @@ def _build_runtime_context(settings: AntonSettings) -> str:
         f"- Workspace: {settings.workspace_path}\n"
         f"- Memory mode: {settings.memory_mode}"
     )
-    if settings.minds_datasource and settings.minds_api_key:
+    if settings.minds_api_key and (settings.minds_mind_name or settings.minds_datasource):
         engine = settings.minds_datasource_engine or "unknown"
+        ctx += f"\n\n**CONNECTED MIND (Minds):**\n"
+        if settings.minds_mind_name:
+            ctx += f"- Mind: {settings.minds_mind_name}\n"
+        if settings.minds_datasource:
+            ctx += (
+                f"- Datasource: {settings.minds_datasource}\n"
+                f"- Engine: {engine}\n"
+            )
         ctx += (
-            f"\n\n**CONNECTED DATASOURCE (Minds):**\n"
-            f"- Datasource: {settings.minds_datasource}\n"
-            f"- Engine: {engine}\n"
             f"- Minds URL: {settings.minds_url}\n"
             f"- To query data, use the scratchpad with the built-in `query_minds_data()` function.\n"
             f"  It is pre-loaded in the scratchpad namespace — DO NOT import it. Just call it directly.\n"
             f'  Example: result = query_minds_data("SELECT * FROM users LIMIT 5")\n'
             f"  Returns dict with 'type', 'data' (list of rows), 'column_names', 'error_message'.\n"
             f'  Optional: query_minds_data("SELECT ...", datasource="other_ds")\n'
-            f"- Write SQL appropriate for the {engine} engine."
         )
+        if settings.minds_datasource:
+            ctx += f"- Write SQL appropriate for the {engine} engine.\n"
+
+        # Inject decoded system knowledge from mind parameters
+        if settings.minds_system_knowledge:
+            import base64
+            try:
+                decoded = base64.b64decode(settings.minds_system_knowledge).decode()
+                if decoded.strip():
+                    ctx += (
+                        f"\n**DATASOURCE CONTEXT (from Mind configuration):**\n"
+                        f"{decoded}"
+                    )
+            except Exception:
+                pass
     return ctx
 
 
@@ -995,15 +1014,14 @@ async def _handle_setup(
     console.print("[anton.cyan]/setup[/]")
     console.print()
     console.print("  What do you want to configure?")
-    console.print("    [bold]1[/]  Datasource — connect to datasource via Minds")
-    console.print("    [bold]2[/]  LLM — provider, API key, and models")
-    console.print("    [bold]3[/]  Memory — memory mode and episodic memory")
+    console.print("    [bold]1[/]  LLM — provider, API key, and models")
+    console.print("    [bold]2[/]  Memory — memory mode and episodic memory")
     console.print("    [bold]q[/]  Back")
     console.print()
 
     top_choice = Prompt.ask(
         "Select",
-        choices=["1", "2", "3", "q"],
+        choices=["1", "2", "q"],
         default="q",
         console=console,
     )
@@ -1012,11 +1030,6 @@ async def _handle_setup(
         console.print()
         return session
     elif top_choice == "1":
-        return await _handle_setup_minds(
-            console, settings, workspace, state,
-            self_awareness, cortex, session, episodic=episodic,
-        )
-    elif top_choice == "2":
         return await _handle_setup_models(
             console, settings, workspace, state,
             self_awareness, cortex, session, episodic=episodic,
@@ -1226,6 +1239,31 @@ def _normalize_minds_url(url: str) -> str:
     return url.rstrip("/")
 
 
+def _minds_list_minds(base_url: str, api_key: str, verify: bool = True) -> list[dict]:
+    """Fetch minds list from a Minds server using stdlib urllib."""
+    import json as _json
+    import ssl
+    import urllib.request
+
+    url = f"{base_url}/api/v1/minds/"  # trailing slash required
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Authorization", f"Bearer {api_key}")
+    req.add_header("Accept", "application/json")
+
+    ctx = None
+    if not verify:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+
+    with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+        data = _json.loads(resp.read().decode())
+
+    if isinstance(data, list):
+        return data
+    return data.get("minds", data if isinstance(data, list) else [])
+
+
 def _minds_list_datasources(base_url: str, api_key: str, verify: bool = True) -> list[dict]:
     """Fetch datasource list from a Minds server using stdlib urllib."""
     import json as _json
@@ -1284,7 +1322,7 @@ def _minds_test_llm(base_url: str, api_key: str, verify: bool = True) -> bool:
         return False
 
 
-async def _handle_setup_minds(
+async def _handle_connect(
     console: Console,
     settings: AntonSettings,
     workspace: Workspace,
@@ -1294,7 +1332,8 @@ async def _handle_setup_minds(
     session: ChatSession,
     episodic: EpisodicMemory | None = None,
 ) -> ChatSession:
-    """Setup sub-menu: connect to a Minds datasource."""
+    """Connect to a Minds server: select a Mind, then optionally a datasource."""
+    import base64
     import ssl
     import urllib.error
 
@@ -1306,87 +1345,152 @@ async def _handle_setup_minds(
 
     console.print()
 
-    # Use key and URL from settings (already configured in _ensure_api_key)
-    api_key = settings.minds_api_key or ""
-    minds_url = _normalize_minds_url(settings.minds_url)
+    # --- Prompt for URL and API key (use saved values as defaults) ---
+    saved_url = _normalize_minds_url(settings.minds_url)
+    minds_url = Prompt.ask("Minds server URL", default=saved_url, console=console)
+    minds_url = _normalize_minds_url(minds_url)
 
-    # --- Test connection ---
+    saved_key = settings.minds_api_key or ""
+    default_key = saved_key if saved_key else None
+    api_key = Prompt.ask("API key", default=default_key, console=console, password=True)
+    if not api_key or not api_key.strip():
+        console.print("[anton.error]API key is required.[/]")
+        console.print()
+        return session
+    api_key = api_key.strip()
+
     ssl_verify = settings.minds_ssl_verify
-    console.print()
-    console.print(f"[anton.muted]Connecting to {minds_url}...[/]")
 
-    datasources = None
-    try:
-        datasources = _minds_list_datasources(minds_url, api_key, verify=ssl_verify)
-    except urllib.error.URLError as e:
-        if isinstance(e.reason, ssl.SSLCertVerificationError):
-            console.print("[anton.warning]This server uses a self-signed or untrusted certificate.[/]")
-            trust = Prompt.ask(
-                "Trust this certificate anyway? (y/n)",
-                choices=["y", "n"],
-                default="n",
-                console=console,
-            )
-            if trust == "y":
-                ssl_verify = False
-                try:
-                    datasources = _minds_list_datasources(minds_url, api_key, verify=False)
-                except Exception as retry_err:
-                    console.print(f"[anton.error]Connection failed: {retry_err}[/]")
+    # --- Try to connect (with retry on auth failure) ---
+    minds = None
+    for _attempt in range(2):
+        console.print()
+        console.print(f"[anton.muted]Connecting to {minds_url}...[/]")
+        try:
+            minds = _minds_list_minds(minds_url, api_key, verify=ssl_verify)
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                console.print("[anton.error]Authentication failed — check your API key.[/]")
+                api_key = Prompt.ask("API key", console=console, password=True)
+                if not api_key or not api_key.strip():
+                    console.print("[anton.muted]Aborted.[/]")
                     console.print()
                     return session
-            else:
-                console.print("[anton.muted]Aborted.[/]")
-                console.print()
-                return session
-        else:
+                api_key = api_key.strip()
+                continue
             console.print(f"[anton.error]Connection failed: {e}[/]")
             console.print()
             return session
-    except Exception as e:
-        console.print(f"[anton.error]Connection failed: {e}[/]")
+        except urllib.error.URLError as e:
+            if isinstance(getattr(e, "reason", None), ssl.SSLCertVerificationError):
+                console.print("[anton.warning]This server uses a self-signed or untrusted certificate.[/]")
+                trust = Prompt.ask(
+                    "Trust this certificate anyway? (y/n)",
+                    choices=["y", "n"],
+                    default="n",
+                    console=console,
+                )
+                if trust == "y":
+                    ssl_verify = False
+                    continue
+                console.print("[anton.muted]Aborted.[/]")
+                console.print()
+                return session
+            console.print(f"[anton.error]Connection failed: {e}[/]")
+            console.print()
+            return session
+        except Exception as e:
+            console.print(f"[anton.error]Connection failed: {e}[/]")
+            console.print()
+            return session
+
+    if not minds:
+        console.print("[anton.warning]No minds found on this server.[/]")
         console.print()
         return session
 
-    if not datasources:
-        console.print("[anton.warning]No datasources found on this server.[/]")
+    # --- Select a Mind ---
+    console.print()
+    console.print("[anton.cyan]Available minds:[/]")
+    for i, mind in enumerate(minds, 1):
+        name = mind.get("name", "?")
+        ds_list = mind.get("datasources", [])
+        ds_count = len(ds_list)
+        ds_label = f"{ds_count} datasource{'s' if ds_count != 1 else ''}" if ds_count else "no datasources"
+        console.print(f"    [bold]{i}[/]  {name} [dim]({ds_label})[/]")
+    console.print()
+
+    choices = [str(i) for i in range(1, len(minds) + 1)]
+    pick = Prompt.ask("Select mind", choices=choices, console=console)
+    selected_mind = minds[int(pick) - 1]
+    mind_name = selected_mind.get("name", "")
+
+    # --- Datasource selection within the mind ---
+    mind_datasources = selected_mind.get("datasources", [])
+    ds_name = ""
+    ds_engine = ""
+
+    if len(mind_datasources) > 1:
         console.print()
-        return session
+        console.print(f"[anton.cyan]Datasources in mind '{mind_name}':[/]")
+        for i, ds_ref in enumerate(mind_datasources, 1):
+            # datasource refs may be strings or dicts
+            ref_name = ds_ref if isinstance(ds_ref, str) else ds_ref.get("name", "?")
+            console.print(f"    [bold]{i}[/]  {ref_name}")
+        console.print()
+        ds_choices = [str(i) for i in range(1, len(mind_datasources) + 1)]
+        ds_pick = Prompt.ask("Select datasource", choices=ds_choices, console=console)
+        picked_ds = mind_datasources[int(ds_pick) - 1]
+        ds_name = picked_ds if isinstance(picked_ds, str) else picked_ds.get("name", "")
+    elif len(mind_datasources) == 1:
+        picked_ds = mind_datasources[0]
+        ds_name = picked_ds if isinstance(picked_ds, str) else picked_ds.get("name", "")
+        console.print(f"[anton.muted]Auto-selected datasource: {ds_name}[/]")
 
-    # --- Display datasources ---
-    console.print()
-    console.print("[anton.cyan]Available datasources:[/]")
-    for i, ds in enumerate(datasources, 1):
-        name = ds.get("name", "?")
-        engine = ds.get("engine", "unknown")
-        console.print(f"    [bold]{i}[/]  {name} [dim]({engine})[/]")
-    console.print()
+    # --- Resolve engine type from datasources list ---
+    if ds_name:
+        try:
+            all_datasources = _minds_list_datasources(minds_url, api_key, verify=ssl_verify)
+            for ds in all_datasources:
+                if ds.get("name") == ds_name:
+                    ds_engine = ds.get("engine", "unknown")
+                    break
+        except Exception:
+            ds_engine = "unknown"
 
-    choices = [str(i) for i in range(1, len(datasources) + 1)]
-    pick = Prompt.ask(
-        "Select datasource",
-        choices=choices,
-        console=console,
-    )
-    selected = datasources[int(pick) - 1]
-    ds_name = selected.get("name", "")
-    ds_engine = selected.get("engine", "unknown")
+    # --- Build system knowledge from mind parameters ---
+    params = selected_mind.get("parameters", {}) or {}
+    knowledge_parts = []
+    if params.get("system_prompt"):
+        knowledge_parts.append(params["system_prompt"])
+    if params.get("prompt_template"):
+        knowledge_parts.append(params["prompt_template"])
+    system_knowledge = "\n\n".join(knowledge_parts)
+    encoded_knowledge = base64.b64encode(system_knowledge.encode()).decode() if system_knowledge else ""
 
     # --- Persist to global ~/.anton/.env ---
     global_ws.set_secret("ANTON_MINDS_API_KEY", api_key)
     global_ws.set_secret("ANTON_MINDS_URL", minds_url)
+    global_ws.set_secret("ANTON_MINDS_MIND_NAME", mind_name)
     global_ws.set_secret("ANTON_MINDS_DATASOURCE", ds_name)
     global_ws.set_secret("ANTON_MINDS_DATASOURCE_ENGINE", ds_engine)
+    global_ws.set_secret("ANTON_MINDS_SYSTEM_KNOWLEDGE", encoded_knowledge)
     global_ws.set_secret("ANTON_MINDS_SSL_VERIFY", "true" if ssl_verify else "false")
 
     settings.minds_api_key = api_key
     settings.minds_url = minds_url
+    settings.minds_mind_name = mind_name
     settings.minds_datasource = ds_name
     settings.minds_datasource_engine = ds_engine
+    settings.minds_system_knowledge = encoded_knowledge
     settings.minds_ssl_verify = ssl_verify
 
     console.print()
-    console.print(f"[anton.success]Connected to datasource: {ds_name} ({ds_engine})[/]")
+    status = f"[anton.success]Selected mind: {mind_name}[/]"
+    if ds_name:
+        status += f" [anton.success]| datasource: {ds_name} ({ds_engine})[/]"
+    console.print(status)
 
     # --- Test if the Minds server also supports LLM endpoints ---
     console.print()
@@ -1589,6 +1693,7 @@ def _print_slash_help(console: Console) -> None:
     """Print available slash commands."""
     console.print()
     console.print("[anton.cyan]Available commands:[/]")
+    console.print("  [bold]/connect[/]     — Connect to a Minds server and select a mind")
     console.print("  [bold]/setup[/]       — Configure models or memory settings")
     console.print("  [bold]/memory[/]      — Show memory status dashboard")
     console.print("  [bold]/paste[/]       — Attach clipboard image to your message")
@@ -1900,7 +2005,14 @@ async def _chat_loop(console: Console, settings: AntonSettings, *, resume: bool 
             if message_content is None and stripped.startswith("/"):
                 parts = stripped.split(maxsplit=1)
                 cmd = parts[0].lower()
-                if cmd == "/setup":
+                if cmd == "/connect":
+                    session = await _handle_connect(
+                        console, settings, workspace, state,
+                        self_awareness, cortex, session,
+                        episodic=episodic,
+                    )
+                    continue
+                elif cmd == "/setup":
                     session = await _handle_setup(
                         console, settings, workspace, state,
                         self_awareness, cortex, session,

@@ -60,8 +60,11 @@ Return a JSON array of objects:
 ]
 
 Rules for scope:
-- "global": universal knowledge useful across any project
-- "project": specific to this workspace (file paths, project-specific APIs)
+- "project": DEFAULT — use this for most memories. Anything related to the current
+  codebase, its APIs, file paths, libraries, patterns, conventions, or behaviors
+  observed during this session belongs here.
+- "global": RARE — only for truly universal knowledge that applies to any project
+  (e.g. general language quirks, stdlib gotchas). When in doubt, use "project".
 
 Rules for confidence:
 - "high": clearly correct, verified by the session results

@@ -23,7 +23,11 @@ if _scratchpad_model:
         else:
             from anton.llm.anthropic import AnthropicProvider as _ProviderClass
 
-        _llm_provider = _ProviderClass()  # reads API key from env
+        _llm_ssl_verify = os.environ.get("ANTON_MINDS_SSL_VERIFY", "true").lower() != "false"
+        if _scratchpad_provider_name in ("openai", "openai-compatible"):
+            _llm_provider = _ProviderClass(ssl_verify=_llm_ssl_verify)
+        else:
+            _llm_provider = _ProviderClass()  # Anthropic doesn't need ssl_verify
         _llm_model = _scratchpad_model
 
         _LLM_HEARTBEAT_INTERVAL = 10  # seconds between heartbeats during LLM calls
@@ -245,7 +249,10 @@ if _minds_datasource and _minds_api_key and _minds_url:
             req.add_header("Authorization", f"Bearer {_minds_api_key}")
             req.add_header("Content-Type", "application/json")
             req.add_header("Accept", "application/json")
-            req.add_header("User-Agent", "anton/1.0")
+            req.add_header("User-Agent", "Mozilla/5.0 (compatible; Anton/1.0; +https://github.com/mindsdb/anton)")
+            req.add_header("Accept-Language", "en-US,en;q=0.9")
+            req.add_header("Accept-Encoding", "identity")
+            req.add_header("Connection", "keep-alive")
 
             ctx = None
             if not _minds_ssl_verify:

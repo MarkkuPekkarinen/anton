@@ -91,8 +91,8 @@ class LLMClient:
 
         providers = {
             "anthropic": lambda: AnthropicProvider(api_key=settings.anthropic_api_key),
-            "openai": lambda: OpenAIProvider(api_key=settings.openai_api_key, base_url=settings.openai_base_url),
-            "openai-compatible": lambda: OpenAIProvider(api_key=settings.openai_api_key, base_url=settings.openai_base_url),
+            "openai": lambda: OpenAIProvider(api_key=settings.openai_api_key, base_url=settings.openai_base_url, ssl_verify=settings.minds_ssl_verify),
+            "openai-compatible": lambda: OpenAIProvider(api_key=settings.openai_api_key, base_url=settings.openai_base_url, ssl_verify=settings.minds_ssl_verify),
         }
 
         planning_factory = providers.get(settings.planning_provider)

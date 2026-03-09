@@ -1332,17 +1332,31 @@ def _describe_minds_connection_error(err: Exception) -> tuple[str, str]:
     )
 
 
-def _minds_list_minds(base_url: str, api_key: str, verify: bool = True) -> list[dict]:
-    """Fetch minds list from a Minds server using stdlib urllib."""
-    import json as _json
+def _minds_request(
+    url: str,
+    api_key: str,
+    *,
+    method: str = "GET",
+    payload: bytes | None = None,
+    verify: bool = True,
+    timeout: int = 30,
+) -> bytes:
+    """Shared HTTP helper for all Minds API calls.
+
+    Sets headers that pass through Cloudflare bot detection.
+    """
     import ssl
     import urllib.request
 
-    url = f"{base_url}/api/v1/minds/"  # trailing slash required
-    req = urllib.request.Request(url, method="GET")
+    req = urllib.request.Request(url, data=payload, method=method)
     req.add_header("Authorization", f"Bearer {api_key}")
+    req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "application/json")
-    req.add_header("User-Agent", "anton/1.0")
+    # Browser-like headers to avoid Cloudflare bot detection
+    req.add_header("User-Agent", "Mozilla/5.0 (compatible; Anton/1.0; +https://github.com/mindsdb/anton)")
+    req.add_header("Accept-Language", "en-US,en;q=0.9")
+    req.add_header("Accept-Encoding", "identity")
+    req.add_header("Connection", "keep-alive")
 
     ctx = None
     if not verify:
@@ -1350,8 +1364,17 @@ def _minds_list_minds(base_url: str, api_key: str, verify: bool = True) -> list[
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
 
-    with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
-        data = _json.loads(resp.read().decode())
+    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _minds_list_minds(base_url: str, api_key: str, verify: bool = True) -> list[dict]:
+    """Fetch minds list from a Minds server using stdlib urllib."""
+    import json as _json
+
+    url = f"{base_url}/api/v1/minds/"  # trailing slash required
+    raw = _minds_request(url, api_key, verify=verify)
+    data = _json.loads(raw.decode())
 
     if isinstance(data, list):
         return data
@@ -1361,24 +1384,11 @@ def _minds_list_minds(base_url: str, api_key: str, verify: bool = True) -> list[
 def _minds_get_mind(base_url: str, api_key: str, mind_name: str, verify: bool = True) -> dict | None:
     """Fetch a single mind's details from a Minds server."""
     import json as _json
-    import ssl
-    import urllib.request
 
     url = f"{base_url}/api/v1/minds/{mind_name}"
-    req = urllib.request.Request(url, method="GET")
-    req.add_header("Authorization", f"Bearer {api_key}")
-    req.add_header("Accept", "application/json")
-    req.add_header("User-Agent", "anton/1.0")
-
-    ctx = None
-    if not verify:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
-            return _json.loads(resp.read().decode())
+        raw = _minds_request(url, api_key, verify=verify, timeout=15)
+        return _json.loads(raw.decode())
     except Exception:
         return None
 
@@ -1417,23 +1427,10 @@ def _minds_refresh_knowledge(settings: AntonSettings, cortex) -> None:
 def _minds_list_datasources(base_url: str, api_key: str, verify: bool = True) -> list[dict]:
     """Fetch datasource list from a Minds server using stdlib urllib."""
     import json as _json
-    import ssl
-    import urllib.request
 
     url = f"{base_url}/api/v1/datasources"
-    req = urllib.request.Request(url, method="GET")
-    req.add_header("Authorization", f"Bearer {api_key}")
-    req.add_header("Accept", "application/json")
-    req.add_header("User-Agent", "anton/1.0")
-
-    ctx = None
-    if not verify:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-
-    with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
-        data = _json.loads(resp.read().decode())
+    raw = _minds_request(url, api_key, verify=verify)
+    data = _json.loads(raw.decode())
 
     # Response may be a list or a dict with a "datasources" key
     if isinstance(data, list):
@@ -1444,8 +1441,6 @@ def _minds_list_datasources(base_url: str, api_key: str, verify: bool = True) ->
 def _minds_test_llm(base_url: str, api_key: str, verify: bool = True) -> bool:
     """Test if the Minds server supports LLM endpoints (_code_/_reason_ models)."""
     import json as _json
-    import ssl
-    import urllib.request
 
     url = f"{base_url}/api/v1/chat/completions"
     payload = _json.dumps({
@@ -1454,21 +1449,9 @@ def _minds_test_llm(base_url: str, api_key: str, verify: bool = True) -> bool:
         "max_tokens": 1,
     }).encode()
 
-    req = urllib.request.Request(url, data=payload, method="POST")
-    req.add_header("Authorization", f"Bearer {api_key}")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Accept", "application/json")
-    req.add_header("User-Agent", "anton/1.0")
-
-    ctx = None
-    if not verify:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
-            return resp.status == 200
+        _minds_request(url, api_key, method="POST", payload=payload, verify=verify)
+        return True
     except Exception:
         return False
 

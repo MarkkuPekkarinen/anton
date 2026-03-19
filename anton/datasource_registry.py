@@ -38,6 +38,7 @@ class DatasourceEngine:
     name_from: Union[str, list[str]] = ""
     fields: list[DatasourceField] = field(default_factory=list)
     # "choice" means the user must pick from auth_methods before collecting fields
+    # empty string means no choice, just collect fields from the top-level "fields" list
     auth_method: str = ""
     auth_methods: list[AuthMethod] = field(default_factory=list)
     test_snippet: str = ""
@@ -76,7 +77,9 @@ def _parse_file(path: Path) -> dict[str, DatasourceEngine]:
         yaml_text = match.group(3)
         try:
             data = yaml.safe_load(yaml_text)
-        except yaml.YAMLError:
+        except yaml.YAMLError as exc:
+            import sys
+            print(f"[anton] Warning: skipping malformed YAML block in {path}: {exc}", file=sys.stderr)
             continue
         if not isinstance(data, dict) or "engine" not in data:
             continue
@@ -126,14 +129,17 @@ class DatasourceRegistry:
         return self._engines.get(engine_slug)
 
     def find_by_name(self, display_name: str) -> DatasourceEngine | None:
-        """Case-insensitive match on display_name or engine slug."""
+        """Case-insensitive match on display_name or engine slug.
+        """
         needle = display_name.strip().lower()
         for engine in self._engines.values():
-            if engine.display_name.lower() == needle:
+            if engine.display_name.lower() == needle or engine.engine.lower() == needle:
                 return engine
-            if engine.engine.lower() == needle:
-                return engine
-        return None
+        matches = [
+            e for e in self._engines.values()
+            if needle in e.display_name.lower() or needle in e.engine.lower()
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     def all_engines(self) -> list[DatasourceEngine]:
         return sorted(self._engines.values(), key=lambda e: e.display_name)

@@ -58,6 +58,9 @@ tool-call loop inside scratchpad code. The LLM reasons and calls your tools iter
 handle_tool(name, inputs) is a plain sync function returning a string result. Use this for \
 multi-step AI workflows like classification, extraction, or analysis with structured outputs.
 - All .anton/.env secrets are available as environment variables (os.environ).
+- Data source credentials are injected as DS_<FIELD_UPPER> environment \
+variables (e.g. DS_HOST, DS_PASSWORD, DS_ACCESS_TOKEN). Use them directly \
+in scratchpad code — never read ~/.anton/data_vault/ files directly.
 - When the user asks how you solved something or wants to see your work, use the scratchpad \
 dump action — it shows a clean notebook-style summary without wasting tokens on reformatting.
 - Always use print() to produce output — scratchpad captures stdout.

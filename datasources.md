@@ -10,6 +10,7 @@ before any scratchpad code runs. Never embed raw values in code strings.
 ---
 
 ## PostgreSQL
+
 ```yaml
 engine: postgres
 display_name: PostgreSQL
@@ -39,7 +40,107 @@ Common errors: "password authentication failed" → wrong password or user.
 
 ---
 
+## MySQL
+
+```yaml
+engine: mysql
+display_name: MySQL
+pip: mysql-connector-python
+name_from: database
+fields:
+  - { name: host,     required: true,  secret: false, description: "hostname or IP of your MySQL server" }
+  - { name: port,     required: false, secret: false, description: "port number", default: "3306" }
+  - { name: database, required: true,  secret: false, description: "database name to connect" }
+  - { name: user,     required: true,  secret: false, description: "MySQL username" }
+  - { name: password, required: true,  secret: true,  description: "MySQL password" }
+  - { name: ssl,      required: false, secret: false, description: "enable SSL (true/false)" }
+  - { name: ssl_ca,   required: false, secret: false, description: "path to CA certificate file" }
+  - { name: ssl_cert, required: false, secret: false, description: "path to client certificate file" }
+  - { name: ssl_key,  required: false, secret: false, description: "path to client private key file" }
+test_snippet: |
+  import mysql.connector, os
+  conn = mysql.connector.connect(
+      host=os.environ['DS_HOST'],
+      port=int(os.environ.get('DS_PORT', '3306')),
+      database=os.environ['DS_DATABASE'],
+      user=os.environ['DS_USER'],
+      password=os.environ['DS_PASSWORD'],
+  )
+  conn.close()
+  print("ok")
+```
+
+---
+
+## MariaDB
+
+```yaml
+engine: mariadb
+display_name: MariaDB
+pip: mysql-connector-python
+name_from: database
+fields:
+  - { name: host,     required: true,  secret: false, description: "hostname or IP of your MariaDB server" }
+  - { name: port,     required: false, secret: false, description: "port number", default: "3306" }
+  - { name: database, required: true,  secret: false, description: "database name to connect" }
+  - { name: user,     required: true,  secret: false, description: "MariaDB username" }
+  - { name: password, required: true,  secret: true,  description: "MariaDB password" }
+  - { name: ssl,      required: false, secret: false, description: "enable SSL (true/false)" }
+  - { name: ssl_ca,   required: false, secret: false, description: "path to CA certificate file" }
+  - { name: ssl_cert, required: false, secret: false, description: "path to client certificate file" }
+  - { name: ssl_key,  required: false, secret: false, description: "path to client private key file" }
+test_snippet: |
+  import mysql.connector, os
+  conn = mysql.connector.connect(
+      host=os.environ['DS_HOST'],
+      port=int(os.environ.get('DS_PORT', '3306')),
+      database=os.environ['DS_DATABASE'],
+      user=os.environ['DS_USER'],
+      password=os.environ['DS_PASSWORD'],
+  )
+  conn.close()
+  print("ok")
+```
+
+MariaDB is wire-compatible with MySQL, so the mysql-connector-python driver works for both.
+
+---
+
+## Microsoft SQL Server
+
+```yaml
+engine: mssql
+display_name: Microsoft SQL Server
+pip: pymssql
+name_from: database
+fields:
+  - { name: host,     required: true,  secret: false, description: "hostname or IP of the SQL Server (for Azure use server field instead)" }
+  - { name: port,     required: false, secret: false, description: "port number", default: "1433" }
+  - { name: database, required: true,  secret: false, description: "database name" }
+  - { name: user,     required: true,  secret: false, description: "SQL Server username" }
+  - { name: password, required: true,  secret: true,  description: "SQL Server password" }
+  - { name: server,   required: false, secret: false, description: "server name — use for named instances or Azure SQL (e.g. myserver.database.windows.net)" }
+  - { name: schema,   required: false, secret: false, description: "schema name (defaults to dbo)" }
+test_snippet: |
+  import pymssql, os
+  conn = pymssql.connect(
+      server=os.environ.get('DS_SERVER') or os.environ['DS_HOST'],
+      port=os.environ.get('DS_PORT', '1433'),
+      database=os.environ['DS_DATABASE'],
+      user=os.environ['DS_USER'],
+      password=os.environ['DS_PASSWORD'],
+  )
+  conn.close()
+  print("ok")
+```
+
+For Azure SQL Database use `server` field with value like `myserver.database.windows.net`.
+For Windows Authentication omit user/password and ensure pymssql is built with Kerberos support.
+
+---
+
 ## HubSpot
+
 ```yaml
 engine: hubspot
 display_name: HubSpot
@@ -71,6 +172,7 @@ For Private App Token: HubSpot → Settings → Integrations → Private Apps �
 Recommended scopes: `crm.objects.contacts.read`, `crm.objects.deals.read`, `crm.objects.companies.read`.
 
 For OAuth2: collect client_id and client_secret, then use the scratchpad to:
+
 1. Build the authorization URL using `auth_url` + params above
 2. Start a local HTTP server on port 8099 to catch the callback
 3. Open the URL in the user's browser with `webbrowser.open()`
@@ -80,7 +182,347 @@ For OAuth2: collect client_id and client_secret, then use the scratchpad to:
 ---
 
 ## Snowflake
-...
+
+```yaml
+engine: snowflake
+display_name: Snowflake
+pip: snowflake-connector-python
+name_from: [account, database]
+auth_method: choice
+auth_methods:
+  - name: password
+    display: "Username / Password"
+    fields:
+      - { name: account,   required: true,  secret: false, description: "Snowflake account identifier (e.g. xy12345.us-east-1 or orgname-accountname)" }
+      - { name: user,      required: true,  secret: false, description: "Snowflake username" }
+      - { name: password,  required: true,  secret: true,  description: "Snowflake password" }
+      - { name: database,  required: true,  secret: false, description: "database name" }
+      - { name: schema,    required: false, secret: false, description: "schema name (defaults to PUBLIC)" }
+      - { name: warehouse, required: false, secret: false, description: "warehouse to use for queries" }
+      - { name: role,      required: false, secret: false, description: "role to assume" }
+  - name: key_pair
+    display: "Key-Pair Authentication"
+    fields:
+      - { name: account,                required: true,  secret: false, description: "Snowflake account identifier" }
+      - { name: user,                   required: true,  secret: false, description: "Snowflake username" }
+      - { name: private_key,            required: true,  secret: true,  description: "PEM-formatted private key content" }
+      - { name: private_key_passphrase, required: false, secret: true,  description: "passphrase for encrypted private key" }
+      - { name: database,               required: true,  secret: false, description: "database name" }
+      - { name: schema,                 required: false, secret: false, description: "schema name" }
+      - { name: warehouse,              required: false, secret: false, description: "warehouse to use" }
+      - { name: role,                   required: false, secret: false, description: "role to assume" }
+test_snippet: |
+  import snowflake.connector, os
+  conn = snowflake.connector.connect(
+      account=os.environ['DS_ACCOUNT'],
+      user=os.environ['DS_USER'],
+      password=os.environ.get('DS_PASSWORD', ''),
+      database=os.environ.get('DS_DATABASE', ''),
+      schema=os.environ.get('DS_SCHEMA', 'PUBLIC'),
+      warehouse=os.environ.get('DS_WAREHOUSE', ''),
+  )
+  conn.close()
+  print("ok")
+```
+
+Account identifier: Admin → Accounts → hover your account name to reveal the identifier.
+Format is either `<orgname>-<accountname>` or `<accountlocator>.<region>.<cloud>`.
+
+---
+
+## Oracle Database
+
+```yaml
+engine: oracle_database
+display_name: Oracle Database
+pip: oracledb
+name_from: [host, service_name]
+fields:
+  - { name: user,         required: true,  secret: false, description: "Oracle database username" }
+  - { name: password,     required: true,  secret: true,  description: "Oracle database password" }
+  - { name: host,         required: false, secret: false, description: "hostname or IP address of the Oracle server" }
+  - { name: port,         required: false, secret: false, description: "port number (default 1521)", default: "1521" }
+  - { name: service_name, required: false, secret: false, description: "Oracle service name (preferred over SID)" }
+  - { name: sid,          required: false, secret: false, description: "Oracle SID — use service_name if possible" }
+  - { name: dsn,          required: false, secret: false, description: "full DSN string — overrides host/port/service_name" }
+  - { name: auth_mode,    required: false, secret: false, description: "authorization mode (e.g. SYSDBA)" }
+test_snippet: |
+  import oracledb, os
+  dsn = os.environ.get('DS_DSN') or oracledb.makedsn(
+      os.environ.get('DS_HOST', 'localhost'),
+      os.environ.get('DS_PORT', '1521'),
+      service_name=os.environ.get('DS_SERVICE_NAME', ''),
+  )
+  conn = oracledb.connect(user=os.environ['DS_USER'], password=os.environ['DS_PASSWORD'], dsn=dsn)
+  conn.close()
+  print("ok")
+```
+
+oracledb runs in thin mode by default (no Oracle Client libraries needed).
+Set `auth_mode` to `SYSDBA` or `SYSOPER` for privileged connections.
+
+---
+
+## Google BigQuery
+
+```yaml
+engine: bigquery
+display_name: Google BigQuery
+pip: google-cloud-bigquery
+name_from: [project_id, dataset]
+fields:
+  - { name: project_id,           required: true,  secret: false, description: "GCP project ID containing your BigQuery datasets" }
+  - { name: dataset,              required: true,  secret: false, description: "BigQuery dataset name" }
+  - { name: service_account_json, required: false, secret: true,  description: "contents of service account JSON key file (paste the full JSON)" }
+  - { name: service_account_keys, required: false, secret: false, description: "path to service account JSON key file on disk" }
+test_snippet: |
+  import json, os
+  from google.cloud import bigquery
+  from google.oauth2 import service_account
+
+  sa_json = os.environ.get('DS_SERVICE_ACCOUNT_JSON', '')
+  if sa_json:
+      creds = service_account.Credentials.from_service_account_info(
+          json.loads(sa_json),
+          scopes=['https://www.googleapis.com/auth/bigquery.readonly'],
+      )
+      client = bigquery.Client(project=os.environ['DS_PROJECT_ID'], credentials=creds)
+  else:
+      client = bigquery.Client(project=os.environ['DS_PROJECT_ID'])
+  list(client.list_datasets())
+  print("ok")
+```
+
+To create a service account key: GCP Console → IAM → Service Accounts → your account →
+Keys → Add Key → JSON. Grant the account `BigQuery Data Viewer` + `BigQuery Job User` roles.
+
+---
+
+## Amazon Redshift
+
+```yaml
+engine: redshift
+display_name: Amazon Redshift
+pip: psycopg2-binary
+name_from: [host, database]
+fields:
+  - { name: host,     required: true,  secret: false, description: "Redshift cluster endpoint (e.g. mycluster.abc123.us-east-1.redshift.amazonaws.com)" }
+  - { name: port,     required: false, secret: false, description: "port number", default: "5439" }
+  - { name: database, required: true,  secret: false, description: "database name" }
+  - { name: user,     required: true,  secret: false, description: "Redshift username" }
+  - { name: password, required: true,  secret: true,  description: "Redshift password" }
+  - { name: schema,   required: false, secret: false, description: "schema name (defaults to public)" }
+  - { name: sslmode,  required: false, secret: false, description: "SSL mode: require (default), verify-ca, verify-full, disable", default: "require" }
+test_snippet: |
+  import psycopg2, os
+  conn = psycopg2.connect(
+      host=os.environ['DS_HOST'],
+      port=int(os.environ.get('DS_PORT', '5439')),
+      dbname=os.environ['DS_DATABASE'],
+      user=os.environ['DS_USER'],
+      password=os.environ['DS_PASSWORD'],
+      sslmode=os.environ.get('DS_SSLMODE', 'require'),
+  )
+  conn.close()
+  print("ok")
+```
+
+Redshift is PostgreSQL-compatible. Find the cluster endpoint in AWS Console →
+Redshift → Clusters → your cluster → Endpoint (omit the port suffix).
+
+---
+
+## Databricks
+
+```yaml
+engine: databricks
+display_name: Databricks
+pip: databricks-sql-connector
+name_from: [server_hostname, catalog]
+fields:
+  - { name: server_hostname,      required: true,  secret: false, description: "server hostname for the cluster or SQL warehouse (from JDBC/ODBC connection string)" }
+  - { name: http_path,            required: true,  secret: false, description: "HTTP path of the cluster or SQL warehouse" }
+  - { name: access_token,         required: true,  secret: true,  description: "Databricks personal access token" }
+  - { name: catalog,              required: false, secret: false, description: "Unity Catalog name (defaults to hive_metastore)" }
+  - { name: schema,               required: false, secret: false, description: "schema (database) to use" }
+  - { name: session_configuration, required: false, secret: false, description: "Spark session configuration as key=value pairs" }
+test_snippet: |
+  from databricks import sql as dbsql
+  import os
+  conn = dbsql.connect(
+      server_hostname=os.environ['DS_SERVER_HOSTNAME'],
+      http_path=os.environ['DS_HTTP_PATH'],
+      access_token=os.environ['DS_ACCESS_TOKEN'],
+      catalog=os.environ.get('DS_CATALOG', ''),
+      schema=os.environ.get('DS_SCHEMA', ''),
+  )
+  conn.close()
+  print("ok")
+```
+
+Personal access token: User Settings → Developer → Access Tokens → Generate New Token.
+HTTP path and server hostname: SQL Warehouses → your warehouse → Connection Details tab.
+
+---
+
+## DuckDB
+
+```yaml
+engine: duckdb
+display_name: DuckDB
+pip: duckdb
+name_from: database
+fields:
+  - { name: database,         required: false, secret: false, description: "path to DuckDB database file; omit or use :memory: for in-memory database", default: ":memory:" }
+  - { name: motherduck_token, required: false, secret: true,  description: "MotherDuck access token for connecting to a MotherDuck cloud database" }
+  - { name: read_only,        required: false, secret: false, description: "open in read-only mode (true/false)", default: "false" }
+test_snippet: |
+  import duckdb, os
+  db_path = os.environ.get('DS_DATABASE', ':memory:')
+  token = os.environ.get('DS_MOTHERDUCK_TOKEN', '')
+  if token:
+      conn = duckdb.connect(f'md:{db_path}?motherduck_token={token}')
+  else:
+      conn = duckdb.connect(db_path)
+  conn.execute('SELECT 1').fetchone()
+  conn.close()
+  print("ok")
+```
+
+For MotherDuck, use `database` as the MotherDuck database name (e.g. `my_db`) and provide
+the access token. For local files, provide the path to a `.duckdb` file.
+
+---
+
+## pgvector
+
+```yaml
+engine: pgvector
+display_name: pgvector
+pip: pgvector psycopg2-binary
+name_from: database
+fields:
+  - { name: host,     required: true,  secret: false, description: "hostname or IP of your PostgreSQL server with pgvector extension" }
+  - { name: port,     required: false, secret: false, description: "port number", default: "5432" }
+  - { name: database, required: true,  secret: false, description: "database name" }
+  - { name: user,     required: true,  secret: false, description: "database username" }
+  - { name: password, required: true,  secret: true,  description: "database password" }
+  - { name: schema,   required: false, secret: false, description: "schema name (defaults to public)" }
+  - { name: sslmode,  required: false, secret: false, description: "SSL mode: prefer, require, disable" }
+test_snippet: |
+  import psycopg2, os
+  conn = psycopg2.connect(
+      host=os.environ['DS_HOST'],
+      port=int(os.environ.get('DS_PORT', '5432')),
+      dbname=os.environ['DS_DATABASE'],
+      user=os.environ['DS_USER'],
+      password=os.environ['DS_PASSWORD'],
+  )
+  cur = conn.cursor()
+  cur.execute("SELECT extname FROM pg_extension WHERE extname = 'vector'")
+  if not cur.fetchone():
+      raise RuntimeError("pgvector extension not installed — run: CREATE EXTENSION vector;")
+  conn.close()
+  print("ok")
+```
+
+pgvector must be installed in the PostgreSQL instance: `CREATE EXTENSION IF NOT EXISTS vector;`
+Managed options: Supabase, Neon, and AWS RDS for PostgreSQL all support pgvector.
+
+---
+
+## ChromaDB
+
+```yaml
+engine: chromadb
+display_name: ChromaDB
+pip: chromadb
+name_from: host
+fields:
+  - { name: host,              required: false, secret: false, description: "ChromaDB server host for HTTP client mode (omit for local in-process mode)" }
+  - { name: port,              required: false, secret: false, description: "ChromaDB server port", default: "8000" }
+  - { name: persist_directory, required: false, secret: false, description: "local directory for persistent storage (local mode only)" }
+test_snippet: |
+  import chromadb, os
+  host = os.environ.get('DS_HOST', '')
+  if host:
+      client = chromadb.HttpClient(
+          host=host,
+          port=int(os.environ.get('DS_PORT', '8000')),
+      )
+  else:
+      persist_dir = os.environ.get('DS_PERSIST_DIRECTORY', '')
+      if persist_dir:
+          client = chromadb.PersistentClient(path=persist_dir)
+      else:
+          client = chromadb.EphemeralClient()
+  client.heartbeat()
+  print("ok")
+```
+
+Three modes: HTTP client (connect to a running ChromaDB server), persistent local (file-backed),
+or ephemeral in-memory. For production, run `chroma run` to start the HTTP server.
+
+---
+
+## Salesforce
+
+```yaml
+engine: salesforce
+display_name: Salesforce
+pip: salesforce_api
+name_from: username
+fields:
+  - { name: username,      required: true,  secret: false, description: "Salesforce account username (email)" }
+  - { name: password,      required: true,  secret: true,  description: "Salesforce account password" }
+  - { name: client_id,     required: true,  secret: false, description: "consumer key from the connected app" }
+  - { name: client_secret, required: true,  secret: true,  description: "consumer secret from the connected app" }
+  - { name: is_sandbox,    required: false, secret: false, description: "true to connect to sandbox, false for production", default: "false" }
+test_snippet: |
+  import salesforce_api, os
+  sf = salesforce_api.Salesforce(
+      username=os.environ['DS_USERNAME'],
+      password=os.environ['DS_PASSWORD'],
+      client_id=os.environ['DS_CLIENT_ID'],
+      client_secret=os.environ['DS_CLIENT_SECRET'],
+      is_sandbox=os.environ.get('DS_IS_SANDBOX', 'false').lower() == 'true',
+  )
+  sf.query('SELECT Id FROM Account LIMIT 1')
+  print("ok")
+```
+
+To get client_id and client_secret: Setup → Apps → App Manager → New Connected App.
+Enable OAuth, add callback URL, select scopes (api, refresh_token).
+
+---
+
+## Shopify
+
+```yaml
+engine: shopify
+display_name: Shopify
+pip: ShopifyAPI
+name_from: shop_url
+fields:
+  - { name: shop_url,      required: true, secret: false, description: "your Shopify store URL (e.g. mystore.myshopify.com)" }
+  - { name: client_id,     required: true, secret: false, description: "client ID (API key) of the custom app" }
+  - { name: client_secret, required: true, secret: true,  description: "client secret (API secret key) of the custom app" }
+test_snippet: |
+  import shopify, os
+  shop_url = os.environ['DS_SHOP_URL'].rstrip('/')
+  if not shop_url.startswith('https://'):
+      shop_url = f'https://{shop_url}'
+  session = shopify.Session(shop_url, '2024-01', os.environ['DS_CLIENT_SECRET'])
+  shopify.ShopifyResource.activate_session(session)
+  shopify.Shop.current()
+  shopify.ShopifyResource.clear_session()
+  print("ok")
+```
+
+Create a custom app: Shopify Admin → Settings → Apps → Develop apps → Create an app.
+Grant required API permissions (read_products, read_orders, etc.) then install the app.
+
+---
 
 ## Adding a new data source
 

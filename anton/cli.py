@@ -442,11 +442,33 @@ def version() -> None:
     console.print(f"Anton v{__version__}")
 
 
-@app.command("connect-datasource")
-def connect_datasource(ctx: typer.Context) -> None:
-    """Connect a new datasource."""
-    #from anton.datasources import connect_new_datasource
-    print("Datasource connection flow is not implemented yet.")
+@app.command("connect-data-source")
+def connect_data_source(ctx: typer.Context) -> None:
+    """Connect a database or API to the Local Vault."""
+    import asyncio
+
+    from anton.chat import ChatSession, _handle_connect_datasource
+    from anton.llm.client import LLMClient
+    from anton.scratchpad import ScratchpadManager
+
     settings = _get_settings(ctx)
     _ensure_workspace(settings)
-    #connect_new_datasource(console, settings)
+    _ensure_api_key(settings)
+
+    llm_client = LLMClient.from_settings(settings)
+    scratchpads = ScratchpadManager(
+        coding_provider=settings.coding_provider,
+        coding_model=settings.coding_model,
+        coding_api_key=(
+            settings.anthropic_api_key
+            if settings.coding_provider == "anthropic"
+            else settings.openai_api_key
+        ) or "",
+    )
+    session = ChatSession(llm_client)
+
+    async def _run() -> None:
+        updated = await _handle_connect_datasource(console, scratchpads, session)
+        await updated._scratchpads.close_all()
+
+    asyncio.run(_run())

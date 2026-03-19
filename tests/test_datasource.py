@@ -729,3 +729,143 @@ class TestHandleConnectDatasource:
         assert len(conns) == 1
         saved = vault.load("postgresql", conns[0]["name"])
         assert set(saved.keys()) == {"host", "user", "password"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Credential scrubbing
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCredentialScrubbing:
+    """_scrub_credentials and _register_secret_vars."""
+
+    def setup_method(self):
+        # Reset the module-level sets before each test
+        from anton.chat import _DS_KNOWN_VARS, _DS_SECRET_VARS
+        _DS_SECRET_VARS.clear()
+        _DS_KNOWN_VARS.clear()
+
+    def test_register_secret_vars_adds_secret_fields(self, registry):
+        """Secret fields are added to _DS_SECRET_VARS; non-secret fields are not."""
+        from anton.chat import _DS_SECRET_VARS, _register_secret_vars
+
+        pg = registry.get("postgresql")
+        assert pg is not None
+        _register_secret_vars(pg)
+
+        assert "DS_PASSWORD" in _DS_SECRET_VARS
+        # host and port are not secret in the fixture definition
+        assert "DS_HOST" not in _DS_SECRET_VARS
+        assert "DS_PORT" not in _DS_SECRET_VARS
+
+    def test_scrub_replaces_registered_secret_value(self):
+        """A registered secret value is replaced with its placeholder."""
+        import os
+        from anton.chat import _DS_SECRET_VARS, _scrub_credentials
+
+        _DS_SECRET_VARS.add("DS_ACCESS_TOKEN")
+        os.environ["DS_ACCESS_TOKEN"] = "supersecrettoken123"
+        try:
+            result = _scrub_credentials("token is supersecrettoken123 here")
+            assert "supersecrettoken123" not in result
+            assert "[DS_ACCESS_TOKEN]" in result
+        finally:
+            del os.environ["DS_ACCESS_TOKEN"]
+            _DS_SECRET_VARS.discard("DS_ACCESS_TOKEN")
+
+    def test_scrub_leaves_non_secret_field_readable(self, registry):
+        """Non-secret DS_* values (host, port) are left untouched."""
+        import os
+        from anton.chat import _register_secret_vars, _scrub_credentials
+
+        pg = registry.get("postgresql")
+        assert pg is not None
+        _register_secret_vars(pg)
+
+        os.environ["DS_HOST"] = "db.example.com"
+        os.environ["DS_PASSWORD"] = "s3cr3tpassword99"
+        try:
+            result = _scrub_credentials("host=db.example.com pass=s3cr3tpassword99")
+            assert "db.example.com" in result          # host left readable
+            assert "s3cr3tpassword99" not in result    # password redacted
+            assert "[DS_PASSWORD]" in result
+        finally:
+            del os.environ["DS_HOST"]
+            del os.environ["DS_PASSWORD"]
+
+    def test_scrub_skips_short_values(self):
+        """Values of 8 characters or fewer are not scrubbed (e.g. port numbers)."""
+        import os
+        from anton.chat import _DS_SECRET_VARS, _scrub_credentials
+
+        _DS_SECRET_VARS.add("DS_PASSWORD")
+        os.environ["DS_PASSWORD"] = "short"  # 5 chars — under threshold
+        try:
+            result = _scrub_credentials("password=short")
+            assert "short" in result
+        finally:
+            del os.environ["DS_PASSWORD"]
+            _DS_SECRET_VARS.discard("DS_PASSWORD")
+
+    def test_scrub_fallback_redacts_unknown_long_ds_vars(self):
+        """Long DS_* vars not in _DS_SECRET_VARS are scrubbed as a safety fallback."""
+        import os
+        from anton.chat import _scrub_credentials
+
+        # _DS_SECRET_VARS is empty (cleared in setup_method)
+        os.environ["DS_WEBHOOK_SECRET"] = "wh_sec_abcdefgh1234"
+        try:
+            result = _scrub_credentials("secret=wh_sec_abcdefgh1234 here")
+            assert "wh_sec_abcdefgh1234" not in result
+            assert "[DS_WEBHOOK_SECRET]" in result
+        finally:
+            del os.environ["DS_WEBHOOK_SECRET"]
+
+    @pytest.mark.asyncio
+    async def test_register_and_scrub_on_connect(self, registry, vault_dir):
+        """After _handle_connect_datasource, the new secret var is immediately scrubbed."""
+        import os
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from anton.chat import _DS_SECRET_VARS, _handle_connect_datasource, _scrub_credentials
+
+        vault = DataVault(vault_dir=vault_dir)
+
+        session = MagicMock()
+        session._history = []
+        session._cortex = None
+
+        pad = AsyncMock()
+        pad.execute = AsyncMock(
+            return_value=MagicMock(stdout="ok", stderr="", error=None)
+        )
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        secret_pw = "supersecretpassword999"
+        prompt_responses = iter([
+            "PostgreSQL",   # engine
+            "y",            # have all credentials
+            "db.host.com",  # host
+            "5432",         # port
+            "mydb",         # database
+            "alice",        # user
+            secret_pw,      # password
+            "public",       # schema (optional, skip)
+        ])
+
+        with (
+            patch("anton.chat.DataVault", return_value=vault),
+            patch("anton.chat.DatasourceRegistry", return_value=registry),
+            patch("rich.prompt.Prompt.ask", side_effect=lambda *a, **kw: next(prompt_responses)),
+        ):
+            await _handle_connect_datasource(MagicMock(), session._scratchpads, session)
+
+        # After connect, password should be in the secret set and scrubbed
+        assert "DS_PASSWORD" in _DS_SECRET_VARS
+        os.environ["DS_PASSWORD"] = secret_pw
+        try:
+            result = _scrub_credentials(f"error: auth failed with {secret_pw}")
+            assert secret_pw not in result
+            assert "[DS_PASSWORD]" in result
+        finally:
+            del os.environ["DS_PASSWORD"]

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import json as _json
+import re as _re
 import sys
 import time
 from collections.abc import AsyncIterator, Callable
@@ -40,6 +42,10 @@ from anton.tools import (
     format_cell_result,
     prepare_scratchpad_exec,
 )
+from anton.data_vault import DataVault
+from anton.datasource_registry import DatasourceEngine, DatasourceField, DatasourceRegistry, _parse_file as _ds_parse_file
+from rich.prompt import Confirm, Prompt
+
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -172,6 +178,10 @@ class ChatSession:
             md_context = self._workspace.build_anton_md_context()
             if md_context:
                 prompt += md_context
+        # Inject connected datasource context without credentials
+        ds_ctx = _build_datasource_context()
+        if ds_ctx:
+            prompt += ds_ctx
         return prompt
 
     # Packages the LLM is most likely to care about when writing scratchpad code.
@@ -403,6 +413,7 @@ class ChatSession:
                 except Exception as exc:
                     result_text = f"Tool '{tc.name}' failed: {exc}"
 
+                result_text = _scrub_credentials(result_text)
                 result_text = _apply_error_tracking(
                     result_text, tc.name, error_streak, resilience_nudged,
                 )
@@ -648,6 +659,7 @@ class ChatSession:
                             tool=tc.name,
                         )
 
+                    result_text = _scrub_credentials(result_text)
                     result_text = _apply_error_tracking(
                         result_text, tc.name, error_streak, resilience_nudged,
                     )
@@ -895,6 +907,77 @@ def _apply_error_tracking(
         )
 
     return result_text
+
+
+# DS_* var names whose values are known to be secret (passwords, tokens, keys).
+# Populated at startup and after each successful connect.
+_DS_SECRET_VARS: set[str] = set()
+
+# DS_* var names for **ALL** fields of registered engines.
+_DS_KNOWN_VARS: set[str] = set()
+
+
+def _register_secret_vars(engine_def: "DatasourceEngine") -> None:
+    """Record which DS_* var names correspond to secret fields for engine_def.
+    """
+    all_fields = list(engine_def.fields)
+    for am in (engine_def.auth_methods or []):
+        all_fields.extend(am.fields)
+    for f in all_fields:
+        key = f"DS_{f.name.upper()}"
+        _DS_KNOWN_VARS.add(key)
+        if f.secret:
+            _DS_SECRET_VARS.add(key)
+
+
+def _scrub_credentials(text: str) -> str:
+    """Remove secret DS_* values from scratchpad output before it reaches the LLM.
+
+    Only redacts vars registered as secret via _register_secret_vars (driven by
+    DatasourceField.secret=true in datasources.md).  Non-secret fields of known
+    engines (DS_HOST, DS_PORT, DS_BASE_URL, …) are left readable so the LLM can
+    reason about connection errors.  For truly unknown DS_* vars (custom engines
+    not yet in the registry) the fallback scrubs any long value — conservative
+    but safe.
+    """
+    for key in _DS_SECRET_VARS:
+        value = os.environ.get(key, "")
+        if not value or len(value) <= 8:
+            continue
+        text = text.replace(value, f"[{key}]")
+    for key, value in os.environ.items():
+        if not key.startswith("DS_") or key in _DS_KNOWN_VARS:
+            continue
+        if not value or len(value) <= 8:
+            continue
+        text = text.replace(value, f"[{key}]")
+    return text
+
+
+def _build_datasource_context() -> str:
+    """Build a system-prompt section listing available DS_* env vars by name.
+
+    Shows the LLM what data sources are connected and which environment
+    variable names to use — without exposing any credential values.
+    """
+    try:
+        vault = DataVault()
+        conns = vault.list_connections()
+    except Exception:
+        return ""
+    if not conns:
+        return ""
+    lines = ["\n\n## Connected Data Sources"]
+    lines.append(
+        "Credentials are pre-injected as DS_* environment variables. "
+        "Use them directly in scratchpad code. "
+        "Never read ~/.anton/data_vault/ files directly.\n"
+    )
+    for c in conns:
+        fields = vault.load(c["engine"], c["name"]) or {}
+        var_names = ", ".join(f"DS_{k.upper()}" for k in fields)
+        lines.append(f"- `{c['engine']}-{c['name']}` → {var_names}")
+    return "\n".join(lines)
 
 
 def _build_runtime_context(settings: AntonSettings) -> str:
@@ -1642,7 +1725,7 @@ async def _handle_data_connections(
     session: ChatSession,
 ) -> ChatSession:
     """View and manage stored keys and connections across global and project vaults."""
-    from rich.prompt import Confirm, Prompt
+    from rich.prompt import Prompt
 
     from anton.workspace import Workspace as _Workspace
 
@@ -2182,6 +2265,156 @@ def _human_size(nbytes: int) -> str:
     return f"{nbytes:.1f}TB"
 
 
+async def _handle_add_custom_datasource(
+    console: Console,
+    name: str,
+    registry,
+    session: "ChatSession",
+):
+    """Ask the user how they authenticate, use the LLM to identify fields, save definition."""
+
+    console.print()
+    user_answer = Prompt.ask(
+        f"[anton.cyan](anton)[/] '{name}' isn't in my built-in list.\n"
+        f"        How do you authenticate with it? "
+        f"Describe what you have or paste credentials directly",
+        console=console,
+    )
+    if not user_answer.strip():
+        return None
+
+    console.print()
+    console.print("[anton.muted]    Got it — working out the connection details…[/]")
+
+    try:
+        response = await session._llm.plan(
+            system="You are a data source connection expert.",
+            messages=[{
+                "role": "user",
+                "content": (
+                    f"The user wants to connect to '{name}' and said: {user_answer}\n\n"
+                    "Return ONLY valid JSON (no markdown fences, no commentary):\n"
+                    '{"display_name":"Human-readable name","pip":"pip-package or empty string",'
+                    '"fields":[{"name":"snake_case_name","value":"value if given inline else empty",'
+                    '"secret":true or false,"required":true or false,"description":"what it is"}]}'
+                ),
+            }],
+            max_tokens=1024,
+        )
+        text = response.content.strip()
+        text = _re.sub(r"^```[^\n]*\n|```\s*$", "", text, flags=_re.MULTILINE).strip()
+        data = _json.loads(text)
+    except Exception:
+        console.print("[anton.warning]        Couldn't identify connection details. Try again.[/]")
+        console.print()
+        return None
+
+    raw_fields = data.get("fields") or []
+    fields: list[DatasourceField] = []
+    for f in raw_fields:
+        if not isinstance(f, dict) or not f.get("name"):
+            continue
+        fields.append(DatasourceField(
+            name=f["name"],
+            required=bool(f.get("required", True)),
+            secret=bool(f.get("secret", False)),
+            description=str(f.get("description", "")),
+        ))
+
+    if not fields:
+        console.print("[anton.warning]    Couldn't identify any connection fields.[/]")
+        console.print()
+        return None
+
+    display_name = str(data.get("display_name", name))
+    pip_pkg = str(data.get("pip", ""))
+
+    # Show summary
+    console.print()
+    console.print("      [bold]── What I'll save ──────────────────────────[/]")
+    credentials: dict[str, str] = {}
+    for f, raw in zip(fields, raw_fields):
+        inline_value = str(raw.get("value", "")).strip()
+        if f.secret and inline_value:
+            console.print(f"        • [bold]{f.name:<14}[/] (secret — provided, stored securely)")
+            credentials[f.name] = inline_value
+        elif f.secret:
+            console.print(f"        • [bold]{f.name:<14}[/] (secret — I'll ask for this)")
+        else:
+            val_display = inline_value or "[anton.muted]<to be collected>[/]"
+            console.print(f"        • [bold]{f.name:<14}[/] {val_display}")
+            if inline_value:
+                credentials[f.name] = inline_value
+    console.print()
+
+    # Prompt for any secret fields not provided inline
+    for f, raw in zip(fields, raw_fields):
+        if not f.secret:
+            continue
+        if str(raw.get("value", "")).strip():
+            continue
+        value = Prompt.ask(
+            f"[anton.cyan](anton)[/] {f.name}",
+            password=True,
+            console=console,
+            default="",
+        )
+        if value:
+            credentials[f.name] = value
+
+    if not credentials:
+        console.print("[anton.warning]        No credentials collected. Aborting.[/]")
+        console.print()
+        return None
+
+    # Build engine slug and write definition to ~/.anton/datasources.md
+    slug = _re.sub(r"[^\w]", "_", display_name.lower()).strip("_")
+    field_lines = "\n".join(
+        f"  - {{ name: {f.name}, required: {str(f.required).lower()}, "
+        f"secret: {str(f.secret).lower()}, description: \"{f.description}\" }}"
+        for f in fields
+    )
+    yaml_block = (
+        f"\n---\n\n## {display_name}\n"
+        "```yaml\n"
+        f"engine: {slug}\n"
+        f"display_name: {display_name}\n"
+        + (f"pip: {pip_pkg}\n" if pip_pkg else "")
+        + f"fields:\n{field_lines}\n"
+        "```\n"
+    )
+    user_ds_path = Path("~/.anton/datasources.md").expanduser()
+    tmp_path = user_ds_path.with_suffix(".tmp")
+
+    # Write to temp, validate it parses, then rename atomically
+    existing = user_ds_path.read_text(encoding="utf-8") if user_ds_path.is_file() else ""
+    tmp_path.write_text(existing + yaml_block, encoding="utf-8")
+
+    parsed = _ds_parse_file(tmp_path)
+    if slug in parsed:
+        import shutil
+        shutil.move(str(tmp_path), str(user_ds_path))
+    else:
+        tmp_path.unlink(missing_ok=True)
+        console.print(
+            "[anton.warning]Could not validate engine definition — "
+            "credentials saved but engine not written to datasources.md.[/]"
+        )
+
+    registry._load()
+    engine_def = registry.get(slug)
+    if engine_def is None:
+        # Fallback: construct inline so the flow can continue even if parse failed
+        engine_def = DatasourceEngine(
+            engine=slug,
+            display_name=display_name,
+            pip=pip_pkg,
+            fields=fields,
+        )
+
+    return engine_def, credentials
+
+
 async def _handle_connect_datasource(
     console: Console,
     scratchpads: ScratchpadManager,
@@ -2190,13 +2423,9 @@ async def _handle_connect_datasource(
     """Interactive flow for connecting a new data source to the Local Vault."""
     from rich.prompt import Prompt
 
-    from anton.data_vault import DataVault
-    from anton.datasource_registry import DatasourceRegistry
-
     vault = DataVault()
     registry = DatasourceRegistry()
 
-    # ── Step 1: ask which engine ──────────────────────────────────
     console.print()
     engine_names = ", ".join(e.display_name for e in registry.all_engines())
     answer = Prompt.ask(
@@ -2206,11 +2435,52 @@ async def _handle_connect_datasource(
     )
     engine_def = registry.find_by_name(answer.strip())
     if engine_def is None:
-        console.print(f"[anton.warning]Unknown data source '{answer}'. Available:[/]")
-        for e in registry.all_engines():
-            console.print(f"  • {e.display_name}")
-        console.print()
-        return session
+        # Check whether the input is ambiguous before treating it as unknown
+        needle = answer.strip().lower()
+        candidates = [
+            e for e in registry.all_engines()
+            if needle in e.display_name.lower() or needle in e.engine.lower()
+        ]
+        if len(candidates) > 1:
+            console.print()
+            console.print(
+                f"[anton.warning](anton)[/] '{answer}' matches multiple engines — "
+                "which one did you mean?"
+            )
+            console.print()
+            for i, e in enumerate(candidates, 1):
+                console.print(f"        {i}. {e.display_name}")
+            console.print()
+            pick = Prompt.ask(
+                "[anton.cyan](anton)[/] Enter a number",
+                console=console,
+            ).strip()
+            try:
+                engine_def = candidates[int(pick) - 1]
+            except (ValueError, IndexError):
+                console.print("[anton.warning]Invalid choice. Aborting.[/]")
+                console.print()
+                return session
+        else:
+            result = await _handle_add_custom_datasource(console, answer.strip(), registry, session)
+            if result is None:
+                return session
+            engine_def, credentials = result
+            conn_num = vault.next_connection_number(engine_def.engine)
+            vault.save(engine_def.engine, str(conn_num), credentials)
+            slug = f"{engine_def.engine}-{conn_num}"
+            console.print(
+                f"        Credentials saved to Local Vault as [bold]\"{slug}\"[/bold]."
+            )
+            console.print()
+            session._history.append({
+                "role": "assistant",
+                "content": (
+                    f"I've saved a {engine_def.display_name} connection named \"{slug}\" "
+                    f"to the Local Vault. I can now query this data source when needed."
+                ),
+            })
+            return session
 
     # ── Step 2a: auth method choice (if engine requires it) ───────
     active_fields = engine_def.fields
@@ -2237,7 +2507,6 @@ async def _handle_connect_datasource(
             return session
         active_fields = chosen_method.fields
 
-    # ── Step 2b: show fields ──────────────────────────────────────
     required_fields = [f for f in active_fields if f.required]
     optional_fields = [f for f in active_fields if not f.required]
 
@@ -2291,7 +2560,6 @@ async def _handle_connect_datasource(
         fields_to_collect = matched if matched else active_fields
         partial = False
 
-    # ── Step 4: collect credentials ──────────────────────────────
     console.print()
     credentials: dict[str, str] = {}
 
@@ -2314,7 +2582,6 @@ async def _handle_connect_datasource(
         if value:
             credentials[f.name] = value
 
-    # ── Partial save ─────────────────────────────────────────────
     if partial:
         n = vault.next_connection_number(engine_def.engine)
         auto_name = str(n)
@@ -2329,7 +2596,6 @@ async def _handle_connect_datasource(
         console.print()
         return session
 
-    # ── Step 5: test connection ───────────────────────────────────
     if engine_def.test_snippet:
         while True:
             console.print()
@@ -2377,7 +2643,7 @@ async def _handle_connect_datasource(
 
                 # Re-collect secret fields only
                 console.print()
-                for f in engine_def.fields:
+                for f in active_fields:
                     if not f.secret:
                         continue
                     value = Prompt.ask(
@@ -2388,20 +2654,20 @@ async def _handle_connect_datasource(
                     )
                     if value:
                         credentials[f.name] = value
-                continue  # retry test
+                # Try again with updated credentials
+                continue
 
             # Success
             console.print("[anton.success]        ✓ Connected successfully![/]")
             break
 
-    # ── Step 6: save + write topic ───────────────────────────────
     conn_name = registry.derive_name(engine_def, credentials)
-    if not conn_name or conn_name == engine_def.engine:
-        # Fall back to auto-number if name_from didn't resolve
+    if not conn_name:
         n = vault.next_connection_number(engine_def.engine)
         conn_name = str(n)
 
     vault.save(engine_def.engine, conn_name, credentials)
+    _register_secret_vars(engine_def)
     slug = f"{engine_def.engine}-{conn_name}"
     console.print(
         f"        Credentials saved to Local Vault as [bold]\"{slug}\"[/bold]."
@@ -2422,12 +2688,62 @@ async def _handle_connect_datasource(
     return session
 
 
+def _handle_list_data_sources(console: Console) -> None:
+    """Print all saved Local Vault connections with their DS_* var names."""
+    vault = DataVault()
+    conns = vault.list_connections()
+    console.print()
+    if not conns:
+        console.print("[anton.muted]No data sources connected yet.[/]")
+        console.print("[anton.muted]Use /connect-data-source to add one.[/]")
+        console.print()
+        return
+    console.print("[anton.cyan]Connected data sources:[/]")
+    console.print()
+    for c in conns:
+        fields = vault.load(c["engine"], c["name"]) or {}
+        var_names = ", ".join(f"DS_{k.upper()}" for k in fields)
+        slug = f"{c['engine']}-{c['name']}"
+        complete = "✓" if var_names else "⚠ incomplete"
+        console.print(f"  [bold]{slug}[/]  {complete}")
+        if var_names:
+            console.print(f"  [anton.muted]  {var_names}[/]")
+    console.print()
+
+
+def _handle_remove_data_source(console: Console, slug: str) -> None:
+    """Delete a connection from the Local Vault by slug (engine-name)."""
+    vault = DataVault()
+    parts = slug.split("-", 1)
+    if len(parts) != 2:
+        console.print(
+            f"[anton.warning]Invalid name '{slug}'. Use engine-name format.[/]"
+        )
+        console.print()
+        return
+    engine, name = parts
+    if vault.load(engine, name) is None:
+        console.print(f"[anton.warning]No connection '{slug}' found.[/]")
+        console.print()
+        return
+    if Confirm.ask(
+        f"Remove '{slug}' from Local Vault?", default=False, console=console
+    ):
+        vault.delete(engine, name)
+        console.print(f"[anton.success]Removed {slug}.[/]")
+    else:
+        console.print("[anton.muted]Cancelled.[/]")
+    console.print()
+
+
 def _print_slash_help(console: Console) -> None:
     """Print available slash commands."""
     console.print()
     console.print("[anton.cyan]Available commands:[/]")
     console.print("  [bold]/connect[/]                — Connect to a Minds server and select a mind")
     console.print("  [bold]/connect-data-source[/]    — Connect a database or API to the Local Vault")
+    console.print("  [bold]/list-data-sources[/]      — List all saved data source connections")
+    console.print("  [bold]/remove-data-source[/]     — Remove a saved connection")
     console.print("  [bold]/data-connections[/]       — View and manage stored keys and connections")
     console.print("  [bold]/setup[/]                  — Configure models or memory settings")
     console.print("  [bold]/memory[/]                 — Show memory status dashboard")
@@ -2573,6 +2889,17 @@ async def _chat_loop(console: Console, settings: AntonSettings, *, resume: bool 
     # Workspace for anton.md and secret vault
     workspace = Workspace(settings.workspace_path)
     workspace.apply_env_to_process()
+
+    # Inject all Local Vault connections as DS_* env vars so every scratchpad
+    # subprocess inherits them. Must happen before any ChatSession is created.
+    _dv = DataVault()
+    _dreg = DatasourceRegistry()
+    for _conn in _dv.list_connections():
+        _dv.inject_env(_conn["engine"], _conn["name"])
+        _edef = _dreg.get(_conn["engine"])
+        if _edef is not None:
+            _register_secret_vars(_edef)
+    del _dv, _dreg
 
     # --- Memory system (brain-inspired architecture) ---
     global_memory_dir = Path.home() / ".anton" / "memory"
@@ -2786,6 +3113,35 @@ async def _chat_loop(console: Console, settings: AntonSettings, *, resume: bool 
                     session = await _handle_connect_datasource(
                         console, session._scratchpads, session,
                     )
+                    continue
+                elif cmd == "/list-data-sources":
+                    _handle_list_data_sources(console)
+                    continue
+                elif cmd == "/remove-data-source":
+                    arg = parts[1].strip() if len(parts) > 1 else ""
+                    if not arg:
+                        console.print(
+                            "[anton.warning]Usage: /remove-data-source"
+                            " <engine-name>[/]"
+                        )
+                    else:
+                        _handle_remove_data_source(console, arg)
+                    continue
+                elif cmd == "/edit-data-source":
+                    arg = parts[1].strip() if len(parts) > 1 else ""
+                    console.print(
+                        f"[anton.muted]/edit-data-source is not yet implemented. "
+                        f"To update '{arg}', use /remove-data-source {arg}"
+                        f" then /connect-data-source.[/]"
+                    )
+                    console.print()
+                    continue
+                elif cmd == "/test-data-source":
+                    console.print(
+                        "[anton.muted]/test-data-source is not yet"
+                        " implemented.[/]"
+                    )
+                    console.print()
                     continue
                 elif cmd == "/data-connections":
                     session = await _handle_data_connections(

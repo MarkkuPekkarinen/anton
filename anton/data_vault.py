@@ -36,7 +36,7 @@ class DataVault:
 
 
     def save(self, engine: str, name: str, credentials: dict[str, str]) -> Path:
-        """Write credentials as JSON. Creates vault dir if needed."""
+        """Write credentials as JSON atomically. Creates vault dir if needed."""
         self._ensure_dir()
         path = self._path_for(engine, name)
         data = {
@@ -45,8 +45,10 @@ class DataVault:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "fields": credentials,
         }
-        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        path.chmod(0o600)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.chmod(0o600)
+        tmp.rename(path)
         return path
 
     def load(self, engine: str, name: str) -> dict[str, str] | None:

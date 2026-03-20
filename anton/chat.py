@@ -114,6 +114,7 @@ class ChatSession:
         self._history_store = history_store
         self._session_id = session_id
         self._cancel_event = asyncio.Event()
+        self._active_datasource: str | None = None  # slug like "hubspot-2"
         self._scratchpads = ScratchpadManager(
             coding_provider=coding_provider,
             coding_model=getattr(llm_client, "coding_model", ""),
@@ -191,7 +192,7 @@ class ChatSession:
             if md_context:
                 prompt += md_context
         # Inject connected datasource context without credentials
-        ds_ctx = _build_datasource_context()
+        ds_ctx = _build_datasource_context(active_only=self._active_datasource)
         if ds_ctx:
             prompt += ds_ctx
         return prompt
@@ -1079,11 +1080,13 @@ def _scrub_credentials(text: str) -> str:
     return text
 
 
-def _build_datasource_context() -> str:
+def _build_datasource_context(active_only: str | None = None) -> str:
     """Build a system-prompt section listing available DS_* env vars by name.
 
     Shows the LLM what data sources are connected and which environment
     variable names to use — without exposing any credential values.
+
+    If active_only is set, only the matching slug is included.
     """
     try:
         vault = DataVault()
@@ -1099,9 +1102,12 @@ def _build_datasource_context() -> str:
         "Never read ~/.anton/data_vault/ files directly.\n"
     )
     for c in conns:
+        slug = f"{c['engine']}-{c['name']}"
+        if active_only and slug != active_only:
+            continue
         fields = vault.load(c["engine"], c["name"]) or {}
         var_names = ", ".join(f"DS_{k.upper()}" for k in fields)
-        lines.append(f"- `{c['engine']}-{c['name']}` → {var_names}")
+        lines.append(f"- `{slug}` → {var_names}")
     return "\n".join(lines)
 
 
@@ -2713,6 +2719,7 @@ async def _handle_connect_datasource(
     scratchpads: ScratchpadManager,
     session: "ChatSession",
     datasource_name: str | None = None,
+    prefill: str | None = None,
 ) -> "ChatSession":
     """
     Connect a data source by entering credentials, either for a new name or re-entering for an existing one.
@@ -2859,18 +2866,23 @@ async def _handle_connect_datasource(
     # ── Normal flow: connect a new (or reconnect an existing) data source ─────
     console.print()
     engine_names = ", ".join(e.display_name for e in registry.all_engines())
-    answer = Prompt.ask(
-        f"[anton.cyan](anton)[/] Which data source would you like to connect?\n"
-        f"        [anton.muted](e.g. {engine_names})[/]\n",
-        console=console,
-    )
+    if prefill:
+        answer = prefill
+    else:
+        answer = Prompt.ask(
+            f"[anton.cyan](anton)[/] Which data source would you like to connect?\n"
+            f"        [anton.muted](e.g. {engine_names})[/]\n",
+            console=console,
+        )
 
     # ── Reconnect path: user typed an existing vault slug ─────────────────────
     stripped_answer = answer.strip()
     known_slugs = {f"{c['engine']}-{c['name']}": c for c in vault.list_connections()}
     if stripped_answer in known_slugs:
         conn = known_slugs[stripped_answer]
+        vault.clear_ds_env()
         vault.inject_env(conn["engine"], conn["name"])
+        session._active_datasource = stripped_answer
         recon_engine_def = registry.get(conn["engine"])
         if recon_engine_def:
             _register_secret_vars(recon_engine_def)
@@ -3680,10 +3692,12 @@ async def _chat_loop(
                     _handle_memory(console, settings, cortex, episodic=episodic)
                     continue
                 elif cmd == "/connect-data-source":
+                    arg = parts[1].strip() if len(parts) > 1 else ""
                     session = await _handle_connect_datasource(
                         console,
                         session._scratchpads,
                         session,
+                        prefill=arg or None,
                     )
                     continue
                 elif cmd == "/list-data-sources":

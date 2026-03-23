@@ -1,13 +1,8 @@
 # Anton
+<p align="center">
+<img width="542" height="127" alt="image" src="https://github.com/user-attachments/assets/004fc25d-091f-410d-bc9f-cf947c2a1ffa" />
+</p>
 
-```
-        ▐
-   ▄█▀██▀█▄   ♡♡♡♡
- ██  (°ᴗ°) ██
-   ▀█▄██▄█▀          ▄▀█ █▄ █ ▀█▀ █▀█ █▄ █
-    ▐   ▐            █▀█ █ ▀█  █  █▄█ █ ▀█
-    ▐   ▐
-```
 
 
 Anton is an advanced AI coworker. You tell it what you need done and it figures out the rest.
@@ -40,7 +35,16 @@ any other information that might be useful. Give me a complete dashboard.
 What happens next is the interesting part. Anton doesn't have any particular skill to begin with. It figures it out live: scrapes live prices, writes scratchpad code on the fly, crunches the numbers, and builds you a full dashboard — all in one conversation, with no setup.
 That's the point: you describe a problem in plain language, and Anton assembles the toolchain, writes the code, and delivers the result.
 
-<img width="800"  alt="image" src="https://github.com/user-attachments/assets/39ec8b3b-65e8-4e23-8861-c649969d4e1c" />
+
+```
+        ▐
+   ▄█▀██▀█▄  
+ ██  (°ᴗ°) ██
+   ▀█▄██▄█▀          ▄▀█ █▄ █ ▀█▀ █▀█ █▄ █
+    ▐   ▐            █▀█ █ ▀█  █  █▄█ █ ▀█
+    ▐   ▐
+```
+<p align="center"><img width="800"  alt="image" src="https://github.com/user-attachments/assets/39ec8b3b-65e8-4e23-8861-c649969d4e1c" /></p>
 
 
 ### Explainable by default

@@ -5,6 +5,7 @@ import json as _json
 import os
 import re as _re
 import sys
+import yaml as _yaml
 import time
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -47,6 +48,7 @@ from anton.datasource_registry import (
     DatasourceEngine,
     DatasourceField,
     DatasourceRegistry,
+    _YAML_BLOCK_RE,
 )
 
 from rich.prompt import Confirm, Prompt
@@ -2617,6 +2619,27 @@ def _human_size(nbytes: int) -> str:
     return f"{nbytes:.1f}TB"
 
 
+def _remove_engine_block(text: str, slug: str) -> str:
+    """Return *text* with any YAML datasource block for *slug* removed."""
+    cleaned = []
+    prev = 0
+    for m in _YAML_BLOCK_RE.finditer(text):
+        try:
+            data = _yaml.safe_load(m.group(3))
+            is_dup = isinstance(data, dict) and str(data.get("engine", "")) == slug
+        except Exception:
+            is_dup = False
+        if is_dup:
+            pre = text[prev : m.start()].rstrip()
+            pre = _re.sub(r"\n---\s*$", "", pre)
+            cleaned.append(pre)
+        else:
+            cleaned.append(text[prev : m.end()])
+        prev = m.end()
+    cleaned.append(text[prev:])
+    return "".join(cleaned)
+
+
 async def _handle_add_custom_datasource(
     console: Console,
     name: str,
@@ -2784,6 +2807,9 @@ async def _handle_add_custom_datasource(
     existing = (
         user_ds_path.read_text(encoding="utf-8") if user_ds_path.is_file() else ""
     )
+
+    existing = _remove_engine_block(existing, slug)
+
     tmp_path.write_text(existing + yaml_block, encoding="utf-8")
 
     parsed = registry.validate_file(tmp_path)

@@ -319,11 +319,13 @@ def _ensure_minds_api_key(settings, ws) -> None:
     ws.set_secret("ANTON_MINDS_URL", minds_url)
 
     # Test if the Minds server supports LLM endpoints (_code_/_reason_)
-    # (silenced: was printing "Testing LLM endpoints..." and "not available" messages)
     from anton.chat import _minds_test_llm
+    ssl_verify = True
     llm_ok = _minds_test_llm(minds_url, api_key, verify=True)
     if not llm_ok:
         llm_ok = _minds_test_llm(minds_url, api_key, verify=False)
+        if llm_ok:
+            ssl_verify = False
 
     if llm_ok:
         console.print("[anton.success]LLM endpoints available — using Minds server as LLM provider.[/]")
@@ -334,12 +336,15 @@ def _ensure_minds_api_key(settings, ws) -> None:
         settings.coding_provider = "openai-compatible"
         settings.planning_model = "_reason_"
         settings.coding_model = "_code_"
+        settings.minds_ssl_verify = ssl_verify
         ws.set_secret("ANTON_OPENAI_API_KEY", api_key)
         ws.set_secret("ANTON_OPENAI_BASE_URL", base_url)
         ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
         ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
         ws.set_secret("ANTON_PLANNING_MODEL", "_reason_")
         ws.set_secret("ANTON_CODING_MODEL", "_code_")
+        if not ssl_verify:
+            ws.set_secret("ANTON_MINDS_SSL_VERIFY", "false")
     else:
         # LLM endpoints not available — fall back to Anthropic
         _ensure_anthropic_api_key(settings, ws)

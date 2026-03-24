@@ -252,8 +252,8 @@ def _onboard(settings) -> None:
     _INTRO_LINES = [
         "Hi! I'm Anton, an autonomous AI coworker built by MindsDB.",
         "",
-        "For the best experience, I recommend MindsDB Cloud as your",
-        "LLM Provider, it is optimized for:",
+        "For the best experience, I recommend MindsDB Cloud as your LLM Provider,",
+        "optimized for:",
         "",
         "  \u2713 Smart model routing",
         "  \u2713 Faster responses",

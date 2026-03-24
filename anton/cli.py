@@ -247,36 +247,49 @@ def _ensure_api_key(settings) -> None:
 
     ws = Workspace(Path.home())
 
-    # Header
-    console.print()
-    header = Text()
-    header.append("  First-time setup", style="bold anton.cyan")
-    header.append(" — pick your LLM provider\n", style="anton.muted")
-    console.print(header)
+    from rich.table import Table
 
-    # Provider choices
-    minds_line = Text()
-    minds_line.append("  1 ", style="bold")
-    minds_line.append("Minds ", style="anton.cyan")
-    minds_line.append("mdb.ai", style="anton.muted")
-    minds_line.append("  recommended", style="bold anton.success")
-    console.print(minds_line)
+    table = Table(
+        show_header=False,
+        show_edge=False,
+        show_lines=False,
+        padding=(0, 2),
+        expand=True,
+    )
+    table.add_column(ratio=1)
+    table.add_column("", width=1, style="anton.cyan_dim")
+    table.add_column(ratio=1)
 
-    benefits = Text()
-    benefits.append("    Optimized model routing  ", style="anton.muted")
-    benefits.append("|", style="dim")
-    benefits.append("  Faster responses  ", style="anton.muted")
-    benefits.append("|", style="dim")
-    benefits.append("  Built-in billing", style="anton.muted")
-    console.print(benefits)
-    console.print()
+    # Left: provider choices
+    choices = Text()
+    choices.append("1 ", style="bold")
+    choices.append("MindsDB Cloud ", style="bold anton.cyan")
+    choices.append("(recommended)\n\n", style="anton.success")
+    choices.append("2 ", style="bold")
+    choices.append("Bring your own key\n", style="anton.cyan")
+    choices.append("  Anthropic or OpenAI", style="anton.muted")
 
-    other_line = Text()
-    other_line.append("  2 ", style="bold")
-    other_line.append("Bring your own key ", style="anton.cyan")
-    other_line.append("Anthropic or OpenAI", style="anton.muted")
-    console.print(other_line)
+    # Right: why Minds
+    info = Text()
+    info.append("MindsDB Cloud ", style="bold anton.cyan")
+    info.append("mdb.ai\n\n", style="anton.muted")
+    info.append("MindsDB is the maker of Anton\n", style="anton.muted")
+    info.append("and provides an LLM service\n", style="anton.muted")
+    info.append("optimized for Anton:\n\n", style="anton.muted")
+    info.append("  Smart model routing\n", style="")
+    info.append("  Faster responses\n", style="")
+    info.append("  Cost optimized", style="")
+
+    divider = Text("│\n│\n│\n│\n│\n│\n│\n│\n│\n│", style="anton.cyan_dim")
+    table.add_row(choices, divider, info)
+
     console.print()
+    console.print(Panel(
+        table,
+        title="[bold anton.cyan]LLM Setup[/]",
+        border_style="anton.cyan_dim",
+        padding=(1, 2),
+    ))
 
     choice = Prompt.ask(
         "[anton.cyan]>[/]",

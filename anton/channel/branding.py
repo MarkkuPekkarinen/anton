@@ -61,8 +61,8 @@ def pick_tagline(seed: int | None = None) -> str:
 
 def _build_robot_text(mouth: str, bubble: str) -> Text:
     """Build the full robot as a Rich Text object with styling."""
-    g = "bold cyan"
-    m = "dim"
+    g = "anton.glow"
+    m = "anton.muted"
     # Pad bubble to avoid layout jitter (longest phrase is ~16 chars)
     padded = bubble.ljust(16)
     lines = [

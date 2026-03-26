@@ -3605,7 +3605,7 @@ def _print_slash_help(console: Console) -> None:
     console.print()
     console.print("[anton.cyan]Available commands:[/]")
     console.print(
-       "  [bold]/minds[/]                — Connect to existing mind"
+       "  [bold]/minds[/]        — Connect to existing mind"
     )
     console.print("  [bold]/connect[/]      — Connect a database or API to the Local Vault")
     console.print("  [bold]/list[/]         — List all saved data source connections")

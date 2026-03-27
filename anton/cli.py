@@ -397,15 +397,14 @@ def _animate_onboard(console, version: str, intro_lines: list[str], *, settings,
             if choice == "1":
                 _setup_minds(settings, ws)
             elif choice == "2":
-                _setup_minds(settings, ws, default_url=None)
-            else:
                 _setup_other_provider(settings, ws)
+            else:
+                _setup_minds(settings, ws, default_url=None)
             break  # success
         except _SetupRetry:
             console.print()
             console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Cloud[/][/link] [anton.success](recommended)[/]")
-            console.print("  [bold]2[/]  [anton.cyan]Minds-Enterprise Server[/]")
-            console.print("  [bold]3[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI[/]")
+            console.print("  [bold]2[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI[/]")
             console.print()
             continue
 

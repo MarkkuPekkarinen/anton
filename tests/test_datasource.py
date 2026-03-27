@@ -2025,3 +2025,152 @@ class TestCustomDatasourceConnectFlow:
         conns = vault.list_connections()
         assert len(conns) == 1
         pad.execute.assert_not_called()
+
+
+class TestEditDatasourceWithTestSnippet:
+    """Tests for /edit path: test_snippet runs before vault.save, not after."""
+
+    OLD_CREDS = {
+        "host": "pg.example.com",
+        "port": "5432",
+        "database": "prod_db",
+        "user": "alice",
+        "password": "good-pass",
+        "schema": "",
+    }
+
+    def _setup_pad(self, session, cell):
+        pad = AsyncMock()
+        pad.execute = AsyncMock(return_value=cell)
+        pad.reset = AsyncMock()
+        pad.install_packages = AsyncMock()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+        return pad
+
+    @pytest.mark.asyncio
+    async def test_edit_failed_test_does_not_corrupt_vault(
+        self, vault_dir, registry, make_session, make_cell
+    ):
+        """edit with bad creds + test fails + user declines retry → original creds intact."""
+        session = make_session()
+        console = MagicMock()
+        vault = DataVault(vault_dir=vault_dir)
+        vault.save("postgresql", "prod_db", self.OLD_CREDS)
+
+        self._setup_pad(session, make_cell(stdout="", stderr="connection refused"))
+
+        # Keep all non-secret fields; enter bad password; decline retry.
+        prompt_responses = iter([
+            "",          # host (keep existing)
+            "",          # port
+            "",          # database
+            "",          # user
+            "bad-pass",  # password (new, bad)
+            "",          # schema
+            "n",         # retry?
+        ])
+
+        with (
+            patch("anton.chat.DataVault", return_value=vault),
+            patch("anton.chat.DatasourceRegistry", return_value=registry),
+            patch(
+                "rich.prompt.Prompt.ask",
+                side_effect=lambda *a, **kw: next(prompt_responses),
+            ),
+        ):
+            result = await _handle_connect_datasource(
+                console, session._scratchpads, session,
+                datasource_name="postgresql-prod_db",
+            )
+
+        saved = vault.load("postgresql", "prod_db")
+        assert saved is not None
+        assert saved.get("password") == "good-pass"
+        assert result._history == []
+
+    @pytest.mark.asyncio
+    async def test_edit_successful_test_persists_new_credentials(
+        self, vault_dir, registry, make_session, make_cell
+    ):
+        """edit with valid creds + test passes → new creds saved to vault."""
+        session = make_session()
+        console = MagicMock()
+        vault = DataVault(vault_dir=vault_dir)
+        vault.save("postgresql", "prod_db", self.OLD_CREDS)
+
+        self._setup_pad(session, make_cell(stdout="ok"))
+
+        prompt_responses = iter([
+            "",          # host
+            "",          # port
+            "",          # database
+            "",          # user
+            "new-pass",  # password (updated)
+            "",          # schema
+        ])
+
+        with (
+            patch("anton.chat.DataVault", return_value=vault),
+            patch("anton.chat.DatasourceRegistry", return_value=registry),
+            patch(
+                "rich.prompt.Prompt.ask",
+                side_effect=lambda *a, **kw: next(prompt_responses),
+            ),
+        ):
+            result = await _handle_connect_datasource(
+                console, session._scratchpads, session,
+                datasource_name="postgresql-prod_db",
+            )
+
+        saved = vault.load("postgresql", "prod_db")
+        assert saved is not None
+        assert saved.get("password") == "new-pass"
+        assert result._history
+
+    @pytest.mark.asyncio
+    async def test_connection_test_error_summary_uses_meaningful_line(
+        self, vault_dir, registry
+    ):
+        """Error display shows last non-empty line (exception msg), not traceback header."""
+        console = MagicMock()
+        vault = DataVault(vault_dir=vault_dir)
+
+        traceback_text = (
+            "Traceback (most recent call last):\n"
+            "  File \"test.py\", line 3, in <module>\n"
+            "    conn = psycopg2.connect(host=os.environ['DS_HOST'])\n"
+            "psycopg2.OperationalError: could not connect to server\n"
+        )
+        cell = MagicMock()
+        cell.stdout = ""
+        cell.stderr = traceback_text
+        cell.error = None
+
+        pad = AsyncMock()
+        pad.execute = AsyncMock(return_value=cell)
+        pad.reset = AsyncMock()
+        pad.install_packages = AsyncMock()
+
+        scratchpads = AsyncMock()
+        scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        engine_def = registry.get("postgresql")
+        credentials = {
+            "host": "bad-host", "port": "5432",
+            "database": "prod_db", "user": "alice", "password": "pw",
+        }
+
+        with (
+            patch("anton.chat.DataVault", return_value=vault),
+            patch("anton.chat.DatasourceRegistry", return_value=registry),
+            patch("rich.prompt.Prompt.ask", return_value="n"),
+        ):
+            result = await _run_connection_test(
+                console, scratchpads, vault, engine_def, credentials,
+                retry_fields=engine_def.fields,
+            )
+
+        assert result is False
+        printed = " ".join(str(c) for c in console.print.call_args_list)
+        assert "psycopg2.OperationalError" in printed
+        assert "Traceback (most recent call last)" not in printed

@@ -1573,8 +1573,7 @@ async def _handle_setup_models(
 
     def _print_choices():
         console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Cloud[/][/link] [anton.success](recommended)[/]")
-        console.print("  [bold]2[/]  [anton.cyan]Minds-Enterprise Server[/]")
-        console.print("  [bold]3[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI[/]")
+        console.print("  [bold]2[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI[/]")
         console.print("  [bold]q[/]  [anton.muted]Back[/]")
         console.print()
 

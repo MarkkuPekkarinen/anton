@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import os
+import urllib.error
 import re as _re
 import sys
 import uuid
@@ -1780,7 +1781,6 @@ async def _prompt_minds_api_key(
 def _describe_minds_connection_error(err: Exception) -> tuple[str, str]:
     import socket
     import ssl
-    import urllib.error
 
     if isinstance(err, urllib.error.HTTPError):
         reason = err.reason or "HTTP error"
@@ -1965,8 +1965,11 @@ def _minds_test_llm(base_url: str, api_key: str, verify: bool = True) -> bool:
     try:
         _minds_request(url, api_key, method="POST", payload=payload, verify=verify)
         return True
-    except Exception as e:
-        print(e)
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            return "rate_limited"
+        return False
+    except Exception:
         return False
 
 
@@ -2221,8 +2224,6 @@ async def _handle_connect(
     episodic: EpisodicMemory | None = None,
 ) -> ChatSession:
     """Connect to a Minds server: select a Mind, then optionally a datasource."""
-    import urllib.error
-
     from anton.workspace import Workspace as _Workspace
 
     global_ws = _Workspace(Path.home())

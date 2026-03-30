@@ -550,14 +550,21 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") ->
 
     ssl_verify = True
     llm_ok = False
+    rate_limited = False
 
     with Live(Spinner("dots", text="  Connecting...", style="anton.cyan"), console=console, transient=True):
-        llm_ok = _minds_test_llm(minds_url, api_key, verify=True)
-        if not llm_ok:
-            llm_ok_no_ssl = _minds_test_llm(minds_url, api_key, verify=False)
-            if llm_ok_no_ssl:
+        result = _minds_test_llm(minds_url, api_key, verify=True)
+        if result == "rate_limited":
+            rate_limited = True
+        elif not result:
+            result_no_ssl = _minds_test_llm(minds_url, api_key, verify=False)
+            if result_no_ssl == "rate_limited":
+                rate_limited = True
+            elif result_no_ssl:
                 ssl_verify = False
                 llm_ok = True
+        else:
+            llm_ok = True
 
     if llm_ok and not ssl_verify:
         console.print("  [anton.warning]SSL certificate verification failed.[/]")
@@ -587,6 +594,9 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") ->
         ws.set_secret("ANTON_CODING_MODEL", "_code_")
         if not ssl_verify:
             ws.set_secret("ANTON_MINDS_SSL_VERIFY", "false")
+    elif rate_limited:
+        console.print("[anton.error]Token limit exceeded. Visit https://mdb.ai to upgrade or to top up your tokens.[/]")
+        raise _SetupRetry()
     else:
         console.print("  [anton.error]Could not connect. Check your API key and URL.[/]")
         retry = Confirm.ask("  Try again?", default=True, console=console)

@@ -270,7 +270,7 @@ def _onboard(settings) -> None:
     _INTRO_LINES = [
         "Hi Boss! I'm Anton, your AI coworker.",
         "",
-        "For the best experience, I recommend Minds-Cloud as your LLM Provider:",
+        "For the best experience, I recommend Minds-Enterprise-Cloud as your LLM Provider:",
         "",
         "  \u2713 Smart model routing",
         "  \u2713 Faster responses",
@@ -381,7 +381,7 @@ def _animate_onboard(console, version: str, intro_lines: list[str], *, settings,
     console.print()
     console.print(f"[anton.glow] {'━' * 40}[/]")
     console.print()
-    console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Cloud[/][/link] [anton.success](recommended)[/]")
+    console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Enterprise-Cloud[/][/link] [anton.success](recommended)[/]")
     console.print("  [bold]2[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI[/]")
     console.print()
 
@@ -403,7 +403,7 @@ def _animate_onboard(console, version: str, intro_lines: list[str], *, settings,
             break  # success
         except _SetupRetry:
             console.print()
-            console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Cloud[/][/link] [anton.success](recommended)[/]")
+            console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Enterprise-Cloud[/][/link] [anton.success](recommended)[/]")
             console.print("  [bold]2[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI[/]")
             console.print()
             continue
@@ -419,7 +419,7 @@ def _animate_onboard(console, version: str, intro_lines: list[str], *, settings,
     model_label = settings.planning_model
     if provider_label == "openai-compatible":
         if settings.minds_url and "mdb.ai" in settings.minds_url:
-            provider_label = "Minds-Cloud"
+            provider_label = "Minds-Enterprise-Cloud"
         else:
             provider_label = "Minds-Enterprise Server"
         model_label = "smart_router"

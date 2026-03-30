@@ -1530,7 +1530,7 @@ async def _handle_setup_models(
     def _provider_label(provider: str) -> str:
         if provider == "openai-compatible":
             if settings.minds_url and "mdb.ai" in settings.minds_url:
-                return "Minds-Cloud"
+                return "Minds-Enterprise-Cloud"
             return "Minds-Enterprise"
         return provider.capitalize()
 
@@ -1572,7 +1572,7 @@ async def _handle_setup_models(
     # Use the same onboarding flow from cli.py
 
     def _print_choices():
-        console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Cloud[/][/link] [anton.success](recommended)[/]")
+        console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Enterprise-Cloud[/][/link] [anton.success](recommended)[/]")
         console.print("  [bold]2[/]  [anton.cyan]Bring your own key[/] [anton.muted]Anthropic / OpenAI[/]")
         console.print("  [bold]q[/]  [anton.muted]Back[/]")
         console.print()

@@ -49,7 +49,10 @@ What happens next is the interesting part. At first, Anton doesn't have any part
 anton> Dashboard is open in your browser.
 Summary: Concentration risk is your #1 issue. If you're comfortable being a high-conviction NVDA...
 ```
-<p align="center"><img width="800"  alt="image" src="/assets/anton-dashboard-example.png" /></p>
+
+<p align="center"> 
+        <img width="800" alt="Anton's response" src="https://github.com/user-attachments/assets/2ae1b93d-1ae8-45b0-a4a0-dfda3c62840d" />
+</p>
 
 **Key features**
 - **Credential vault** - prevents secrets from being exposed to LLMs.

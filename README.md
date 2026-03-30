@@ -11,9 +11,8 @@
 
 Business intelligence was supposed to give you the right data, at the right time, to get real work done.
 
-That is Anton. A business intelligence agent that works like an expert analyst—at machine speed.
-You ask questions in plain language, and Anton takes ownership of the entire analytical process:
-it pulls and unifies data from multiple sources, runs the analysis, surfaces insights, builds rich dashboards, suggests next steps, and can even take action.
+That is Anton. You ask questions in plain language, and Anton takes ownership of the entire analytical process:
+it pulls and unifies data from multiple sources, runs the analysis, surfaces insights, builds rich dashboards, suggests next steps, and can even take action - A business intelligence agent that works like an expert analyst — at machine speed.
 
 ---
 

@@ -60,7 +60,7 @@ Summary: Concentration risk is your #1 issue. If you're comfortable being a high
 - **Multi-layer memory & continuous learning** - session, semantic and long-term business knowledge.
 
 #### Connect your data
-Although you can use Anton with just public data, the real power happens when you combine that with your own data. This can be anything: files,  database, applications APIs,... etc. Open the Local Vault with `/connect` command, then follow the prompts to add your secrets. Anton only has access to secret names - secret values remain hidden.
+Although you can use Anton with just public data, the real power happens when you combine that with your own data. This can be anything: files,  databases, application APIs,... etc. Open the Local Vault with `/connect` command, then follow the prompts to add your secrets. Anton only has access to secret names - secret values remain hidden.
 
 ```powershell
 /connect

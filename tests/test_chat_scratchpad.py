@@ -369,7 +369,7 @@ class TestResumeSessionScratchpadCleanup:
         new_session._turn_count = 0
 
         with (
-            patch("rich.prompt.Prompt.ask", return_value="1"),
+            patch("anton.chat._prompt_or_cancel", new=AsyncMock(return_value="1")),
             patch("anton.chat._rebuild_session", return_value=new_session),
         ):
             await _handle_resume(

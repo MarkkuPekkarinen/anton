@@ -1702,12 +1702,15 @@ async def _prompt_or_cancel(
     default: str = "",
     password: bool = False,
     choices: list[str] | None = None,
+    choices_display: str = "",
 ) -> str | None:
     """Prompt for free-text input; return None if the user presses Esc.
 
     Fully async via prompt_toolkit's prompt_async() — event loop never blocked.
     Only Esc is bound for cancellation; Ctrl+C propagates as KeyboardInterrupt.
     If `choices` is given, re-prompts until input matches or user presses Esc.
+    If `choices_display` is given, uses it for the styled bracket text instead of
+    joining `choices` (useful when the display text differs from strict validation).
     """
     _esc = False
     bindings = KeyBindings()
@@ -1723,18 +1726,18 @@ async def _prompt_or_cancel(
     def _toolbar():
         return HTML("<style fg='#5f9ea0' italic='true'>Esc to cancel</style>")
 
+    opts_text = choices_display or ("/".join(choices) if choices else "")
+
     if password:
         suffix = " (hidden): "
-    elif choices and default:
+    elif opts_text and default:
         # Match Rich's Confirm.ask styling: bold magenta for choices+brackets, bold cyan for default+parens
-        opts = "/".join(choices)
         suffix = (
-            f" <b><ansimagenta>[{opts}]</ansimagenta></b>"
+            f" <b><ansimagenta>[{opts_text}]</ansimagenta></b>"
             f" <b><ansicyan>({default})</ansicyan></b>: "
         )
-    elif choices:
-        opts = "/".join(choices)
-        suffix = f" <b><ansimagenta>[{opts}]</ansimagenta></b>: "
+    elif opts_text:
+        suffix = f" <b><ansimagenta>[{opts_text}]</ansimagenta></b>: "
     elif default:
         suffix = f" <b><ansicyan>({default})</ansicyan></b>: "
     else:
@@ -3485,7 +3488,8 @@ async def _handle_connect_datasource(
 
     while True:
         mode_answer = await _prompt_or_cancel(
-            "(anton) Do you have these available? (y/n/list params)",
+            "(anton) Do you have these available?",
+            choices_display="y/n/list params", default="y",
         )
         if mode_answer is None:
             return session

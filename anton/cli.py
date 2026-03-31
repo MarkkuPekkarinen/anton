@@ -395,7 +395,7 @@ async def _animate_onboard(console, version: str, intro_lines: list[str], *, set
         #     console=console,
         # )
         choice = await _prompt_or_cancel("(anton) Choose LLM Provider",
-                                   choices=["1", "2", "q"],
+                                   choices=["1", "2", "3", "q"],
                                    default="1")
 
         try:

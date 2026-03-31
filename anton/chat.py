@@ -1582,7 +1582,7 @@ async def _handle_setup_models(
 
     while True:
         choice = await _prompt_or_cancel("(anton) Choose LLM Provider",
-                                         choices=["1", "2", "q"],
+                                         choices=["1", "2", "3", "q"],
                                          default="1")
         if choice is None or choice == "q":
             return session

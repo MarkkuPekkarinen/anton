@@ -115,7 +115,6 @@ class TestContextCompaction:
             call_count += 1
             if call_count == 1:
                 raise ContextOverflowError("overflow")
-                yield  # make it an async generator
             else:
                 yield StreamComplete(
                     response=LLMResponse(
@@ -126,6 +125,7 @@ class TestContextCompaction:
 
         session = ChatSession(AsyncMock())
         session._llm.plan_stream = _plan_stream
+        session._llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — done"))
         session._summarize_history = AsyncMock()
 
         events = [e async for e in session.turn_stream("hello")]
@@ -146,6 +146,7 @@ class TestContextCompaction:
 
         session = ChatSession(AsyncMock())
         session._llm.plan_stream = _plan_stream
+        session._llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — done"))
         session._summarize_history = AsyncMock()
 
         events = [e async for e in session.turn_stream("hello")]
@@ -166,6 +167,7 @@ class TestContextCompaction:
 
         session = ChatSession(AsyncMock())
         session._llm.plan_stream = _plan_stream
+        session._llm.plan = AsyncMock(return_value=_text_response("STATUS: COMPLETE — done"))
         session._summarize_history = AsyncMock()
 
         events = [e async for e in session.turn_stream("hello")]

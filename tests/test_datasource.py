@@ -142,6 +142,9 @@ def make_session():
     """Factory that creates a fresh ChatSession with mocked scratchpads."""
     def _factory():
         mock_llm = AsyncMock()
+        plan_response = MagicMock()
+        plan_response.content = "UNKNOWN"
+        mock_llm.plan = AsyncMock(return_value=plan_response)
         session = ChatSession(mock_llm)
         session._scratchpads = AsyncMock()
         return session
@@ -573,7 +576,7 @@ class TestHandleConnectDatasource:
         session = make_session()
         console = MagicMock()
         vault = DataVault(vault_dir=vault_dir)
-        responses = iter(["PostgreSQL", "n", "db.example.com", "", "", "", "", ""])
+        responses = iter(["PostgreSQL", "n", "n", "db.example.com", "", "", "", "", ""])
 
         with (
             patch("anton.chat.DataVault", return_value=vault),
@@ -602,7 +605,7 @@ class TestHandleConnectDatasource:
         pad.execute = AsyncMock(return_value=make_cell(stdout="ok"))
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
 
-        responses = iter(["PostgreSQL", "y", "db.example.com", "5432", "prod_db", "alice", "s3cr3t", ""])
+        responses = iter(["PostgreSQL", "n", "y", "db.example.com", "5432", "prod_db", "alice", "s3cr3t", ""])
 
         with (
             patch("anton.chat.DataVault", return_value=vault),
@@ -636,7 +639,7 @@ class TestHandleConnectDatasource:
         ])
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
 
-        responses = iter(["PostgreSQL", "y", "db.example.com", "5432", "prod_db", "alice", "wrongpassword", "", "y", "correctpassword"])
+        responses = iter(["PostgreSQL", "n", "y", "db.example.com", "5432", "prod_db", "alice", "wrongpassword", "", "y", "correctpassword"])
 
         with (
             patch("anton.chat.DataVault", return_value=vault),
@@ -664,7 +667,7 @@ class TestHandleConnectDatasource:
         pad.execute = AsyncMock(return_value=make_cell(stdout="", error="connection refused"))
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
 
-        responses = iter(["PostgreSQL", "y", "db.example.com", "5432", "prod_db", "alice", "badpass", "", "n"])
+        responses = iter(["PostgreSQL", "n", "y", "db.example.com", "5432", "prod_db", "alice", "badpass", "", "n"])
 
         with (
             patch("anton.chat.DataVault", return_value=vault),
@@ -689,7 +692,7 @@ class TestHandleConnectDatasource:
         pad.execute = AsyncMock(return_value=make_cell(stdout="ok"))
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
 
-        responses = iter(["PostgreSQL", "y", "db.example.com", "5432", "prod_db", "alice", "s3cr3t", ""])
+        responses = iter(["PostgreSQL", "n", "y", "db.example.com", "5432", "prod_db", "alice", "s3cr3t", ""])
 
         with (
             patch("anton.chat.DataVault", return_value=vault),
@@ -714,7 +717,7 @@ class TestHandleConnectDatasource:
         pad.execute = AsyncMock(return_value=make_cell(stdout="ok"))
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
 
-        responses = iter(["HubSpot", "1", "y", "pat-na1-abc123"])
+        responses = iter(["HubSpot", "1", "n", "y", "pat-na1-abc123"])
 
         with (
             patch("anton.chat.DataVault", return_value=vault),
@@ -745,7 +748,7 @@ class TestHandleConnectDatasource:
         pad.execute = AsyncMock(return_value=make_cell(stdout="ok"))
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
 
-        responses = iter(["PostgreSQL", "host,user,password", "db.example.com", "alice", "s3cr3t"])
+        responses = iter(["PostgreSQL", "n", "host,user,password", "db.example.com", "alice", "s3cr3t"])
 
         with (
             patch("anton.chat.DataVault", return_value=vault),
@@ -828,7 +831,7 @@ class TestCredentialScrubbing:
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
 
         secret_pw = "supersecretpassword999"
-        responses = iter(["PostgreSQL", "y", "db.host.com", "5432", "mydb", "alice", secret_pw, "public"])
+        responses = iter(["PostgreSQL", "n", "y", "db.host.com", "5432", "mydb", "alice", secret_pw, "public"])
 
         with (
             patch("anton.chat.DataVault", return_value=vault),
@@ -1259,33 +1262,36 @@ class TestEditDatasourceFlow:
 
 
 class TestRemoveDatasourceFlow:
-    def test_confirmation_yes_deletes(self, vault, registry):
+    @pytest.mark.asyncio
+    async def test_confirmation_yes_deletes(self, vault, registry):
         vault.save("postgresql", "prod_db", {"host": "x"})
         console = Console(quiet=True)
 
         with (
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
-            patch("rich.prompt.Confirm.ask", return_value=True),
+            patch("anton.chat._prompt_or_cancel", new=AsyncMock(return_value="y")),
         ):
-            _handle_remove_data_source(console, "postgresql-prod_db")
+            await _handle_remove_data_source(console, "postgresql-prod_db")
 
         assert vault.load("postgresql", "prod_db") is None
 
-    def test_confirmation_no_preserves(self, vault, registry):
+    @pytest.mark.asyncio
+    async def test_confirmation_no_preserves(self, vault, registry):
         vault.save("postgresql", "prod_db", {"host": "x"})
         console = Console(quiet=True)
 
         with (
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
-            patch("rich.prompt.Confirm.ask", return_value=False),
+            patch("anton.chat._prompt_or_cancel", new=AsyncMock(return_value="n")),
         ):
-            _handle_remove_data_source(console, "postgresql-prod_db")
+            await _handle_remove_data_source(console, "postgresql-prod_db")
 
         assert vault.load("postgresql", "prod_db") is not None
 
-    def test_unknown_name_shows_message(self, vault_dir, registry):
+    @pytest.mark.asyncio
+    async def test_unknown_name_shows_message(self, vault_dir, registry):
         vault = DataVault(vault_dir=vault_dir)
         console = MagicMock()
 
@@ -1293,17 +1299,18 @@ class TestRemoveDatasourceFlow:
             patch("anton.chat.DataVault", return_value=vault),
             patch("anton.chat.DatasourceRegistry", return_value=registry),
         ):
-            _handle_remove_data_source(console, "postgresql-ghost")
+            await _handle_remove_data_source(console, "postgresql-ghost")
 
         printed = " ".join(str(c) for c in console.print.call_args_list)
         assert "not found" in printed.lower() or "No connection" in printed
 
-    def test_invalid_format_shows_warning(self, vault_dir):
+    @pytest.mark.asyncio
+    async def test_invalid_format_shows_warning(self, vault_dir):
         vault = DataVault(vault_dir=vault_dir)
         console = MagicMock()
 
         with patch("anton.chat.DataVault", return_value=vault):
-            _handle_remove_data_source(console, "nohyphen")
+            await _handle_remove_data_source(console, "nohyphen")
 
         printed = " ".join(str(c) for c in console.print.call_args_list)
         assert "Invalid" in printed or "engine-name" in printed
@@ -1329,7 +1336,7 @@ class TestEnvActivationCollisionFree:
         pad.execute = AsyncMock(return_value=make_cell(stdout="ok"))
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
 
-        responses = iter(["PostgreSQL", "y", "db.example.com", "5432", "prod_db", "alice", "s3cr3t", ""])
+        responses = iter(["PostgreSQL", "n", "y", "db.example.com", "5432", "prod_db", "alice", "s3cr3t", ""])
 
         with (
             patch("anton.chat.DataVault", return_value=vault),
@@ -1708,7 +1715,7 @@ class TestAddCustomDatasourceFlow:
         console = MagicMock()
         registry = self._make_registry(tmp_path)
 
-        responses = iter(["I want to connect to mydb", "localhost"])
+        responses = iter(["I want to connect to mydb", "n", "localhost"])
 
         with (
             patch("anton.chat._prompt_or_cancel", new=AsyncMock(side_effect=lambda *a, **kw: next(responses))),
@@ -1738,7 +1745,7 @@ class TestAddCustomDatasourceFlow:
         console = MagicMock()
         registry = self._make_registry(tmp_path)
 
-        responses = iter(["I want to connect", "mysecret"])
+        responses = iter(["I want to connect", "n", "mysecret"])
 
         with (
             patch("anton.chat._prompt_or_cancel", new=AsyncMock(side_effect=lambda *a, **kw: next(responses))),
@@ -1772,7 +1779,7 @@ class TestAddCustomDatasourceFlow:
         console = MagicMock()
         registry = self._make_registry(tmp_path)
 
-        responses = iter(["I want to connect", "", ""])
+        responses = iter(["I want to connect", "n", "", ""])
 
         with (
             patch("anton.chat._prompt_or_cancel", new=AsyncMock(side_effect=lambda *a, **kw: next(responses))),
@@ -1846,7 +1853,7 @@ class TestCustomDatasourceConnectFlow:
             test_snippet="print('ok')",
         ))
 
-        responses = iter(["0", "My API Service", "I have an API key", "my_secret_key"])
+        responses = iter(["0", "My API Service", "I have an API key", "n", "my_secret_key"])
 
         with (
             patch("anton.chat.DataVault", return_value=vault),
@@ -1883,7 +1890,7 @@ class TestCustomDatasourceConnectFlow:
             test_snippet="print('ok')",
         ))
 
-        responses = iter(["0", "My API Service", "I have an API key", "bad_key", "n"])
+        responses = iter(["0", "My API Service", "I have an API key", "n", "bad_key", "n"])
 
         with (
             patch("anton.chat.DataVault", return_value=vault),
@@ -1917,7 +1924,7 @@ class TestCustomDatasourceConnectFlow:
             test_snippet="print('ok')",
         ))
 
-        responses = iter(["0", "My API Service", "I have an API key", "bad_key", "y", "good_key"])
+        responses = iter(["0", "My API Service", "I have an API key", "n", "bad_key", "y", "good_key"])
 
         with (
             patch("anton.chat.DataVault", return_value=vault),
@@ -1951,7 +1958,7 @@ class TestCustomDatasourceConnectFlow:
             test_snippet="",
         ))
 
-        responses = iter(["0", "My API Service", "I have an API key", "my_key"])
+        responses = iter(["0", "My API Service", "I have an API key", "n", "my_key"])
 
         with (
             patch("anton.chat.DataVault", return_value=vault),

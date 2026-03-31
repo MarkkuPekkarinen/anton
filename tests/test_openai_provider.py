@@ -9,6 +9,7 @@ from anton.config.settings import AntonSettings
 from anton.llm.client import LLMClient
 from anton.llm.openai import (
     OpenAIProvider,
+    build_chat_completion_kwargs,
     _translate_messages,
     _translate_tools,
 )
@@ -108,6 +109,33 @@ class TestOpenAIProvider:
 
             call_kwargs = mock_client.chat.completions.create.call_args[1]
             assert call_kwargs["tool_choice"] == {"type": "function", "function": {"name": "my_tool"}}
+            assert call_kwargs["max_completion_tokens"] == 4096
+            assert "max_tokens" not in call_kwargs
+
+
+class TestBuildChatCompletionKwargs:
+    def test_uses_modern_max_completion_tokens_field(self):
+        kwargs = build_chat_completion_kwargs(
+            model="gpt-5.4",
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=1,
+        )
+
+        assert kwargs["model"] == "gpt-5.4"
+        assert kwargs["messages"] == [{"role": "user", "content": "ping"}]
+        assert kwargs["max_completion_tokens"] == 1
+        assert "max_tokens" not in kwargs
+
+    def test_adds_stream_options_for_streaming_requests(self):
+        kwargs = build_chat_completion_kwargs(
+            model="gpt-5.4",
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=1,
+            stream=True,
+        )
+
+        assert kwargs["stream"] is True
+        assert kwargs["stream_options"] == {"include_usage": True}
 
 
 class TestTranslateTools:

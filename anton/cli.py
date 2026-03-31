@@ -154,6 +154,72 @@ def _ensure_dependencies(console: Console) -> None:
         raise typer.Exit(1)
 
 
+def _ensure_terms_consent(console: Console, settings) -> None:
+    """Show terms acceptance screen on first run and persist the choice."""
+    import os
+    import webbrowser
+
+    from rich.prompt import Confirm
+    from rich.text import Text
+
+    # Clear screen
+    os.system("cls" if sys.platform == "win32" else "clear")
+
+    # Centered logo and welcome
+    try:
+        width = os.get_terminal_size().columns
+    except OSError:
+        width = 80
+
+    logo = "A N T O N"
+    welcome = "Welcome to MindsDB-Anton"
+    console.print()
+    console.print(Text(logo, style="bold cyan", justify="center"))
+    console.print()
+    console.print(Text(welcome, style="bold", justify="center"))
+    console.print()
+    console.print(
+        "  Thank you for choosing Anton. Before we start, please review\n"
+        "  and accept our Anton policies."
+    )
+    console.print()
+
+    if Confirm.ask("  Would you like to read the policies?", default=True, console=console):
+        webbrowser.open("https://mindsdb.com/terms")
+        webbrowser.open("https://mindsdb.com/privacy-policy")
+        console.print()
+        console.print("  [anton.muted]Policies opened in your browser.[/]")
+        console.print()
+
+    accepted = Confirm.ask(
+        "  Do you accept the Terms and Privacy Policy?",
+        default=True,
+        console=console,
+    )
+
+    if not accepted:
+        console.print()
+        console.print("  [anton.warning]You must accept the policies to use Anton.[/]")
+        raise typer.Exit(0)
+
+    # Persist consent to ~/.anton/.env
+    env_path = Path.home() / ".anton" / ".env"
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Append if file exists, otherwise create
+    existing = env_path.read_text() if env_path.is_file() else ""
+    if "ANTON_TERMS_CONSENT" not in existing:
+        with env_path.open("a") as f:
+            if existing and not existing.endswith("\n"):
+                f.write("\n")
+            f.write("ANTON_TERMS_CONSENT=true\n")
+
+    settings.terms_consent = True
+
+    # Clear screen so onboarding starts fresh
+    os.system("cls" if sys.platform == "win32" else "clear")
+
+
 app = typer.Typer(
     name="anton",
     help="Anton — a self-evolving autonomous system",
@@ -219,6 +285,9 @@ def main(
 
     settings = AntonSettings()
     settings.resolve_workspace(folder)
+
+    if not settings.terms_consent:
+        _ensure_terms_consent(console, settings)
 
     from anton.updater import check_and_update
 

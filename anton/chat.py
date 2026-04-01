@@ -2960,11 +2960,13 @@ async def _show_credential_help(
     except Exception:
         help_text = "Sorry, couldn't fetch help right now. Try checking the service's documentation."
 
+    from rich.markdown import Markdown as _Markdown
+    from rich.padding import Padding
+
     console.print()
     console.print(heading)
     console.print()
-    for line in help_text.splitlines():
-        console.print(f"        {line}")
+    console.print(Padding(_Markdown(help_text), (0, 0, 0, 8)))
     console.print()
 
 

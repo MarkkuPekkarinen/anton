@@ -1557,24 +1557,6 @@ async def _handle_setup_models(
         console.print(f"  Coding:   [bold]{coding_display}[/]")
     console.print()
 
-    # --- Provider ---
-    providers = {"1": "anthropic", "2": "openai", "3": "openai-compatible"}
-    current_num = {"anthropic": "1", "openai": "2", "openai-compatible": "3"}.get(
-        settings.planning_provider, "1"
-    )
-    console.print("[anton.cyan]Available providers:[/]")
-    console.print(
-        r"  [bold]1[/]  Anthropic (Claude)                    [dim]\[recommended][/]"
-    )
-    console.print(
-        r"  [bold]2[/]  OpenAI (GPT / o-series)               [dim]\[experimental][/]"
-    )
-    console.print(
-        r"  [bold]3[/]  OpenAI-compatible (custom endpoint)   [dim]\[experimental][/]"
-    )
-    console.print()
-    # Use the same onboarding flow from cli.py
-
     def _print_choices():
         console.print("  [bold]1[/]  [link=https://mdb.ai][anton.cyan]Minds-Enterprise-Cloud[/][/link] [anton.success](recommended)[/]")
         console.print("  [bold]2[/]  [anton.cyan]Minds-Enterprise-Server[/] [anton.muted]self-hosted[/]")

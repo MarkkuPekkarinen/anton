@@ -4154,7 +4154,6 @@ async def _chat_loop(
         style=pt_style,
     )
 
-    # === Guided onboarding ===
     initial_prompt: str | None = None
     if just_onboarded and not resume and sys.stdout.isatty():
         from anton.onboarding import (

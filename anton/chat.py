@@ -3931,14 +3931,22 @@ class _ClosingSpinner:
 
 
 def run_chat(
-    console: Console, settings: AntonSettings, *, resume: bool = False
+    console: Console,
+    settings: AntonSettings,
+    *,
+    resume: bool = False,
+    just_onboarded: bool = False,
 ) -> None:
     """Launch the interactive chat REPL."""
-    asyncio.run(_chat_loop(console, settings, resume=resume))
+    asyncio.run(_chat_loop(console, settings, resume=resume, just_onboarded=just_onboarded))
 
 
 async def _chat_loop(
-    console: Console, settings: AntonSettings, *, resume: bool = False
+    console: Console,
+    settings: AntonSettings,
+    *,
+    resume: bool = False,
+    just_onboarded: bool = False,
 ) -> None:
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.llm.client import LLMClient
@@ -4089,6 +4097,20 @@ async def _chat_loop(
         style=pt_style,
     )
 
+    # === Guided onboarding ===
+    initial_prompt: str | None = None
+    if just_onboarded and not resume and sys.stdout.isatty():
+        from anton.onboarding import (
+            build_suggestions,
+            display_suggestions,
+            prompt_for_selection,
+        )
+
+        suggestions = build_suggestions()
+        if suggestions:
+            display_suggestions(console, suggestions)
+            initial_prompt = await prompt_for_selection(console, suggestions, prompt_session)
+
     try:
         while True:
             # Memory confirmation UX — show pending lessons before prompt
@@ -4132,16 +4154,23 @@ async def _chat_loop(
                 session._pending_memory_confirmations = []
                 console.print()
 
-            try:
+            if initial_prompt is not None:
+                stripped = initial_prompt
+                initial_prompt = None
                 from anton.channel.theme import get_palette as _gp
                 _you_color = _gp().user_prompt
-                user_input = await prompt_session.prompt_async(
-                    [(f"bold fg:{_you_color}", "you>"), ("", " ")]
-                )
-            except EOFError:
-                break
+                console.print(f"[bold fg:{_you_color}]you>[/] {stripped}")
+            else:
+                try:
+                    from anton.channel.theme import get_palette as _gp
+                    _you_color = _gp().user_prompt
+                    user_input = await prompt_session.prompt_async(
+                        [(f"bold fg:{_you_color}", "you>"), ("", " ")]
+                    )
+                except EOFError:
+                    break
 
-            stripped = user_input.strip()
+                stripped = user_input.strip()
             # message_content holds what we send to the LLM — may be str or
             # list[dict] (multimodal content blocks for images).
             message_content: str | list[dict] | None = None

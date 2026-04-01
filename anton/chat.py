@@ -557,43 +557,63 @@ class ChatSession:
 
         user_msg_str = user_input if isinstance(user_input, str) else ""
         assistant_text_parts: list[str] = []
-        _agent_crashed = False
-        try:
-            async for event in self._stream_and_handle_tools(user_msg_str):
-                if isinstance(event, StreamTextDelta):
-                    assistant_text_parts.append(event.text)
-                yield event
-        except Exception as _agent_exc:
-            _agent_crashed = True
-            # The agent loop died unexpectedly. Ask the LLM to summarize
-            # what happened so the user isn't left in the dark.
-            self._history.append(
-                {
-                    "role": "user",
-                    "content": (
-                        f"SYSTEM: An unexpected error interrupted the task: {_agent_exc}\n\n"
-                        "The agent loop has stopped. Please:\n"
-                        "1. Summarize what you accomplished so far.\n"
-                        "2. Explain what went wrong in plain language.\n"
-                        "3. Suggest next steps — what the user can try (e.g. rephrase, "
-                        "simplify the request, or ask you to continue from where you left off).\n"
-                        "Be concise and helpful."
-                    ),
-                }
-            )
+        _max_auto_retries = 2
+        _retry_count = 0
+
+        while True:
             try:
-                async for event in self._llm.plan_stream(
-                    system=await self._build_system_prompt(user_msg_str),
-                    messages=self._history,
-                ):
+                async for event in self._stream_and_handle_tools(user_msg_str):
                     if isinstance(event, StreamTextDelta):
                         assistant_text_parts.append(event.text)
                     yield event
-            except Exception:
-                # Even the recovery LLM call failed — yield a plain text fallback
-                fallback = f"An unexpected error occurred: {_agent_exc}. Please try again or rephrase your request."
-                assistant_text_parts.append(fallback)
-                yield StreamTextDelta(text=fallback)
+                break  # completed successfully
+            except Exception as _agent_exc:
+                _retry_count += 1
+                if _retry_count <= _max_auto_retries:
+                    # Inject the error into history and let the LLM try to recover
+                    self._history.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"SYSTEM: An error interrupted execution: {_agent_exc}\n\n"
+                                "If you can diagnose and fix the issue, continue working on the task. "
+                                "Adjust your approach to avoid the same error. "
+                                "If this is unrecoverable, summarize what you accomplished and suggest next steps."
+                            ),
+                        }
+                    )
+                    # Continue the while loop — _stream_and_handle_tools will be called
+                    # again with the error context now in history
+                    continue
+                else:
+                    # Exhausted retries — stop and summarize for the user
+                    self._history.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                f"SYSTEM: The task has failed {_retry_count} times. Latest error: {_agent_exc}\n\n"
+                                "Stop retrying. Please:\n"
+                                "1. Summarize what you accomplished so far.\n"
+                                "2. Explain what went wrong in plain language.\n"
+                                "3. Suggest next steps — what the user can try (e.g. rephrase, "
+                                "simplify the request, or ask you to continue from where you left off).\n"
+                                "Be concise and helpful."
+                            ),
+                        }
+                    )
+                    try:
+                        async for event in self._llm.plan_stream(
+                            system=await self._build_system_prompt(user_msg_str),
+                            messages=self._history,
+                        ):
+                            if isinstance(event, StreamTextDelta):
+                                assistant_text_parts.append(event.text)
+                            yield event
+                    except Exception:
+                        fallback = f"An unexpected error occurred: {_agent_exc}. Please try again or rephrase your request."
+                        assistant_text_parts.append(fallback)
+                        yield StreamTextDelta(text=fallback)
+                    break
 
         # Log assistant response to episodic memory
         if self._episodic is not None and assistant_text_parts:

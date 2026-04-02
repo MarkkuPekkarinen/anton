@@ -4096,29 +4096,54 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
     _os.system("cls" if sys.platform == "win32" else "clear")
 
     console.print()
-    _msg = (
-        "LLM is ready! Let\u2019s take it for a spin \u2014 I\u2019ll build an interactive "
-        "NVIDIA vs Bitcoin investment dashboard to make sure everything works. Ok?"
-    )
+    _line1 = "All set! To test things out, I\u2019ll pull NVIDIA vs Bitcoin data from"
+    _line2 = "the web and build you a 5-year investment comparison dashboard."
     console.print("[anton.prompt]anton>[/] ", end="")
-    for ch in _msg:
+    for ch in _line1:
+        console.file.write(ch)
+        console.file.flush()
+        _time.sleep(0.02)
+    console.print()
+    console.print("       ", end="")
+    for ch in _line2:
         console.file.write(ch)
         console.file.flush()
         _time.sleep(0.02)
     console.print()
     console.print()
+    console.print("       [anton.muted]Ok to run, or skip straight to chatting?[/]")
+    console.print()
 
-    confirm = await _prompt_or_cancel(
-        "(anton) Ready? (y/n)",
-        choices=["y", "n"],
-        default="y",
+    answer = await _prompt_or_cancel(
+        "you>",
         allow_cancel=True,
     )
-    if confirm is None or (confirm or "").strip().lower() != "y":
-        if confirm is None:
-            return None
+    if answer is None:
+        return None
+
+    answer_text = (answer or "").strip().lower()
+
+    # Classify: does the user want to run it?
+    _skip_words = {"no", "n", "skip", "nah", "pass", "nope", "later", "chat", "straight"}
+    _go_words = {"yes", "y", "ok", "sure", "go", "yeah", "yep", "run", "do it", "let's go", "lets go", "go for it"}
+
+    wants_demo = None
+    for w in _go_words:
+        if w in answer_text:
+            wants_demo = True
+            break
+    if wants_demo is None:
+        for w in _skip_words:
+            if w in answer_text:
+                wants_demo = False
+                break
+    if wants_demo is None:
+        # Default to yes if ambiguous
+        wants_demo = True if not answer_text else True
+
+    if not wants_demo:
         console.print()
-        console.print("  [anton.muted]No worries! Just ask me anything when you're ready.[/]")
+        console.print("  [anton.muted]All good! Ask me anything \u2014 data questions, dashboards, analysis, you name it.[/]")
         console.print()
         return None
 
@@ -4151,7 +4176,7 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
     from rich.spinner import Spinner
     from rich.text import Text
 
-    pad = await session._scratchpads.get_or_create("demo")
+    pad = await session._scratchpads.get_or_create("main")
 
     # Pre-install dependencies so the main script doesn't fail mid-run
     install_spinner = Text("  Installing dependencies (yfinance, pandas, numpy)...", style="anton.muted")
@@ -4194,20 +4219,35 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
 
     console.print(f"  [anton.success]\u2714[/] [anton.muted]Dashboard built successfully[/]")
 
+    # Inject context into session history so the LLM knows data is live
+    _demo_stdout = (cell.stdout or "")[:3000]
+    session._history.append({
+        "role": "assistant",
+        "content": (
+            "I built an interactive NVIDIA vs Bitcoin 5-year investment dashboard. "
+            "The dashboard HTML is at: " + output_html + "\n\n"
+            "The scratchpad 'main' is still running with all data loaded in memory:\n"
+            "- prices DataFrame (monthly OHLCV, returns, cumulative, drawdowns)\n"
+            "- risk DataFrame (annual stats, Sharpe, Sortino, Calmar, win rate)\n"
+            "- annual DataFrame (year-by-year breakdown)\n"
+            "- mc DataFrame (1,000-path Monte Carlo, 60 months)\n"
+            "- scorecard DataFrame (12-metric head-to-head comparison)\n\n"
+            "All variables are live in the 'main' scratchpad — the user can ask "
+            "follow-up questions and I can use the existing data without re-fetching.\n\n"
+            f"Script output:\n{_demo_stdout}"
+        ),
+    })
+
     # Show findings
-    console.print()
-    console.print(f"[anton.glow] {'━' * 60}[/]")
     console.print()
     console.print("[anton.prompt]anton>[/] Dashboard is open in your browser!")
     console.print()
-    console.print("  [bold]NVDA vs BTC \u2014 5-Year Investment Dashboard[/]")
-    console.print("  [anton.muted]Single self-contained HTML file \u00b7 6 interactive tabs[/]")
+    console.print("       [bold]NVDA vs BTC \u2014 5-Year Investment Dashboard[/]")
+    console.print("       [anton.muted]Single self-contained HTML file \u00b7 6 interactive tabs[/]")
     console.print()
-    console.print("  [bold]Tabs:[/] Performance \u00b7 Risk \u00b7 Monte Carlo \u00b7 Annual \u00b7 Scorecard \u00b7 Decision")
+    console.print("       [bold]Tabs:[/] Performance \u00b7 Risk \u00b7 Monte Carlo \u00b7 Annual \u00b7 Scorecard \u00b7 Decision")
     console.print()
-    console.print("  [anton.muted]This is what Anton can do. Now it\u2019s your turn \u2014 ask me anything![/]")
-    console.print()
-    console.print(f"[anton.glow] {'━' * 60}[/]")
+    console.print("       This is what Anton can do. Now it\u2019s your turn \u2014 ask me anything!")
     console.print()
 
     return "_AGENT_ZERO_DONE"

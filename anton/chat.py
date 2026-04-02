@@ -4193,11 +4193,21 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
         console.file.flush()
         _time.sleep(0.02)
 
-    # Static ellipsis + wait 10 seconds
+    # Ellipsis + spinner for ~10 seconds
     console.file.write("...\n")
     console.file.flush()
-    await asyncio.sleep(10)
-    console.file.flush()
+
+    from rich.live import Live
+    from rich.spinner import Spinner
+    from rich.text import Text
+
+    with Live(
+        Spinner("dots", text=Text("", style="anton.muted"), style="anton.cyan"),
+        console=console,
+        refresh_per_second=10,
+        transient=True,
+    ):
+        await asyncio.sleep(10)
     console.print()
 
     # Read the script and patch for scratchpad execution.

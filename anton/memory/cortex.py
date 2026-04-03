@@ -53,7 +53,7 @@ You are a memory compaction system. Review these memory entries and:
 4. Keep all unique, useful entries
 
 Return a JSON object with:
-- "kept": array of entry strings to keep (cleaned up, no metadata comments)
+- "kept": array of entry strings to keep — preserve the trailing `<!-- ... -->` metadata comment on each entry exactly as it appears
 - "merged": array of strings describing what was merged
 - "pruned": array of strings describing what was removed and why
 

@@ -9,7 +9,7 @@ import re
 import zipfile
 from pathlib import Path
 
-from anton.minds_http import minds_request
+from anton.minds_client import minds_request
 
 
 DEFAULT_PUBLISH_URL = "https://4nton.ai"

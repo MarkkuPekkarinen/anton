@@ -888,11 +888,11 @@ class ChatSession:
                                         (cell.stdout or "")[:2000],
                                         description=description,
                                     )
-                        elif tc.name == "connect_new_datasource":
+                        elif tc.name in ("connect_new_datasource", "publish_or_preview"):
                             # Interactive tool — pause spinner AND escape watcher
                             yield StreamTaskProgress(
-                                phase="connect_datasource",
-                                message="Connecting datasource...",
+                                phase="interactive",
+                                message="",
                             )
                             if self._escape_watcher:
                                 self._escape_watcher.pause()

@@ -2342,6 +2342,10 @@ async def _chat_loop(
                     arg = parts[1].strip() if len(parts) > 1 else ""
                     await _handle_publish(console, settings, workspace, arg)
                     continue
+                elif cmd == /unpublish":
+                    arg = parts[1].strip() if len(parts) > 1 else ""
+                    await _handle_unpublish(console, settings, workspace, arg)
+                    continue
                 elif cmd == "/help":
                     print_slash_help(console)
                     continue

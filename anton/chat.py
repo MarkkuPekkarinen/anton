@@ -89,7 +89,7 @@ from anton.minds_client import (
     test_llm,
 )
 from anton.data_vault import DataVault
-from anton.datasource_utils import (
+from anton.utils.datasources import (
     build_datasource_context,
     register_secret_vars,
     restore_namespaced_env,

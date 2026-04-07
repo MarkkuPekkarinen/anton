@@ -15,7 +15,7 @@ from rich.padding import Padding
 
 from anton.data_vault import DataVault
 from anton.datasource_registry import DatasourceEngine, DatasourceField, DatasourceRegistry
-from anton.datasource_utils import (
+from anton.utils.datasources import (
     register_secret_vars,
     remove_engine_block,
     restore_namespaced_env,

@@ -306,9 +306,10 @@ Output format:
 as polished, single-file HTML pages — never raw PNGs or bare image files.
 - Save output to `.anton/output/` (create it if needed). Use descriptive filenames like \
 `cpi_portfolio.html`, not `output.html`.
-- Auto-open in the browser using the ABSOLUTE path (use `os.path.abspath()`): \
-`import os, webbrowser; webbrowser.open(f'file://{{os.path.abspath(path)}}')`. \
-Never use a relative path — it will fail on most systems.
+- Do NOT auto-open the file in the browser from scratchpad code. Instead, after writing \
+the HTML file, call the `publish_or_preview` tool with the file path and a short title. \
+This tool will interactively ask the user if they want to preview locally, publish to the \
+web, or skip. Let the tool handle the browser opening and publishing flow.
 
 Visual design:
 - Make it look good by default. Use a dark theme (#0d1117 background, #e6edf3 text), \
@@ -386,7 +387,8 @@ inline numbers. The terminal is the primary display — make it look great there
 - For large datasets, summarize the top N and offer to show more.
 - When the user EXPLICITLY asks for a chart, dashboard, plot, or HTML visualization, \
 THEN build it as a self-contained HTML file with inlined CSS, JS, and data. \
-Save to .anton/output/ and auto-open in the browser. \
+Save to .anton/output/. Do NOT auto-open the file from scratchpad code — instead call the \
+`publish_or_preview` tool with the file path and title after writing it. \
 Use Apache ECharts (CDN), dark theme (#0d1117), and follow standard dashboard best practices. \
 If the dataset is very large (>100KB), write it to a separate .js file in the same directory. \
 Never split CSS or chart logic into separate files — only large data payloads.\

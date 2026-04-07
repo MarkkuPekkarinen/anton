@@ -166,19 +166,23 @@ CONNECT_DATASOURCE_TOOL = {
 }
 
 PUBLISH_TOOL = {
-    "name": "publish",
+    "name": "publish_or_preview",
     "description": (
-        "Publish an HTML report or dashboard to the web so it can be shared via a public link. "
-        "Use this after generating an HTML file in .anton/output/. "
-        "The user must have a Minds (mdb.ai) API key configured. "
-        "If the key is not set, tell the user to run /publish to set it up interactively."
+        "Call this IMMEDIATELY after generating an HTML dashboard or report in .anton/output/. "
+        "This tool prompts the user to preview (open locally in browser) or publish (share on the web). "
+        "Do NOT print any message before calling this tool — it handles the user-facing output. "
+        "Do NOT ask the user if they want to preview or publish — this tool does that interactively."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "file_path": {
                 "type": "string",
-                "description": "Path to the HTML file to publish (e.g. .anton/output/dashboard.html)",
+                "description": "Path to the HTML file (e.g. .anton/output/dashboard.html)",
+            },
+            "title": {
+                "type": "string",
+                "description": "Short title describing the dashboard (e.g. 'BTC & Macro Dashboard')",
             },
         },
         "required": ["file_path"],
@@ -514,40 +518,120 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         )
 
 
-async def handle_publish(session: ChatSession, tc_input: dict) -> str:
-    """Publish an HTML file to the web via anton-services."""
+async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str:
+    """Interactive preview/publish flow after dashboard creation."""
+    import os
+    import webbrowser
     from pathlib import Path
 
+    from anton.chat import _prompt_or_cancel
+
+    console = session._console
+
+    raw_path = tc_input.get("file_path", "")
+    title = tc_input.get("title", "Dashboard")
+    file_path = Path(raw_path)
+    if not file_path.is_absolute() and session._workspace:
+        file_path = Path(session._workspace.base) / raw_path
+
+    if not file_path.exists():
+        return f"File not found: {file_path}"
+
+    console.print()
+    console.print(f"  [anton.success]Dashboard ready:[/] {title}")
+    console.print(f"  [anton.muted]{file_path.name}[/]")
+    console.print()
+
+    choice = await _prompt_or_cancel(
+        "  (anton) Preview, publish, or skip?",
+        choices=["preview", "publish", "skip", "p", "s"],
+        choices_display="preview/publish/skip",
+        default="preview",
+    )
+
+    if choice is None or choice in ("skip", "s"):
+        console.print()
+        return "User skipped preview and publish."
+
+    if choice in ("preview", "p"):
+        abs_path = os.path.abspath(str(file_path))
+        webbrowser.open(f"file://{abs_path}")
+        console.print("  [anton.muted]Opened in browser.[/]")
+        console.print()
+
+        # After preview, offer to publish
+        pub_choice = await _prompt_or_cancel(
+            "  (anton) Publish to the web?",
+            choices=["y", "n"],
+            choices_display="y/n",
+            default="y",
+        )
+        if pub_choice is None or pub_choice == "n":
+            console.print()
+            return "User previewed the dashboard but chose not to publish."
+        choice = "publish"
+
+    # Publish flow
     from anton.config.settings import AntonSettings
     from anton.publisher import publish
 
     settings = AntonSettings()
 
     if not settings.minds_api_key:
-        return (
-            "PUBLISH FAILED: No Minds API key configured. "
-            "Ask the user to run /publish to set up their mdb.ai API key interactively."
+        console.print("  [anton.muted]To publish you need a free Minds account.[/]")
+        console.print()
+        has_key = await _prompt_or_cancel(
+            "  (anton) Do you have an mdb.ai API key?",
+            choices=["y", "n"],
+            choices_display="y/n",
+            default="y",
         )
+        if has_key is None:
+            console.print()
+            return "User cancelled publish."
+        if has_key == "n":
+            webbrowser.open(
+                "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
+                "?client_id=public-client&response_type=code&scope=openid"
+                "&redirect_uri=https%3A%2F%2Fmdb.ai"
+            )
+            console.print()
 
-    raw_path = tc_input.get("file_path", "")
-    file_path = Path(raw_path)
-    if not file_path.is_absolute() and session._workspace:
-        file_path = Path(session._workspace.base) / raw_path
+        api_key = await _prompt_or_cancel("  (anton) API key", password=True)
+        if api_key is None or not api_key.strip():
+            console.print()
+            return "User cancelled publish."
+        api_key = api_key.strip()
+        settings.minds_api_key = api_key
+        if session._workspace:
+            session._workspace.set_secret("ANTON_MINDS_API_KEY", api_key)
+        console.print()
 
-    if not file_path.exists():
-        return f"PUBLISH FAILED: File not found: {file_path}"
+    from rich.live import Live
+    from rich.spinner import Spinner
 
-    try:
-        result = publish(
-            file_path,
-            api_key=settings.minds_api_key,
-            publish_url=settings.publish_url,
-            ssl_verify=settings.minds_ssl_verify,
-        )
-        view_url = result.get("view_url", "")
-        return f"Published successfully!\nView URL: {view_url}"
-    except Exception as e:
-        return f"PUBLISH FAILED: {e}"
+    with Live(Spinner("dots", text="  Publishing...", style="anton.cyan"), console=console, transient=True):
+        try:
+            result = publish(
+                file_path,
+                api_key=settings.minds_api_key,
+                publish_url=settings.publish_url,
+                ssl_verify=settings.minds_ssl_verify,
+            )
+        except Exception as e:
+            console.print(f"  [anton.error]Publish failed: {e}[/]")
+            console.print()
+            return f"PUBLISH FAILED: {e}"
+
+    view_url = result.get("view_url", "")
+    console.print(f"  [anton.success]Published![/]")
+    console.print(f"  [link={view_url}]{view_url}[/link]")
+    console.print()
+
+    if view_url:
+        webbrowser.open(view_url)
+
+    return f"Published successfully!\nView URL: {view_url}"
 
 
 async def dispatch_tool(session: ChatSession, tool_name: str, tc_input: dict) -> str:
@@ -560,7 +644,7 @@ async def dispatch_tool(session: ChatSession, tool_name: str, tc_input: dict) ->
         return await handle_recall(session, tc_input)
     elif tool_name == "connect_new_datasource":
         return await handle_connect_datasource(session, tc_input)
-    elif tool_name == "publish":
-        return await handle_publish(session, tc_input)
+    elif tool_name == "publish_or_preview":
+        return await handle_publish_or_preview(session, tc_input)
     else:
         return f"Unknown tool: {tool_name}"

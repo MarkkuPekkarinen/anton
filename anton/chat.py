@@ -178,7 +178,7 @@ class ChatSession:
         self._history_store = history_store
         self._session_id = session_id
         self._cancel_event = asyncio.Event()
-        self._escape_watcher: _EscapeWatcher | None = None
+        self._escape_watcher: "EscapeWatcher | None" = None
         self._active_datasource: str | None = None
         self._scratchpads = ScratchpadManager(
             coding_provider=coding_provider,
@@ -1637,146 +1637,6 @@ async def _handle_publish(
         webbrowser.open(view_url)
 
 
-class _EscapeWatcher:
-    """Detect Escape keypress during streaming via cbreak terminal mode."""
-
-    def __init__(self, on_cancel: Callable[[], None] | None = None) -> None:
-        self.cancelled = asyncio.Event()
-        self._on_cancel = on_cancel
-        self._task: asyncio.Task | None = None
-        self._old_settings: list | None = None
-        self._stop = False
-        self._paused = False
-
-    async def __aenter__(self) -> _EscapeWatcher:
-        if sys.platform != "win32" and sys.stdin.isatty():
-            self._task = asyncio.create_task(self._watch())
-        return self
-
-    def pause(self) -> None:
-        """Temporarily restore normal terminal mode for interactive prompts."""
-        if self._paused or self._old_settings is None:
-            return
-        import termios
-        fd = sys.stdin.fileno()
-        termios.tcsetattr(fd, termios.TCSADRAIN, self._old_settings)
-        self._paused = True
-
-    def resume(self) -> None:
-        """Re-enter cbreak mode after interactive prompts."""
-        if not self._paused:
-            return
-        import tty
-        fd = sys.stdin.fileno()
-        tty.setcbreak(fd)
-        self._paused = False
-
-    async def __aexit__(self, *exc: object) -> None:
-        self._stop = True
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            # Drain any leftover bytes (e.g. partial CPR responses) so they
-            # don't leak into the next prompt_toolkit input session.
-            # Only needed on Unix where _watch() was running (fcntl/termios
-            # are not available on Windows).
-            self._drain_stdin()
-
-    @staticmethod
-    def _drain_stdin() -> None:
-        if sys.platform == "win32":
-            return
-        import fcntl
-
-        fd = sys.stdin.fileno()
-        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-        try:
-            while True:
-                try:
-                    if not os.read(fd, 1024):
-                        break
-                except BlockingIOError:
-                    break
-        finally:
-            fcntl.fcntl(fd, fcntl.F_SETFL, flags)
-
-    async def _watch(self) -> None:
-        if sys.platform == "win32":
-            return
-        import select
-        import termios
-        import tty
-
-        fd = sys.stdin.fileno()
-        self._old_settings = termios.tcgetattr(fd)
-        try:
-            tty.setcbreak(fd)
-            loop = asyncio.get_running_loop()
-            while not self._stop:
-                # Skip reading while paused (interactive tool running)
-                if self._paused:
-                    await asyncio.sleep(0.1)
-                    continue
-                # Use select with a short timeout so the executor thread
-                # can check the stop flag and exit cleanly — a bare
-                # os.read() blocks forever and survives task cancellation,
-                # which causes it to steal bytes from the next prompt.
-                ready = await loop.run_in_executor(
-                    None, lambda: select.select([fd], [], [], 0.1)[0]
-                )
-                if not ready:
-                    continue
-                ch = os.read(fd, 1)
-                if ch == b"\x1b":
-                    # Arrow keys and other special keys send escape
-                    # sequences starting with \x1b (e.g. \x1b[A for
-                    # up-arrow).  Wait briefly to see if more bytes
-                    # follow — if they do, this is a multi-byte
-                    # sequence, not a standalone Escape press.
-                    followup = await loop.run_in_executor(
-                        None, lambda: select.select([fd], [], [], 0.05)[0]
-                    )
-                    if followup:
-                        # Consume the rest of the escape sequence and
-                        # ignore it (not a bare ESC key).
-                        os.read(fd, 32)
-                        continue
-                    if self._on_cancel is not None:
-                        self._on_cancel()
-                    self.cancelled.set()
-                    return
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, self._old_settings)
-
-
-class _ClosingSpinner:
-    """Animated spinner shown while scratchpad processes are being killed."""
-
-    def __init__(self, console: Console) -> None:
-        self._console = console
-        self._live: object | None = None
-
-    def start(self) -> None:
-        from rich.live import Live
-        from rich.spinner import Spinner
-        from rich.text import Text
-
-        spinner = Spinner(
-            "dots", text=Text(" Closing scratchpad processes…", style="anton.muted")
-        )
-        self._live = Live(
-            spinner, console=self._console, refresh_per_second=6, transient=True
-        )
-        self._live.start()
-
-    def stop(self) -> None:
-        if self._live is not None:
-            self._live.stop()
-            self._live = None
 
 
 async def _agent_zero(console: Console, session: "ChatSession", settings) -> str | None:
@@ -2255,7 +2115,7 @@ async def _chat_loop(
     _query_count = 0
     _total_questions = 0  # tracks first 10 questions for time estimates
 
-    from anton.chat_ui import StreamDisplay
+    from anton.chat_ui import StreamDisplay, EscapeWatcher, ClosingSpinner
 
     toolbar = {"stats": "", "status": ""}
     display = StreamDisplay(console, toolbar=toolbar)
@@ -2533,7 +2393,7 @@ async def _chat_loop(
             session._cancel_event.clear()
 
             try:
-                async with _EscapeWatcher(on_cancel=display.show_cancelling) as esc:
+                async with EscapeWatcher(on_cancel=display.show_cancelling) as esc:
                     session._escape_watcher = esc
                     async for event in session.turn_stream(message_content):
                         if esc.cancelled.is_set():
@@ -2624,7 +2484,7 @@ async def _chat_loop(
                 # spawned subprocesses that would otherwise be orphaned).
                 if session._scratchpads.list_pads():
                     console.print()
-                    _closing = _ClosingSpinner(console)
+                    _closing = ClosingSpinner(console)
                     _closing.start()
                     try:
                         await session._scratchpads.close_all()

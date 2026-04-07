@@ -22,14 +22,13 @@ from anton.minds_client import (
     normalize_minds_url,
     test_llm,
 )
-from anton.publisher import publish
+from anton.publisher import publish, unpublish
 from anton.utils.prompt import prompt_minds_api_key, prompt_or_cancel
 from anton.workspace import Workspace
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
     from anton.config.settings import AntonSettings
-    from anton.memory.cortex import Cortex
     from anton.memory.episodes import EpisodicMemory
 
 
@@ -48,7 +47,7 @@ async def handle_connect_minds(
 
     console.print()
 
-    # --- Prompt for URL and API key (use saved values as defaults) ---
+    # Prompt for URL and API key if missing
     saved_url = normalize_minds_url(settings.minds_url)
     minds_url = await prompt_or_cancel("(anton) Minds server URL", default=saved_url)
     if minds_url is None:
@@ -68,7 +67,6 @@ async def handle_connect_minds(
 
     ssl_verify = settings.minds_ssl_verify
 
-    # --- Try to connect ---
     minds = None
     while minds is None:
         console.print()
@@ -117,7 +115,6 @@ async def handle_connect_minds(
         console.print()
         return session
 
-    # --- Select a Mind ---
     console.print()
     console.print("[anton.cyan]Available minds:[/]")
     for i, mind in enumerate(minds, 1):
@@ -139,7 +136,6 @@ async def handle_connect_minds(
     selected_mind = minds[int(pick) - 1]
     mind_name = selected_mind.get("name", "")
 
-    # --- Datasource selection within the mind ---
     mind_datasources = selected_mind.get("datasources", [])
     ds_name = ""
     ds_engine = ""
@@ -175,7 +171,7 @@ async def handle_connect_minds(
         except Exception:
             ds_engine = "unknown"
 
-    # --- Persist to global ~/.anton/.env ---
+    # Persist to global ~/.anton/.env
     global_ws.set_secret("ANTON_MINDS_API_KEY", api_key)
     global_ws.set_secret("ANTON_MINDS_URL", minds_url)
     global_ws.set_secret("ANTON_MINDS_MIND_NAME", mind_name)
@@ -196,8 +192,7 @@ async def handle_connect_minds(
         status += f" [anton.success]| datasource: {ds_name} ({ds_engine})[/]"
     console.print(status)
 
-    # --- Test if the Minds server also supports LLM endpoints ---
-    # (silenced: was printing "Testing LLM endpoints..." and "not available" messages)
+    # Test if the Minds server also supports LLM endpoints
     llm_ok = test_llm(minds_url, api_key, verify=ssl_verify)
 
     if llm_ok:
@@ -390,13 +385,83 @@ async def handle_publish(
         webbrowser.open(view_url)
 
 
-def handle_unpublish(
+async def handle_unpublish(
     console: Console,
     settings,
     workspace,
     report_arg: str = "",
 ) -> None:
     """Handle /unpublish command — unpublish a previously published report."""
+
     console.print()
-    console.print("  [anton.warning]Unpublish is not implemented yet.[/]")
+
+    if not settings.minds_api_key:
+        api_key = await prompt_or_cancel("  API key", password=True)
+        if api_key is None or not api_key.strip():
+            console.print()
+            return
+        api_key = api_key.strip()
+        settings.minds_api_key = api_key
+        if workspace:
+            workspace.set_secret("ANTON_MINDS_API_KEY", api_key)
+        console.print()
+
+    view_url = report_arg.strip()
+    if not view_url:
+        console.print(
+            "  [anton.muted]Paste the view URL of the report to remove.[/]"
+        )
+        console.print()
+        view_url = await prompt_or_cancel("  View URL")
+        if view_url is None or not view_url.strip():
+            console.print()
+            return
+        view_url = view_url.strip()
+        console.print()
+
+    # Expected path segment: /view/{user_prefix}/{md5}
+    match = re.search(r"/view/([a-f0-9]{9})/([a-f0-9]{32})", view_url)
+    if not match:
+        console.print(
+            "  [anton.error]Could not parse a valid view URL.[/]"
+        )
+        console.print(
+            "  [anton.muted]Expected format: https://4nton.ai/view/{user}/{md5}[/]"
+        )
+        console.print()
+        return
+
+    user_prefix = match.group(1)
+    md5 = match.group(2)
+
+    confirm = await prompt_or_cancel(
+        f"  Remove report {user_prefix}/{md5}?",
+        choices=["y", "n"],
+        choices_display="y/n",
+        default="n",
+    )
+    if confirm is None or confirm.lower() != "y":
+        console.print("  [anton.muted]Aborted.[/]")
+        console.print()
+        return
+
+    with Live(
+        Spinner("dots", text="  Removing...", style="anton.cyan"),
+        console=console,
+        transient=True,
+    ):
+        try:
+            unpublish(
+                user_prefix,
+                md5,
+                api_key=settings.minds_api_key,
+                publish_url=settings.publish_url,
+                ssl_verify=settings.minds_ssl_verify,
+            )
+        except Exception as e:
+            console.print(f"  [anton.error]Unpublish failed: {e}[/]")
+            console.print()
+            return
+
+    console.print("  [anton.success]Report removed.[/]")
     console.print()

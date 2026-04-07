@@ -85,3 +85,20 @@ def publish(
     url = f"{publish_url.rstrip('/')}/upload"
     raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)
     return json.loads(raw)
+
+
+def unpublish(
+    user_prefix: str,
+    md5: str,
+    *,
+    api_key: str,
+    publish_url: str = DEFAULT_PUBLISH_URL,
+    ssl_verify: bool = True,
+) -> dict:
+    """Delete a previously published report. Returns the delete response dict.
+
+    Response keys: deleted (list of removed S3 keys)
+    """
+    url = f"{publish_url.rstrip('/')}/delete/{user_prefix}/{md5}"
+    raw = minds_request(url, api_key, method="DELETE", verify=ssl_verify)
+    return json.loads(raw)

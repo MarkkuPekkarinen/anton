@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import json as _json
 import os
-import urllib.error
-import re as _re
 import sys
-import uuid
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,7 +12,6 @@ import anthropic
 
 from anton.clipboard import (
     cleanup_old_uploads,
-    clipboard_unavailable_reason,
     grab_clipboard,
     is_clipboard_supported,
     parse_dropped_paths as _parse_dropped_paths,
@@ -50,7 +45,6 @@ from anton.checks import TokenLimitInfo, TokenLimitStatus, check_minds_token_lim
 from anton.commands.setup import (
     handle_memory,
     handle_setup,
-    handle_setup_memory,
     handle_setup_models,
 )
 from anton.commands.ui import handle_theme, print_slash_help
@@ -61,49 +55,30 @@ from anton.utils.clipboard import (
     human_size,
 )
 from anton.chat_session import build_runtime_context, rebuild_session
-from anton.commands.integrations import handle_connect_minds, handle_publish
+from anton.commands.integrations import (
+    handle_connect_minds,
+    handle_publish,
+    handle_unpublish)
+
 from anton.commands.session import handle_resume
+
 from anton.commands.datasource import (
     handle_list_data_sources,
     handle_remove_data_source,
     handle_connect_datasource,
     handle_test_datasource,
 )
-from anton.utils.prompt import (
-    MINDS_KEYS,
-    LLM_KEYS,
-    SECRET_PATTERNS,
-    mask_secret,
-    is_secret_key,
-    display_value,
-    prompt_or_cancel,
-    prompt_minds_api_key,
-)
+from anton.utils.prompt import prompt_or_cancel
 
-from anton.minds_client import (
-    normalize_minds_url,
-    describe_minds_connection_error,
-    list_minds,
-    get_mind,
-    refresh_knowledge,
-    list_datasources,
-    test_llm,
-)
 from anton.data_vault import DataVault
 from anton.utils.datasources import (
     build_datasource_context,
     register_secret_vars,
-    restore_namespaced_env,
-    remove_engine_block,
     scrub_credentials,
-    parse_connection_slug,
 )
 from anton.datasource_registry import (
-    DatasourceEngine,
-    DatasourceField,
     DatasourceRegistry,
 )
-from anton.llm.openai import build_chat_completion_kwargs
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML

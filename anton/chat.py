@@ -60,6 +60,7 @@ from anton.commands.datasource import (
     handle_connect_datasource,
     handle_test_datasource,
 )
+from anton.commands.session import handle_resume
 from anton.prompt_utils import (
     MINDS_KEYS,
     LLM_KEYS,
@@ -70,6 +71,8 @@ from anton.prompt_utils import (
     prompt_or_cancel,
     prompt_minds_api_key,
 )
+
+from anton.chat_session import build_runtime_context
 from anton.minds_client import (
     normalize_minds_url,
     describe_minds_connection_error,
@@ -81,11 +84,11 @@ from anton.minds_client import (
 )
 from anton.data_vault import DataVault
 from anton.datasource_utils import (
-    _build_datasource_context,
-    _register_secret_vars,
-    _restore_namespaced_env,
-    _remove_engine_block,
-    _scrub_credentials,
+    build_datasource_context,
+    register_secret_vars,
+    restore_namespaced_env,
+    remove_engine_block,
+    scrub_credentials,
     parse_connection_slug,
 )
 from anton.datasource_registry import (
@@ -254,7 +257,7 @@ class ChatSession:
             if md_context:
                 prompt += md_context
         # Inject connected datasource context without credentials
-        ds_ctx = _build_datasource_context(active_only=self._active_datasource)
+        ds_ctx = build_datasource_context(active_only=self._active_datasource)
         if ds_ctx:
             prompt += ds_ctx
         return prompt
@@ -541,7 +544,7 @@ class ChatSession:
                 except Exception as exc:
                     result_text = f"Tool '{tc.name}' failed: {exc}"
 
-                result_text = _scrub_credentials(result_text)
+                result_text = scrub_credentials(result_text)
                 result_text = _apply_error_tracking(
                     result_text,
                     tc.name,
@@ -945,7 +948,7 @@ class ChatSession:
                             result_text[:2000],
                             tool=tc.name,
                         )
-                    result_text = _scrub_credentials(result_text)
+                    result_text = scrub_credentials(result_text)
                     result_text = _apply_error_tracking(
                         result_text, tc.name, error_streak, resilience_nudged
                     )
@@ -2307,14 +2310,14 @@ async def _chat_loop(
 
     # Inject all Local Vault connections as namespaced DS_* env vars so every
     # scratchpad subprocess inherits them. Must happen before any ChatSession is created.
-    _dv = DataVault()
-    _dreg = DatasourceRegistry()
-    for _conn in _dv.list_connections():
-        _dv.inject_env(_conn["engine"], _conn["name"])  # flat=False by default
-        _edef = _dreg.get(_conn["engine"])
-        if _edef is not None:
-            _register_secret_vars(_edef, engine=_conn["engine"], name=_conn["name"])
-    del _dv, _dreg
+    dv = DataVault()
+    dreg = DatasourceRegistry()
+    for conn in dv.list_connections():
+        dv.inject_env(conn["engine"], conn["name"])  # flat=False by default
+        edef = dreg.get(conn["engine"])
+        if edef is not None:
+            register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
+    del dv, dreg
 
     global_memory_dir = Path.home() / ".anton" / "memory"
     project_memory_dir = settings.workspace_path / ".anton" / "memory"

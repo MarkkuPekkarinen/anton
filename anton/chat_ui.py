@@ -350,7 +350,7 @@ class StreamDisplay:
             self._update_spinner()
             return
 
-        if phase == "connect_datasource":
+        if phase in ("connect_datasource", "interactive"):
             # Interactive tool — stop spinner so user can see and type
             self._stop_spinner()
             return

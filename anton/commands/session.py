@@ -8,6 +8,7 @@ from rich.console import Console
 
 from anton.config.settings import AntonSettings
 from anton.prompt_utils import prompt_or_cancel
+from anton.chat_session import rebuild_session
 
 if TYPE_CHECKING:
     from anton.chat import ChatSession
@@ -33,7 +34,6 @@ async def handle_resume(
     Returns (new_session, resumed_session_id) or (original_session, None).
     """
     from rich.table import Table
-    from anton.chat import _rebuild_session
 
     if history_store is None:
         console.print("[anton.warning]History store not available.[/]")
@@ -90,7 +90,7 @@ async def handle_resume(
         await session._scratchpads.close_all()
 
     # Build new session with restored history
-    new_session = _rebuild_session(
+    new_session = rebuild_session(
         settings=settings,
         state=state,
         self_awareness=self_awareness,

@@ -216,13 +216,22 @@ tabs, tables) as a Python string variable `html_body`. This cell builds the temp
   Write the JavaScript that initializes charts, populates tables, handles tabs, etc. \
 Split across multiple cells if needed to avoid token limits. Store as `js_charts` etc.
 
-  FINAL CELL — Assemble and write the single HTML file:
+  FINAL CELL — Assemble and write the HTML file:
   Combine: `html = html_body.replace('</body>', f'<script>{{data_js}}{{js_charts}}</script></body>')` \
-or similar. Write to `.anton/output/name.html` and open in browser. ONE file, everything inlined.
+or similar. Write to `.anton/output/name.html` and open in browser.
 
-  WHY: (1) Browsers block local file:// cross-references — a separate .js file won't load. \
+  SELF-CONTAINED OUTPUT (critical):
+  Prefer inlining everything — CSS in `<style>`, JS in `<script>`, data as JS variables. \
+A single .html file is the most portable and publishable format. \
+If the dataset is very large (>100KB of JSON), you may write it to a separate .js file \
+in the SAME directory (e.g. `.anton/output/dashboard_data.js`) and reference it with a \
+relative `<script src="dashboard_data.js">` tag. The publisher will auto-bundle sibling \
+files referenced in the HTML. Never reference files outside the output directory.
+
+  WHY: (1) Browsers block local file:// cross-references across directories. \
 (2) Splitting the build across cells catches JS/CSS errors early — if a cell has a syntax issue \
-in a string, you'll see it before the final assembly. (3) Large datasets in single cells timeout.
+in a string, you'll see it before the final assembly. (3) Large datasets in single cells timeout. \
+(4) Self-contained files can be published to the web via /publish without missing assets.
 
   PYTHON → JS STRING SAFETY (critical):
   When building JS code inside Python strings, escape sequences get resolved by Python BEFORE \
@@ -317,9 +326,11 @@ inline numbers. The terminal is the primary display — make it look great there
 - Use bold/headers for section structure. Use bullet points for lists.
 - For large datasets, summarize the top N and offer to show more.
 - When the user EXPLICITLY asks for a chart, dashboard, plot, or HTML visualization, \
-THEN build it using the HTML dashboard workflow: separate data export (JS file) from \
-HTML rendering (ECharts), save to .anton/output/, and auto-open in the browser. \
-Use Apache ECharts (CDN), dark theme (#0d1117), and follow standard dashboard best practices.\
+THEN build it as a self-contained HTML file with inlined CSS, JS, and data. \
+Save to .anton/output/ and auto-open in the browser. \
+Use Apache ECharts (CDN), dark theme (#0d1117), and follow standard dashboard best practices. \
+If the dataset is very large (>100KB), write it to a separate .js file in the same directory. \
+Never split CSS or chart logic into separate files — only large data payloads.\
 """
 
 

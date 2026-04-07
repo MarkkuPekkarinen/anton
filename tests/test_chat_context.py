@@ -348,7 +348,7 @@ class TestMindsSetupRecovery:
         monkeypatch.setattr("anton.chat.list_minds", fake_list_minds)
         monkeypatch.setattr("anton.chat.test_llm", lambda *args, **kwargs: True)
         rebuilt = object()
-        monkeypatch.setattr("anton.chat._rebuild_session", lambda **kwargs: rebuilt)
+        monkeypatch.setattr("anton.chat.rebuild_session", lambda **kwargs: rebuilt)
 
         workspace_base = tmp_path / "workspace"
         workspace_base.mkdir()
@@ -408,7 +408,7 @@ class TestMindsSetupRecovery:
         monkeypatch.setattr("anton.chat.list_minds", fake_list_minds)
         monkeypatch.setattr("anton.chat.test_llm", lambda *args, **kwargs: True)
         rebuilt = object()
-        monkeypatch.setattr("anton.chat._rebuild_session", lambda **kwargs: rebuilt)
+        monkeypatch.setattr("anton.chat.rebuild_session", lambda **kwargs: rebuilt)
 
         workspace_base = tmp_path / "workspace"
         workspace_base.mkdir()

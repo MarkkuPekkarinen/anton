@@ -371,7 +371,7 @@ class TestResumeSessionScratchpadCleanup:
 
         with (
             patch("anton.commands.session.prompt_or_cancel", new=AsyncMock(return_value="1")),
-            patch("anton.chat._rebuild_session", return_value=new_session),
+            patch("anton.commands.session.rebuild_session", return_value=new_session),
         ):
             await handle_resume(
                 console=MagicMock(),

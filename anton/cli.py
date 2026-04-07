@@ -669,14 +669,16 @@ def _setup_minds(settings, ws, *, default_url: str | None = "https://mdb.ai") ->
         settings.planning_model = "_reason_"
         settings.coding_model = "_code_"
         settings.minds_ssl_verify = ssl_verify
-        # openai_api_key and openai_base_url are derived at runtime from
-        # minds_api_key and minds_url via model_post_init — no need to persist them.
-        settings.model_post_init(None)
+        derived_base_url = f"{minds_url.rstrip('/')}/api/v1"
+        settings.openai_api_key = api_key
+        settings.openai_base_url = derived_base_url
         ws.set_secret("ANTON_PLANNING_PROVIDER", "openai-compatible")
         ws.set_secret("ANTON_CODING_PROVIDER", "openai-compatible")
         ws.set_secret("ANTON_PLANNING_MODEL", "_reason_")
         ws.set_secret("ANTON_CODING_MODEL", "_code_")
         ws.set_secret("ANTON_MINDS_SSL_VERIFY", "true" if ssl_verify else "false")
+        ws.set_secret("ANTON_OPENAI_API_KEY", api_key)
+        ws.set_secret("ANTON_OPENAI_BASE_URL", derived_base_url)
     elif rate_limited:
         console.print("[anton.error]Token limit exceeded. Visit https://mdb.ai to upgrade or to top up your tokens.[/]")
         raise _SetupRetry()
@@ -1200,7 +1202,7 @@ def test_data_source(
     )
 
     async def _run() -> None:
-        await handle_test_datasource(console, scratchpads, name)
+        await _handle_test_datasource(console, scratchpads, name)
         await scratchpads.close_all()
 
     asyncio.run(_run())

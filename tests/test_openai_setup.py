@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import openai
 
-from anton.minds_client import test_llm as _minds_test_llm
+import anton.minds_client as minds_client
 from anton.cli import _setup_openai, _validate_openai_probe_response
 from anton.config.settings import AntonSettings
 
@@ -23,7 +23,7 @@ def test_minds_test_llm_uses_modern_openai_token_parameter(monkeypatch):
 
     monkeypatch.setattr("anton.minds_client.minds_request", fake_minds_request)
 
-    assert _minds_test_llm("https://example.com", "test-key") is True
+    assert minds_client.test_llm("https://example.com", "test-key") is True
 
     payload = json.loads(captured["payload"].decode())
     assert payload["model"] == "_code_"

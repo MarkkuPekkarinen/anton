@@ -54,14 +54,21 @@ from anton.commands.setup import (
     handle_setup_models,
 )
 from anton.commands.ui import handle_theme, print_slash_help
+from anton.utils.clipboard import (
+    ensure_clipboard,
+    format_clipboard_image_message,
+    format_file_message,
+    human_size,
+)
+from anton.chat_session import build_runtime_context, rebuild_session
+from anton.commands.session import handle_resume
 from anton.commands.datasource import (
     handle_list_data_sources,
     handle_remove_data_source,
     handle_connect_datasource,
     handle_test_datasource,
 )
-from anton.commands.session import handle_resume
-from anton.prompt_utils import (
+from anton.utils.prompt import (
     MINDS_KEYS,
     LLM_KEYS,
     SECRET_PATTERNS,
@@ -72,7 +79,6 @@ from anton.prompt_utils import (
     prompt_minds_api_key,
 )
 
-from anton.chat_session import build_runtime_context
 from anton.minds_client import (
     normalize_minds_url,
     describe_minds_connection_error,
@@ -1483,182 +1489,6 @@ async def _handle_connect(
     )
 
 
-def _format_file_message(text: str, paths: list[Path], console: Console) -> str:
-    """Rewrite user input to include file contents for detected paths."""
-    parts: list[str] = []
-
-    # Determine what the user typed besides the paths
-    remaining = text
-    for p in paths:
-        # Remove various representations of the path from the text
-        for representation in (str(p), f"'{p}'", f'"{p}"', str(p).replace(" ", "\\ ")):
-            remaining = remaining.replace(representation, "")
-    remaining = remaining.strip()
-
-    # Build the instruction
-    if remaining:
-        parts.append(remaining)
-    else:
-        if len(paths) == 1:
-            parts.append(f"Analyze this file: {paths[0].name}")
-        else:
-            names = ", ".join(p.name for p in paths)
-            parts.append(f"Analyze these files: {names}")
-
-    # Attach each file
-    for p in paths:
-        suffix = p.suffix.lower()
-        size = p.stat().st_size
-
-        # Show what we're picking up
-        console.print(f"  [anton.muted]attached: {p.name} ({_human_size(size)})[/]")
-
-        # Skip very large files (>500KB) — just reference them
-        if size > 512_000:
-            parts.append(
-                f'\n<file path="{p}">\n(File too large to inline — {_human_size(size)}. '
-                f"Use the scratchpad to read it.)\n</file>"
-            )
-            continue
-
-        # Skip binary-looking files
-        if suffix in (
-            ".png",
-            ".jpg",
-            ".jpeg",
-            ".gif",
-            ".bmp",
-            ".ico",
-            ".webp",
-            ".pdf",
-            ".zip",
-            ".tar",
-            ".gz",
-            ".exe",
-            ".dll",
-            ".so",
-            ".pyc",
-            ".pyo",
-            ".whl",
-            ".egg",
-            ".db",
-            ".sqlite",
-        ):
-            parts.append(
-                f'\n<file path="{p}">\n(Binary file — {_human_size(size)}. '
-                f"Use the scratchpad to process it.)\n</file>"
-            )
-            continue
-
-        try:
-            content = p.read_text(errors="replace")
-        except Exception:
-            parts.append(f'\n<file path="{p}">\n(Could not read file.)\n</file>')
-            continue
-
-        parts.append(f'\n<file path="{p}">\n{content}\n</file>')
-
-    return "\n".join(parts)
-
-
-def _format_clipboard_image_message(
-    uploaded: object, user_text: str = ""
-) -> list[dict]:
-    """Build a multimodal LLM message for a clipboard image upload.
-
-    Returns a list of content blocks (image + text) so the LLM can see
-    the image directly. The file path is included so the LLM can pass
-    it to the scratchpad if deeper processing is needed.
-    """
-    import base64
-
-    text = (
-        user_text.strip()
-        if user_text
-        else "I've pasted an image from my clipboard. Analyze it."
-    )
-    text += (
-        f"\n\nThe image is also saved at: {uploaded.path}\n"
-        f"({uploaded.width}x{uploaded.height}, {_human_size(uploaded.size_bytes)}). "
-        f"If you need to process it programmatically, use that path in the scratchpad."
-    )
-
-    # Read and base64-encode the saved PNG
-    image_data = Path(uploaded.path).read_bytes()
-    b64 = base64.standard_b64encode(image_data).decode("ascii")
-
-    return [
-        {
-            "type": "image",
-            "source": {
-                "type": "base64",
-                "media_type": "image/png",
-                "data": b64,
-            },
-        },
-        {
-            "type": "text",
-            "text": text,
-        },
-    ]
-
-
-async def _ensure_clipboard(console: Console) -> bool:
-    """Check clipboard support; offer to install Pillow if missing.
-
-    Returns True if clipboard is ready to use, False otherwise.
-    """
-    reason = clipboard_unavailable_reason()
-    if reason is None:
-        return True
-    if reason == "unsupported_platform":
-        console.print("[anton.warning]Clipboard is not supported on this platform.[/]")
-        return False
-    # reason == "missing_pillow"
-    console.print("[anton.muted]Clipboard image support requires Pillow.[/]")
-    answer = console.input("[bold]Install Pillow now? (y/n):[/] ").strip().lower()
-    if answer not in ("y", "yes"):
-        console.print("[anton.muted]Skipped.[/]")
-        return False
-    console.print("[anton.muted]Installing Pillow...[/]")
-    import subprocess
-
-    proc = await asyncio.get_event_loop().run_in_executor(
-        None,
-        lambda: subprocess.run(
-            ["uv", "pip", "install", "--python", sys.executable, "Pillow"],
-            capture_output=True,
-            timeout=120,
-        ),
-    )
-    if proc.returncode == 0:
-        console.print("[anton.success]Pillow installed. Clipboard is now available.[/]")
-        return True
-    else:
-        # Fallback: try pip directly
-        proc = await asyncio.get_event_loop().run_in_executor(
-            None,
-            lambda: subprocess.run(
-                [sys.executable, "-m", "pip", "install", "Pillow"],
-                capture_output=True,
-                timeout=120,
-            ),
-        )
-        if proc.returncode == 0:
-            console.print(
-                "[anton.success]Pillow installed. Clipboard is now available.[/]"
-            )
-            return True
-        console.print("[anton.error]Failed to install Pillow.[/]")
-        return False
-
-
-def _human_size(nbytes: int) -> str:
-    for unit in ("B", "KB", "MB", "GB"):
-        if nbytes < 1024:
-            return f"{nbytes:.0f}{unit}" if unit == "B" else f"{nbytes:.1f}{unit}"
-        nbytes /= 1024
-    return f"{nbytes:.1f}TB"
 
 
 def _extract_html_title(path, re_module) -> str:
@@ -2525,11 +2355,11 @@ async def _chat_loop(
                         console.print(
                             f"  [anton.muted]attached: clipboard image "
                             f"({uploaded.width}x{uploaded.height}, "
-                            f"{_human_size(uploaded.size_bytes)})[/]"
+                            f"{human_size(uploaded.size_bytes)})[/]"
                         )
-                        message_content = _format_clipboard_image_message(uploaded)
+                        message_content = format_clipboard_image_message(uploaded)
                     elif clip.file_paths:
-                        stripped = _format_file_message("", clip.file_paths, console)
+                        stripped = format_file_message("", clip.file_paths, console)
                 if not stripped and message_content is None:
                     continue
 
@@ -2542,7 +2372,7 @@ async def _chat_loop(
             if message_content is None and stripped.startswith("/"):
                 dropped_early = _parse_dropped_paths(stripped)
                 if dropped_early:
-                    stripped = _format_file_message(stripped, dropped_early, console)
+                    stripped = format_file_message(stripped, dropped_early, console)
                     message_content = stripped
 
             # Slash command dispatch
@@ -2656,7 +2486,7 @@ async def _chat_loop(
                     print_slash_help(console)
                     continue
                 elif cmd == "/paste":
-                    if not await _ensure_clipboard(console):
+                    if not await ensure_clipboard(console):
                         continue
                     clip = grab_clipboard()
                     if clip.image:
@@ -2664,10 +2494,10 @@ async def _chat_loop(
                         console.print(
                             f"  [anton.muted]attached: clipboard image "
                             f"({uploaded.width}x{uploaded.height}, "
-                            f"{_human_size(uploaded.size_bytes)})[/]"
+                            f"{human_size(uploaded.size_bytes)})[/]"
                         )
                         user_text = parts[1] if len(parts) > 1 else ""
-                        message_content = _format_clipboard_image_message(
+                        message_content = format_clipboard_image_message(
                             uploaded, user_text
                         )
                         # Fall through to turn_stream (don't continue)
@@ -2682,7 +2512,7 @@ async def _chat_loop(
             if message_content is None:
                 dropped = _parse_dropped_paths(stripped)
                 if dropped:
-                    stripped = _format_file_message(stripped, dropped, console)
+                    stripped = format_file_message(stripped, dropped, console)
 
             # Use multimodal content if set, otherwise the text string
             if message_content is None:

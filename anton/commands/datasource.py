@@ -21,7 +21,7 @@ from anton.datasource_utils import (
     restore_namespaced_env,
     parse_connection_slug,
 )
-from anton.prompt_utils import prompt_or_cancel
+from anton.utils.prompt import prompt_or_cancel
 from anton.scratchpad import ScratchpadManager
 
 if TYPE_CHECKING:

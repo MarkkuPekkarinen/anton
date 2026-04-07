@@ -476,7 +476,7 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     )
 
     from anton.commands.datasource import handle_connect_datasource
-    from anton.prompt_utils import prompt_or_cancel
+    from anton.utils.prompt import prompt_or_cancel
     from anton.data_vault import DataVault
 
     # Check which connections exist before

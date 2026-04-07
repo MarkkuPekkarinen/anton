@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from rich.console import Console
 
 from anton.config.settings import AntonSettings
-from anton.prompt_utils import prompt_or_cancel
+from anton.utils.prompt import prompt_or_cancel
 from anton.chat_session import rebuild_session
 
 if TYPE_CHECKING:

@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 from rich.console import Console
 
 from anton.config.settings import AntonSettings
-from anton.prompt_utils import prompt_or_cancel
+from anton.utils.prompt import prompt_or_cancel
 
 if TYPE_CHECKING:
     from anton.chat import ChatSession

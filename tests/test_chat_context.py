@@ -329,7 +329,7 @@ class TestMindsSetupRecovery:
             return next(prompts)
 
         monkeypatch.setattr("anton.chat.prompt_or_cancel", fake_prompt)
-        monkeypatch.setattr("anton.prompt_utils.prompt_or_cancel", fake_prompt)
+        monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", fake_prompt)
 
         calls: list[tuple[str, str, bool]] = []
 
@@ -395,7 +395,7 @@ class TestMindsSetupRecovery:
             return next(prompts)
 
         monkeypatch.setattr("anton.chat.prompt_or_cancel", fake_prompt)
-        monkeypatch.setattr("anton.prompt_utils.prompt_or_cancel", fake_prompt)
+        monkeypatch.setattr("anton.utils.prompt.prompt_or_cancel", fake_prompt)
 
         calls: list[tuple[str, str, bool]] = []
 

@@ -10,7 +10,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from anton import __version__
-from anton.prompt_utils import prompt_or_cancel
+from anton.utils.prompt import prompt_or_cancel
 from anton.llm.openai import build_chat_completion_kwargs
 
 

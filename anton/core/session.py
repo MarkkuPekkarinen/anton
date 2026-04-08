@@ -17,6 +17,7 @@ from anton.llm.provider import (
 from anton.scratchpad import ScratchpadManager
 from anton.core.tools.registry import ToolRegistry
 from anton.core.tools.tool_defs import SCRATCHPAD_TOOL, MEMORIZE_TOOL, RECALL_TOOL, ToolDef
+from anton.core.utils.scratchpad import prepare_scratchpad_exec, format_cell_result
 
 from anton.utils.datasources import (
     build_datasource_context,
@@ -26,6 +27,7 @@ from anton.utils.datasources import (
 if TYPE_CHECKING:
     from rich.console import Console
     from anton.context.self_awareness import SelfAwarenessContext
+    from anton.chat_ui import EscapeWatcher
     from anton.llm.client import LLMClient
     from anton.memory.cortex import Cortex
     from anton.memory.episodes import EpisodicMemory
@@ -122,7 +124,7 @@ class ChatSession:
         self._history_store = history_store
         self._session_id = session_id
         self._cancel_event = asyncio.Event()
-        self._escape_watcher: "EscapeWatcher | None" = None
+        self._escape_watcher: EscapeWatcher | None = None
         self._active_datasource: str | None = None
         self._scratchpads = ScratchpadManager(
             coding_provider=coding_provider,

@@ -267,9 +267,10 @@ class ChatSession:
     }
 
     def _build_tools(self) -> list[dict]:
-        self._build_core_tools()
-        for tool in self._extra_tools:
-            self.tool_registry.register_tool(tool)
+        if not self.tool_registry:
+            self._build_core_tools()
+            for tool in self._extra_tools:
+                self.tool_registry.register_tool(tool)
         return self.tool_registry.dump()
 
     def _build_core_tools(self) -> None:

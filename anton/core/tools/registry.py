@@ -14,6 +14,12 @@ class ToolRegistry:
         # Register core tools.
         self._tools = []
 
+    def __bool__(self) -> bool:
+        """
+        Return True if there are any tools registered.
+        """
+        return bool(self._tools)
+
     def register_tool(self, tool_def: ToolDef) -> None:
         """
         Register a new (extra to core) tool.
@@ -32,6 +38,7 @@ class ToolRegistry:
     def dump(self) -> list[dict]:
         """
         Dump the registry as a list of tool definitions.
+        This is used to build the tools list for the LLM. As a result, the handler is not needed.
         """
         tool_defs = []
         for tool_def in self._tools:

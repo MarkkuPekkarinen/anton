@@ -185,7 +185,8 @@ class ExplainabilityCollector:
             sql_queries=[query.to_dict() for query in self._queries],
             scratchpad_steps=list(self._scratchpad_steps),
         )
-        self._store.save(record)
+        if self._store is not None:
+            self._store.save(record)
         return record
 
     def _build_summary(self, answer_text: str, data_sources: list[dict]) -> str:

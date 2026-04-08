@@ -1,5 +1,6 @@
 """Extra tools for the open source terminal agent."""
 
+from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from anton.core.tools.tool_defs import ToolDef

@@ -1,3 +1,4 @@
+from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from anton.core.utils.scratchpad import prepare_scratchpad_exec, format_cell_result

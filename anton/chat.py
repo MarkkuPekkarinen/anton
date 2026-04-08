@@ -35,7 +35,7 @@ from anton.commands.setup import (
     handle_setup,
     handle_setup_models,
 )
-from anton.commands.ui import handle_theme, print_slash_help
+from anton.commands.ui import handle_explain, handle_theme, print_slash_help
 from anton.utils.clipboard import (
     ensure_clipboard,
     format_clipboard_image_message,
@@ -1272,6 +1272,9 @@ async def _chat_loop(
                     continue
                 elif cmd == "/unpublish":
                     await _handle_unpublish(console, settings, workspace)
+                    continue
+                elif cmd == "/explain":
+                    handle_explain(console, settings.workspace_path)
                     continue
                 elif cmd == "/help":
                     print_slash_help(console)

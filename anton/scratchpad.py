@@ -51,6 +51,7 @@ class Cell:
     description: str = ""
     estimated_time: str = ""
     logs: str = ""
+    explainability_queries: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -530,6 +531,7 @@ class Scratchpad:
             description=description,
             estimated_time=estimated_time,
             logs=result_data.get("logs", ""),
+            explainability_queries=result_data.get("explainability_queries", []),
         )
         self.cells.append(cell)
         yield cell

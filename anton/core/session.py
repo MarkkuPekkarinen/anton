@@ -20,6 +20,9 @@ from anton.core.tools.registry import ToolRegistry
 from anton.core.tools.tool_defs import SCRATCHPAD_TOOL, MEMORIZE_TOOL, RECALL_TOOL, ToolDef
 from anton.core.utils.scratchpad import prepare_scratchpad_exec, format_cell_result
 
+from anton.explainability import ExplainabilityCollector, ExplainabilityStore
+from anton.llm.openai import build_chat_completion_kwargs
+
 from anton.utils.datasources import (
     build_datasource_context,
     scrub_credentials,
@@ -136,6 +139,10 @@ class ChatSession:
             workspace_path=workspace.base if workspace else None,
         )
         self.tool_registry = ToolRegistry()
+        self._explainability_store = (
+            ExplainabilityStore(workspace.base) if workspace is not None else None
+        )
+        self._active_explainability: ExplainabilityCollector | None = None
 
     @property
     def history(self) -> list[dict]:
@@ -183,6 +190,44 @@ class ChatSession:
         """Save current history to disk if a history store is configured."""
         if self._history_store and self._session_id:
             self._history_store.save(self._session_id, self._history)
+
+    def _record_cell_explainability(
+        self, *, pad_name: str, description: str, cell
+    ) -> None:
+        if self._active_explainability is None:
+            return
+        if description:
+            self._active_explainability.add_scratchpad_step(description)
+        elif pad_name:
+            self._active_explainability.add_scratchpad_step(
+                f"work in scratchpad {pad_name}"
+            )
+        for query in getattr(cell, "explainability_queries", []) or []:
+            if not isinstance(query, dict):
+                continue
+            self._active_explainability.add_query(
+                datasource=str(query.get("datasource", "")),
+                sql=str(query.get("sql", "")),
+                engine=(
+                    str(query.get("engine"))
+                    if query.get("engine") is not None
+                    else None
+                ),
+                status=str(query.get("status", "ok")),
+                error_message=(
+                    str(query.get("error_message"))
+                    if query.get("error_message") is not None
+                    else None
+                ),
+            )
+        self._active_explainability.add_sources_from_text(
+            getattr(cell, "code", ""),
+            getattr(cell, "stdout", ""),
+            getattr(cell, "logs", ""),
+        )
+        self._active_explainability.add_inferred_queries_from_code(
+            getattr(cell, "code", "")
+        )
 
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
@@ -566,64 +611,75 @@ class ChatSession:
         assistant_text_parts: list[str] = []
         _max_auto_retries = 2
         _retry_count = 0
+        self._active_explainability = ExplainabilityCollector(
+            self._explainability_store,
+            turn=self._turn_count + 1,
+            user_message=user_msg_str,
+        )
 
-        while True:
-            try:
-                async for event in self._stream_and_handle_tools(user_msg_str):
-                    if isinstance(event, StreamTextDelta):
-                        assistant_text_parts.append(event.text)
-                    yield event
-                break  # completed successfully
-            except Exception as _agent_exc:
-                # Token/billing limit — don't retry, let the chat loop handle it
-                if isinstance(_agent_exc, TokenLimitExceeded):
-                    raise
-                _retry_count += 1
-                if _retry_count <= _max_auto_retries:
-                    # Inject the error into history and let the LLM try to recover
-                    self._history.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                f"SYSTEM: An error interrupted execution: {_agent_exc}\n\n"
-                                "If you can diagnose and fix the issue, continue working on the task. "
-                                "Adjust your approach to avoid the same error. "
-                                "If this is unrecoverable, summarize what you accomplished and suggest next steps."
-                            ),
-                        }
-                    )
-                    # Continue the while loop — _stream_and_handle_tools will be called
-                    # again with the error context now in history
-                    continue
-                else:
-                    # Exhausted retries — stop and summarize for the user
-                    self._history.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                f"SYSTEM: The task has failed {_retry_count} times. Latest error: {_agent_exc}\n\n"
-                                "Stop retrying. Please:\n"
-                                "1. Summarize what you accomplished so far.\n"
-                                "2. Explain what went wrong in plain language.\n"
-                                "3. Suggest next steps — what the user can try (e.g. rephrase, "
-                                "simplify the request, or ask you to continue from where you left off).\n"
-                                "Be concise and helpful."
-                            ),
-                        }
-                    )
-                    try:
-                        async for event in self._llm.plan_stream(
-                            system=await self._build_system_prompt(user_msg_str),
-                            messages=self._history,
-                        ):
-                            if isinstance(event, StreamTextDelta):
-                                assistant_text_parts.append(event.text)
-                            yield event
-                    except Exception:
-                        fallback = f"An unexpected error occurred: {_agent_exc}. Please try again or rephrase your request."
-                        assistant_text_parts.append(fallback)
-                        yield StreamTextDelta(text=fallback)
-                    break
+        try:
+            while True:
+                try:
+                    async for event in self._stream_and_handle_tools(user_msg_str):
+                        if isinstance(event, StreamTextDelta):
+                            assistant_text_parts.append(event.text)
+                        yield event
+                    break  # completed successfully
+                except Exception as _agent_exc:
+                    # Token/billing limit — don't retry, let the chat loop handle it
+                    if isinstance(_agent_exc, TokenLimitExceeded):
+                        raise
+                    _retry_count += 1
+                    if _retry_count <= _max_auto_retries:
+                        # Inject the error into history and let the LLM try to recover
+                        self._history.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"SYSTEM: An error interrupted execution: {_agent_exc}\n\n"
+                                    "If you can diagnose and fix the issue, continue working on the task. "
+                                    "Adjust your approach to avoid the same error. "
+                                    "If this is unrecoverable, summarize what you accomplished and suggest next steps."
+                                ),
+                            }
+                        )
+                        # Continue the while loop — _stream_and_handle_tools will be called
+                        # again with the error context now in history
+                        continue
+                    else:
+                        # Exhausted retries — stop and summarize for the user
+                        self._history.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"SYSTEM: The task has failed {_retry_count} times. Latest error: {_agent_exc}\n\n"
+                                    "Stop retrying. Please:\n"
+                                    "1. Summarize what you accomplished so far.\n"
+                                    "2. Explain what went wrong in plain language.\n"
+                                    "3. Suggest next steps — what the user can try (e.g. rephrase, "
+                                    "simplify the request, or ask you to continue from where you left off).\n"
+                                    "Be concise and helpful."
+                                ),
+                            }
+                        )
+                        try:
+                            async for event in self._llm.plan_stream(
+                                system=await self._build_system_prompt(user_msg_str),
+                                messages=self._history,
+                            ):
+                                if isinstance(event, StreamTextDelta):
+                                    assistant_text_parts.append(event.text)
+                                yield event
+                        except Exception:
+                            fallback = f"An unexpected error occurred: {_agent_exc}. Please try again or rephrase your request."
+                            assistant_text_parts.append(fallback)
+                            yield StreamTextDelta(text=fallback)
+                        break
+        finally:
+            if self._active_explainability is not None:
+                self._active_explainability.finalize(
+                    "".join(assistant_text_parts)[:2000]
+                )
 
         # Log assistant response to episodic memory
         if self._episodic is not None and assistant_text_parts:

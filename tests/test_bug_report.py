@@ -42,9 +42,17 @@ class TestDiagnostics:
 
         # Check config sanitization
         config = diagnostics["config"]
-        assert "anthropic_api_key" not in config or config["anthropic_api_key"] == "***REDACTED***"
-        assert "openai_api_key" not in config or config["openai_api_key"] == "***REDACTED***"
-        assert "minds_api_key" not in config or config["minds_api_key"] == "***REDACTED***"
+        assert (
+            "anthropic_api_key" not in config
+            or config["anthropic_api_key"] == "***REDACTED***"
+        )
+        assert (
+            "openai_api_key" not in config
+            or config["openai_api_key"] == "***REDACTED***"
+        )
+        assert (
+            "minds_api_key" not in config or config["minds_api_key"] == "***REDACTED***"
+        )
 
     def test_collect_diagnostics_with_session(self):
         """Test diagnostic collection with an active session."""
@@ -141,10 +149,16 @@ class TestBugReportCommand:
 
         # Mock the prompts
         prompt_responses = ["y", "y", "This is a test bug description"]
-        with patch("anton.commands.bug_report.prompt_or_cancel", side_effect=prompt_responses):
+        with patch(
+            "anton.commands.bug_report.prompt_or_cancel", side_effect=prompt_responses
+        ):
             with patch("anton.commands.bug_report.collect_diagnostics") as mock_collect:
-                with patch("anton.commands.bug_report.save_diagnostics_file") as mock_save:
-                    with patch("anton.publisher.publish_bug_report") as mock_publish:
+                with patch(
+                    "anton.commands.bug_report.save_diagnostics_file"
+                ) as mock_save:
+                    with patch(
+                        "anton.commands.bug_report.publish_bug_report"
+                    ) as mock_publish:
                         mock_collect.return_value = {"test": "data"}
                         mock_save.return_value = Path("/test/bug_report.json")
 
@@ -175,9 +189,15 @@ class TestBugReportCommand:
             "anton.commands.bug_report.prompt_or_cancel", side_effect=prompt_responses
         ) as mock_prompt:
             with patch("anton.commands.bug_report.collect_diagnostics") as mock_collect:
-                with patch("anton.commands.bug_report.save_diagnostics_file") as mock_save:
-                    with patch("anton.publisher.publish_bug_report") as mock_publish:
-                        with patch("anton.commands.bug_report.webbrowser.open") as mock_browser:
+                with patch(
+                    "anton.commands.bug_report.save_diagnostics_file"
+                ) as mock_save:
+                    with patch(
+                        "anton.commands.bug_report.publish_bug_report"
+                    ) as mock_publish:
+                        with patch(
+                            "anton.commands.bug_report.webbrowser.open"
+                        ) as mock_browser:
                             mock_collect.return_value = {"test": "data"}
                             mock_save.return_value = Path("/test/bug_report.json")
 
@@ -218,11 +238,15 @@ class TestBugReportCommand:
         settings = AntonSettings(minds_api_key="test-key")
 
         prompt_responses = ["y", "n"]
-        with patch("anton.commands.bug_report.prompt_or_cancel", side_effect=prompt_responses):
+        with patch(
+            "anton.commands.bug_report.prompt_or_cancel", side_effect=prompt_responses
+        ):
             with patch("anton.commands.bug_report.collect_diagnostics") as mock_collect:
-                with patch("anton.commands.bug_report.save_diagnostics_file") as mock_save:
+                with patch(
+                    "anton.commands.bug_report.save_diagnostics_file"
+                ) as mock_save:
                     with patch(
-                        "anton.publisher.publish_bug_report",
+                        "anton.commands.bug_report.publish_bug_report",
                         side_effect=Exception("Network error"),
                     ):
                         mock_collect.return_value = {"test": "data"}

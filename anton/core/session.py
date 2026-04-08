@@ -917,6 +917,12 @@ class ChatSession:
                                     if cell
                                     else "No result produced."
                                 )
+                                if cell is not None:
+                                    self._record_cell_explainability(
+                                        pad_name=tc.input.get("name", ""),
+                                        description=description,
+                                        cell=cell,
+                                    )
                                 if self._episodic is not None and cell is not None:
                                     self._episodic.log_turn(
                                         self._turn_count + 1,

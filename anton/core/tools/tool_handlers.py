@@ -106,6 +106,10 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
             estimated_time=estimated_time,
             estimated_seconds=estimated_seconds,
         )
+        if cell is not None:
+            session._record_cell_explainability(
+                pad_name=name, description=description, cell=cell,
+            )
         return format_cell_result(cell)
 
     elif action == "view":

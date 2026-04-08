@@ -1,4 +1,5 @@
 from __future__ import annotations
+from dataclasses import asdict
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -32,4 +33,10 @@ class ToolRegistry:
         """
         Dump the registry as a list of tool definitions.
         """
-        return [tool.model_dump() for tool in self._tools]
+        tool_defs = []
+        for tool_def in self._tools:
+            # Remove the handler from the tool definition.
+            tool_def = asdict(tool_def)
+            tool_def.pop("handler")
+            tool_defs.append(tool_def)
+        return tool_defs

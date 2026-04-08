@@ -130,39 +130,20 @@ async def handle_publish_or_preview(session: ChatSession, tc_input: dict) -> str
     # Publish flow
     from anton.config.settings import AntonSettings
     from anton.publisher import publish
-    from anton.utils.prompt import prompt_or_cancel
 
     settings = AntonSettings()
 
     if not settings.minds_api_key:
+        console.print()
         console.print("  [anton.muted]To publish you need a free Minds account.[/]")
+        console.print("  [anton.muted]Run [bold]/publish[/bold] to set up your API key and publish.[/]")
         console.print()
-        has_key = await prompt_or_cancel(
-            "  (anton) Do you have an mdb.ai API key?",
-            choices=["y", "n"],
-            choices_display="y/n",
-            default="y",
+        return (
+            "STOP: No Minds API key configured. Do NOT call this tool again. "
+            "Tell the user to run the /publish command to set up their mdb.ai API key "
+            "and publish their dashboard. The /publish command handles the interactive "
+            "API key setup flow."
         )
-        if has_key is None:
-            console.print()
-            return "User cancelled publish."
-        if has_key == "n":
-            webbrowser.open(
-                "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
-                "?client_id=public-client&response_type=code&scope=openid"
-                "&redirect_uri=https%3A%2F%2Fmdb.ai"
-            )
-            console.print()
-
-        api_key = await prompt_or_cancel("  (anton) API key", password=True)
-        if api_key is None or not api_key.strip():
-            console.print()
-            return "User cancelled publish."
-        api_key = api_key.strip()
-        settings.minds_api_key = api_key
-        if session._workspace:
-            session._workspace.set_secret("ANTON_MINDS_API_KEY", api_key)
-        console.print()
 
     from rich.live import Live
     from rich.spinner import Spinner

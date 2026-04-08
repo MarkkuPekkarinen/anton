@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from anton.workspace import Workspace
 
 
+# TODO: Move to settings?
 _MAX_TOOL_ROUNDS = 25  # Hard limit on consecutive tool-call rounds per turn
 _MAX_CONTINUATIONS = 3  # Max times the verification loop can restart the tool loop
 _CONTEXT_PRESSURE_THRESHOLD = 0.7  # Trigger compaction when context is 70% full

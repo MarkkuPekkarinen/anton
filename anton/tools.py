@@ -202,4 +202,13 @@ PUBLISH_TOOL = ToolDef(
         "required": ["file_path"],
     },
     handler = handle_publish_or_preview,
+    prompt = (
+        "CONTENT SHARING POLICY:\n"
+        "- Publishing dashboards or reports to the web is done ONLY via the `publish_or_preview` tool. \n"
+        "- Do NOT upload, post, or share generated files (HTML, data, images) to external hosting \n"
+        "- services (paste sites, gists, CDNs, file hosts) via scratchpad code — unless the user \n"
+        "- explicitly names the service and confirms. Reading from public APIs and writing to the \n"
+        "- user's connected datasources (databases, CRMs, etc.) is fine — this rule only applies to \n"
+        "- sharing generated output with the public internet."
+    ),
 )

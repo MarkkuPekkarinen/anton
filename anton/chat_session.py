@@ -13,7 +13,7 @@ from anton.minds_client import refresh_knowledge
 if TYPE_CHECKING:
     from anton.chat import ChatSession
     from anton.memory.cortex import Cortex
-    from anton.memory.episodic import EpisodicMemory
+    from anton.memory.episodes import EpisodicMemory
     from anton.memory.history_store import HistoryStore
     from anton.workspace import Workspace
 

@@ -25,6 +25,7 @@ from anton.clipboard import (
 from anton.llm.prompts import CHAT_SYSTEM_PROMPT, build_visualizations_prompt
 from anton.llm.provider import (
     ContextOverflowError,
+    TokenLimitExceeded,
     StreamComplete,
     StreamContextCompacted,
     StreamEvent,
@@ -625,6 +626,9 @@ class ChatSession:
                     yield event
                 break  # completed successfully
             except Exception as _agent_exc:
+                # Token/billing limit — don't retry, let the chat loop handle it
+                if isinstance(_agent_exc, TokenLimitExceeded):
+                    raise
                 _retry_count += 1
                 if _retry_count <= _max_auto_retries:
                     # Inject the error into history and let the LLM try to recover
@@ -2608,30 +2612,57 @@ async def _chat_loop(
                 console.print()
                 # Cancel the turn but stay in the chat loop
                 continue
+            except (TokenLimitExceeded, ConnectionError) as exc:
+                display.abort()
+                console.print()
+                console.print(f"[anton.warning]{exc}[/]")
+                console.print()
+                choice = await prompt_or_cancel(
+                    "  (anton) Switch LLM provider, update API key, or retry?",
+                    choices=["setup", "retry", "s", "r"],
+                    choices_display="setup/retry",
+                    default="retry" if isinstance(exc, ConnectionError) else "setup",
+                )
+                if choice in ("setup", "s"):
+                    session = await handle_setup_models(
+                        console,
+                        settings,
+                        workspace,
+                        state,
+                        self_awareness,
+                        cortex,
+                        session,
+                        episodic=episodic,
+                        history_store=history_store,
+                        session_id=current_session_id,
+                    )
+                # retry or after setup — loop continues and re-sends the last message
+                continue
             except Exception as exc:
                 display.abort()
-                console.print(f"[anton.error]Error: {exc}[/]")
                 console.print()
-                err_msg = str(exc)
-                if "401" in err_msg or "403" in err_msg or "Authentication" in err_msg:
-                    if Confirm.ask(
-                        "  Would you like to set up new LLM credentials?",
-                        default=True,
-                        console=console,
-                    ):
-                        session = await handle_setup_models(
-                            console,
-                            settings,
-                            workspace,
-                            state,
-                            self_awareness,
-                            cortex,
-                            session,
-                            episodic=episodic,
-                            history_store=history_store,
-                            session_id=current_session_id,
-                        )
-                    console.print()
+                console.print(f"[anton.error]{exc}[/]")
+                console.print()
+                choice = await prompt_or_cancel(
+                    "  (anton) Switch LLM provider, or retry?",
+                    choices=["setup", "retry", "s", "r"],
+                    choices_display="setup/retry",
+                    default="retry",
+                )
+                if choice in ("setup", "s"):
+                    session = await handle_setup_models(
+                        console,
+                        settings,
+                        workspace,
+                        state,
+                        self_awareness,
+                        cortex,
+                        session,
+                        episodic=episodic,
+                        history_store=history_store,
+                        session_id=current_session_id,
+                    )
+                continue
     except KeyboardInterrupt:
         pass
 

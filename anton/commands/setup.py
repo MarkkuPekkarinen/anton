@@ -10,7 +10,7 @@ from anton.utils.prompt import prompt_or_cancel
 
 if TYPE_CHECKING:
     from anton.chat import ChatSession
-    from anton.memory.episodic import EpisodicMemory
+    from anton.memory.episodes import EpisodicMemory
     from anton.memory.history_store import HistoryStore
     from anton.memory.cortex import Cortex
     from anton.workspace import Workspace

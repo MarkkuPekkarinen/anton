@@ -126,6 +126,10 @@ class ContextOverflowError(Exception):
         self.limit = limit
 
 
+class TokenLimitExceeded(Exception):
+    """Raised when the LLM returns 429 due to billing/token limits."""
+
+
 class LLMProvider(ABC):
     @abstractmethod
     async def complete(

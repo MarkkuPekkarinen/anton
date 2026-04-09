@@ -67,6 +67,7 @@ class ChatSystemPromptBuilder:
         tool_defs: list["ToolDef"] | None = None,
         memory_context: str = "",
         project_context: str = "",
+        self_awareness_context: str = "",
         datasource_context: str = "",
     ) -> str:
         output_path = f"{Path(str(settings.output_dir)).as_posix().rstrip('/')}/"
@@ -90,6 +91,8 @@ class ChatSystemPromptBuilder:
             prompt += memory_context
         if project_context:
             prompt += project_context
+        if self_awareness_context:
+            prompt += self_awareness_context
         if datasource_context:
             prompt += datasource_context
 

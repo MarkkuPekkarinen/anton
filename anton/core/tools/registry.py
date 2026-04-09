@@ -51,3 +51,9 @@ class ToolRegistry:
             tool_def.pop("prompt")
             tool_defs.append(tool_def)
         return tool_defs
+
+    def get_tool_defs(self) -> list["ToolDef"]:
+        """
+        Get the tool definitions.
+        """
+        return self._tools

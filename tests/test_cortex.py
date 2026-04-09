@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from anton.memory.cortex import Cortex
-from anton.memory.hippocampus import Engram, Hippocampus
+from anton.core.memory.cortex import Cortex
+from anton.core.memory.hippocampus import Engram, Hippocampus
 
 
 @pytest.fixture()

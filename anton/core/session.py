@@ -33,8 +33,8 @@ if TYPE_CHECKING:
     from anton.context.self_awareness import SelfAwarenessContext
     from anton.chat_ui import EscapeWatcher
     from anton.core.llm.client import LLMClient
-    from anton.memory.cortex import Cortex
-    from anton.memory.episodes import EpisodicMemory
+    from anton.core.memory.cortex import Cortex
+    from anton.core.memory.episodes import EpisodicMemory
     from anton.memory.history_store import HistoryStore
     from anton.workspace import Workspace
 
@@ -1169,7 +1169,7 @@ class ChatSession:
 
     def _maybe_consolidate_scratchpads(self) -> None:
         """Check if any scratchpad sessions warrant consolidation and fire it off."""
-        from anton.memory.consolidator import Consolidator
+        from anton.core.memory.consolidator import Consolidator
 
         consolidator = Consolidator()
         for pad in self._scratchpads._pads.values():
@@ -1179,7 +1179,7 @@ class ChatSession:
 
     async def _consolidate(self, cells: list) -> None:
         """Run offline consolidation on a completed scratchpad session."""
-        from anton.memory.consolidator import Consolidator
+        from anton.core.memory.consolidator import Consolidator
 
         consolidator = Consolidator()
         engrams = await consolidator.replay_and_extract(cells, self._llm)

@@ -38,7 +38,7 @@ async def handle_memorize(session: ChatSession, tc_input: dict) -> str:
     if session._cortex.mode == "off":
         return "Memory encoding is disabled. Change memory mode via /setup to enable."
 
-    from anton.memory.hippocampus import Engram
+    from anton.core.memory.hippocampus import Engram
 
     raw_entries = tc_input.get("entries", [])
     if not raw_entries:

@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from anton.core.llm.prompt_builder import ChatSystemPromptBuilder
+from anton.core.llm.prompts import RESILIENCE_NUDGE
 from anton.core.llm.provider import (
     ContextOverflowError,
     StreamComplete,
@@ -24,22 +25,8 @@ from anton.utils.datasources import (
     build_datasource_context,
     scrub_credentials,
 )
-from anton.core.settings import CoreSettings as _CoreSettings
+from anton.core.settings import CoreSettings
 
-_s = _CoreSettings()
-MAX_TOOL_ROUNDS = _s.max_tool_rounds
-MAX_CONTINUATIONS = _s.max_continuations
-CONTEXT_PRESSURE_THRESHOLD = _s.context_pressure_threshold
-MAX_CONSECUTIVE_ERRORS = _s.max_consecutive_errors
-RESILIENCE_NUDGE_AT = _s.resilience_nudge_at
-TOKEN_STATUS_CACHE_TTL = _s.token_status_cache_ttl
-
-RESILIENCE_NUDGE = (
-    "\n\nSYSTEM: This tool has failed twice in a row. Before retrying the same approach or "
-    "asking the user for help, try a creative workaround — different headers/user-agent, "
-    "a public API, archive.org, an alternate library, or a completely different data source. "
-    "Only involve the user if the problem truly requires something only they can provide."
-)
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -52,36 +39,6 @@ if TYPE_CHECKING:
     from anton.workspace import Workspace
 
 
-def _apply_error_tracking(
-    result_text: str,
-    tool_name: str,
-    error_streak: dict[str, int],
-    resilience_nudged: set[str],
-) -> str:
-    """Track consecutive errors per tool and append nudge/circuit-breaker messages."""
-    is_error = any(
-        marker in result_text
-        for marker in ("[error]", "Task failed:", "failed", "timed out", "Rejected:")
-    )
-    if is_error:
-        error_streak[tool_name] = error_streak.get(tool_name, 0) + 1
-    else:
-        error_streak[tool_name] = 0
-        resilience_nudged.discard(tool_name)
-
-    streak = error_streak.get(tool_name, 0)
-    if streak >= RESILIENCE_NUDGE_AT and tool_name not in resilience_nudged:
-        result_text += RESILIENCE_NUDGE
-        resilience_nudged.add(tool_name)
-
-    if streak >= MAX_CONSECUTIVE_ERRORS:
-        result_text += (
-            f"\n\nSYSTEM: The '{tool_name}' tool has failed {MAX_CONSECUTIVE_ERRORS} times "
-            "in a row. Stop retrying this approach. Either try a completely different "
-            "strategy or tell the user what's going wrong so they can help."
-        )
-
-    return result_text
 
 
 class ChatSession:
@@ -91,6 +48,7 @@ class ChatSession:
         self,
         llm_client: LLMClient,
         *,
+        settings: CoreSettings | None = None,
         self_awareness: SelfAwarenessContext | None = None,
         cortex: Cortex | None = None,
         episodic: EpisodicMemory | None = None,
@@ -107,6 +65,13 @@ class ChatSession:
         output_dir: str = "",
         tools: list[ToolDef] | None = None,
     ) -> None:
+        s = settings or CoreSettings()
+        self._max_tool_rounds = s.max_tool_rounds
+        self._max_continuations = s.max_continuations
+        self._context_pressure_threshold = s.context_pressure_threshold
+        self._max_consecutive_errors = s.max_consecutive_errors
+        self._resilience_nudge_at = s.resilience_nudge_at
+        self._token_status_cache_ttl = s.token_status_cache_ttl
         self._llm = llm_client
         self._self_awareness = self_awareness
         self._cortex = cortex
@@ -141,6 +106,38 @@ class ChatSession:
     @property
     def history(self) -> list[dict]:
         return self._history
+
+    def _apply_error_tracking(
+        self,
+        result_text: str,
+        tool_name: str,
+        error_streak: dict[str, int],
+        resilience_nudged: set[str],
+    ) -> str:
+        """Track consecutive errors per tool and append nudge/circuit-breaker messages."""
+        is_error = any(
+            marker in result_text
+            for marker in ("[error]", "Task failed:", "failed", "timed out", "Rejected:")
+        )
+        if is_error:
+            error_streak[tool_name] = error_streak.get(tool_name, 0) + 1
+        else:
+            error_streak[tool_name] = 0
+            resilience_nudged.discard(tool_name)
+
+        streak = error_streak.get(tool_name, 0)
+        if streak >= self._resilience_nudge_at and tool_name not in resilience_nudged:
+            result_text += RESILIENCE_NUDGE
+            resilience_nudged.add(tool_name)
+
+        if streak >= self._max_consecutive_errors:
+            result_text += (
+                f"\n\nSYSTEM: The '{tool_name}' tool has failed {self._max_consecutive_errors} times "
+                "in a row. Stop retrying this approach. Either try a completely different "
+                "strategy or tell the user what's going wrong so they can help."
+            )
+
+        return result_text
 
     def repair_history(self) -> None:
         """Fix dangling tool_use blocks left by mid-stream cancellation.
@@ -451,7 +448,7 @@ class ChatSession:
             )
 
         # Proactive compaction
-        if response.usage.context_pressure > CONTEXT_PRESSURE_THRESHOLD:
+        if response.usage.context_pressure > self._context_pressure_threshold:
             await self._summarize_history()
             self._compact_scratchpads()
 
@@ -462,7 +459,7 @@ class ChatSession:
 
         while response.tool_calls:
             tool_round += 1
-            if tool_round > MAX_TOOL_ROUNDS:
+            if tool_round > self._max_tool_rounds:
                 self._history.append(
                     {"role": "assistant", "content": response.content or ""}
                 )
@@ -470,7 +467,7 @@ class ChatSession:
                     {
                         "role": "user",
                         "content": (
-                            f"SYSTEM: You have used {MAX_TOOL_ROUNDS} tool-call rounds on this turn. "
+                            f"SYSTEM: You have used {self._max_tool_rounds} tool-call rounds on this turn. "
                             "Pause here. Summarize what you have accomplished so far and what remains. "
                             "If you believe you are on a good track and can finish the task with more steps, "
                             "tell the user and ask if they'd like you to continue. "
@@ -510,7 +507,7 @@ class ChatSession:
                     result_text = f"Tool '{tc.name}' failed: {exc}"
 
                 result_text = scrub_credentials(result_text)
-                result_text = _apply_error_tracking(
+                result_text = self._apply_error_tracking(
                     result_text,
                     tc.name,
                     error_streak,
@@ -544,7 +541,7 @@ class ChatSession:
                 )
 
             # Proactive compaction during tool loop
-            if response.usage.context_pressure > CONTEXT_PRESSURE_THRESHOLD:
+            if response.usage.context_pressure > self._context_pressure_threshold:
                 await self._summarize_history()
                 self._compact_scratchpads()
 
@@ -745,7 +742,7 @@ class ChatSession:
         # Proactive compaction
         if (
             not _compacted_this_turn
-            and llm_response.usage.context_pressure > CONTEXT_PRESSURE_THRESHOLD
+            and llm_response.usage.context_pressure > self._context_pressure_threshold
         ):
             await self._summarize_history()
             self._compact_scratchpads()
@@ -767,7 +764,7 @@ class ChatSession:
 
             while llm_response.tool_calls:
                 tool_round += 1
-                if tool_round > MAX_TOOL_ROUNDS:
+                if tool_round > self._max_tool_rounds:
                     _max_rounds_hit = True
                     self._history.append(
                         {"role": "assistant", "content": llm_response.content or ""}
@@ -776,7 +773,7 @@ class ChatSession:
                         {
                             "role": "user",
                             "content": (
-                                f"SYSTEM: You have used {MAX_TOOL_ROUNDS} tool-call rounds on this turn. "
+                                f"SYSTEM: You have used {self._max_tool_rounds} tool-call rounds on this turn. "
                                 "Pause here. Summarize what you have accomplished so far and what remains. "
                                 "If you believe you are on a good track and can finish the task with more steps, "
                                 "tell the user and ask if they'd like you to continue. "
@@ -921,7 +918,7 @@ class ChatSession:
                             tool=tc.name,
                         )
                     result_text = scrub_credentials(result_text)
-                    result_text = _apply_error_tracking(
+                    result_text = self._apply_error_tracking(
                         result_text, tc.name, error_streak, resilience_nudged
                     )
                     tool_results.append(
@@ -1021,7 +1018,7 @@ class ChatSession:
                 if (
                     not _compacted_this_turn
                     and llm_response.usage.context_pressure
-                    > CONTEXT_PRESSURE_THRESHOLD
+                    > self._context_pressure_threshold
                 ):
                     await self._summarize_history()
                     self._compact_scratchpads()
@@ -1040,7 +1037,7 @@ class ChatSession:
             reply = llm_response.content or ""
             self._history.append({"role": "assistant", "content": reply})
 
-            if continuation >= MAX_CONTINUATIONS:
+            if continuation >= self._max_continuations:
                 # Budget exhausted — ask LLM to diagnose and present to user
                 self._history.append(
                     {
@@ -1133,7 +1130,7 @@ class ChatSession:
                     "role": "user",
                     "content": (
                         f"SYSTEM: Task verification determined this task is not yet complete "
-                        f"(attempt {continuation}/{MAX_CONTINUATIONS}).\n"
+                        f"(attempt {continuation}/{self._max_continuations}).\n"
                         f"Verifier assessment: {reason}\n\n"
                         "Continue working on the original request. Pick up where you left off "
                         "and finish the remaining work. Do not repeat work already done."
@@ -1142,7 +1139,7 @@ class ChatSession:
             )
             yield StreamTaskProgress(
                 phase="analyzing",
-                message=f"Task incomplete — continuing ({continuation}/{MAX_CONTINUATIONS})...",
+                message=f"Task incomplete — continuing ({continuation}/{self._max_continuations})...",
             )
 
             # Re-enter tool loop: get next LLM response with tools available

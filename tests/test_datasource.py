@@ -660,6 +660,57 @@ class TestHandleConnectDatasource:
         assert "postgresql" in last["content"].lower()
 
     @pytest.mark.asyncio
+    async def test_fully_prefilled_known_variables_skips_help_prompt(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """When known_variables covers every required field, skip the
+        'Do you need instructions?' prompt entirely and go straight to
+        test + save. The user has already provided everything.
+        """
+        session = make_session()
+        console = MagicMock()
+        vault = DataVault(vault_dir=vault_dir)
+
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        # Only the engine selection prompt should fire. After that, the
+        # collector is already complete and the flow proceeds directly
+        # to the connection test.
+        responses = iter(["PostgreSQL"])
+
+        with (
+            patch("anton.commands.datasource.DataVault", return_value=vault),
+            patch("anton.commands.datasource.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_connect_datasource(
+                console,
+                session._scratchpads,
+                session,
+                known_variables={
+                    "host": "db.example.com",
+                    "port": "5432",
+                    "database": "prod_db",
+                    "user": "alice",
+                    "password": "s3cr3t",
+                },
+            )
+
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        saved = vault.load("postgresql", conns[0]["name"])
+        assert saved is not None
+        assert saved["host"] == "db.example.com"
+        assert saved["port"] == "5432"
+        assert saved["database"] == "prod_db"
+        assert saved["user"] == "alice"
+        assert saved["password"] == "s3cr3t"
+
+    @pytest.mark.asyncio
     async def test_credentials_pasted_at_help_prompt(
         self, registry, vault_dir, make_session, make_cell, make_pad
     ):

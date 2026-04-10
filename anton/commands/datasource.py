@@ -1046,33 +1046,6 @@ async def handle_connect_datasource(
             return session
         active_fields = chosen_method.fields
 
-    required_fields = [f for f in active_fields if f.required]
-    optional_fields = [f for f in active_fields if not f.required]
-
-    console.print()
-    console.print(
-        f"[anton.cyan](anton)[/] To connect [bold]{engine_def.display_name}[/], "
-        "I'll need the following:"
-    )
-    console.print()
-
-    if required_fields:
-        console.print("        [bold]Required[/]      " + "─" * 39)
-        for f in required_fields:
-            console.print(
-                f"        • [bold]{f.name:<12}[/] [anton.muted]— {f.description}[/]"
-            )
-
-    if optional_fields:
-        console.print()
-        console.print("        [bold]Optional[/]      " + "─" * 39)
-        for f in optional_fields:
-            console.print(
-                f"        • [bold]{f.name:<12}[/] [anton.muted]— {f.description}[/]"
-            )
-
-    console.print()
-
     # ── Smart credential collection ────────────────────────────────────
     # Track filled vs. missing fields as a puzzle. Each user response is
     # parsed via the LLM to extract any variables mentioned, so users can
@@ -1083,58 +1056,104 @@ async def handle_connect_datasource(
         auth_method=chosen_method,
     )
     if known_variables:
-        accepted = collector.fill_many(known_variables)
-        if accepted:
-            console.print(
-                f"[anton.muted]        Pre-filled from context: "
-                f"{', '.join(accepted)}[/]"
-            )
-            console.print()
+        collector.fill_many(known_variables)
 
     known_engine_slugs = [e.engine for e in registry.all_engines()]
     partial = False
+    required_fields = [f for f in active_fields if f.required]
+    optional_fields = [f for f in active_fields if not f.required]
 
-    # Offer instructions — but if the user answers by pasting credentials
-    # instead of "y"/"n", extract them straight into the collector rather
-    # than forcing a re-prompt.
-    help_answer = await prompt_or_cancel(
-        "(anton) Do you need instructions on how to obtain these credentials?",
-        choices_display="y/n", default="n",
-    )
-    if help_answer is None:
-        return session
-    normalized = help_answer.strip().lower()
-    if normalized == "y":
-        await show_credential_help(
-            console, session, engine_def.display_name, None, active_fields,
+    if collector.is_complete:
+        # Pre-fill already covered everything — skip the field list and
+        # the help prompt and go straight to testing + saving. Show a
+        # brief confirmation of what was received.
+        filled_names = [
+            f.name for f in active_fields if collector.collected.get(f.name)
+        ]
+        console.print()
+        console.print(
+            f"[anton.cyan](anton)[/] Got everything for [bold]"
+            f"{engine_def.display_name}[/] from context: "
+            f"{', '.join(filled_names)}."
         )
-    elif normalized and normalized != "n":
-        # Non-y/n answer — maybe the user pasted credentials here.
-        extracted = await extract_variables(
-            help_answer,
-            expected_fields=collector.active_fields,
-            current_engine=engine_def.engine,
-            current_engine_display=engine_def.display_name,
-            known_engine_slugs=known_engine_slugs,
-            session=session,
+        console.print()
+    else:
+        # Show the field list so the user sees what's expected.
+        console.print()
+        console.print(
+            f"[anton.cyan](anton)[/] To connect [bold]"
+            f"{engine_def.display_name}[/], I'll need the following:"
         )
-        if extracted.is_redirect:
-            redirect_text = _build_redirect_message(
-                collector, help_answer, extracted.redirect_engine
-            )
-            session._pending_connect_redirect = redirect_text
-            if not from_tool_call:
-                session._history.append(
-                    {"role": "assistant", "content": redirect_text}
+        console.print()
+
+        if required_fields:
+            console.print("        [bold]Required[/]      " + "─" * 39)
+            for f in required_fields:
+                marker = (
+                    "[green]✓[/] " if collector.collected.get(f.name) else "• "
                 )
-            return session
-        if extracted.variables:
-            filled = collector.fill_many(extracted.variables)
-            if filled:
                 console.print(
-                    f"[anton.muted]        Got: {', '.join(filled)}[/]"
+                    f"        {marker}[bold]{f.name:<12}[/] "
+                    f"[anton.muted]— {f.description}[/]"
                 )
-                console.print()
+
+        if optional_fields:
+            console.print()
+            console.print("        [bold]Optional[/]      " + "─" * 39)
+            for f in optional_fields:
+                marker = (
+                    "[green]✓[/] " if collector.collected.get(f.name) else "• "
+                )
+                console.print(
+                    f"        {marker}[bold]{f.name:<12}[/] "
+                    f"[anton.muted]— {f.description}[/]"
+                )
+
+        console.print()
+
+        # Offer instructions — but only if nothing has been pre-filled.
+        # If the user already provided some credentials (via the tool's
+        # `known_variables` or a paste), they clearly know what they're
+        # doing and don't need guidance — just prompt for what's missing.
+        if not collector.collected:
+            help_answer = await prompt_or_cancel(
+                "(anton) Do you need instructions on how to obtain these credentials?",
+                choices_display="y/n", default="n",
+            )
+            if help_answer is None:
+                return session
+            normalized = help_answer.strip().lower()
+            if normalized == "y":
+                await show_credential_help(
+                    console, session, engine_def.display_name, None, active_fields,
+                )
+            elif normalized and normalized != "n":
+                # Non-y/n answer — maybe the user pasted credentials here.
+                extracted = await extract_variables(
+                    help_answer,
+                    expected_fields=collector.active_fields,
+                    current_engine=engine_def.engine,
+                    current_engine_display=engine_def.display_name,
+                    known_engine_slugs=known_engine_slugs,
+                    session=session,
+                )
+                if extracted.is_redirect:
+                    redirect_text = _build_redirect_message(
+                        collector, help_answer, extracted.redirect_engine
+                    )
+                    session._pending_connect_redirect = redirect_text
+                    if not from_tool_call:
+                        session._history.append(
+                            {"role": "assistant", "content": redirect_text}
+                        )
+                    return session
+                if extracted.variables:
+                    filled = collector.fill_many(extracted.variables)
+                    if filled:
+                        console.print(
+                            f"[anton.muted]        Got: {', '.join(filled)}[/]"
+                        )
+                        console.print()
 
     while not collector.is_complete:
         collector.format_status(console)

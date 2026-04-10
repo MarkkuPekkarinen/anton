@@ -37,8 +37,9 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     vault = DataVault()
     before = {f"{c['engine']}-{c['name']}" for c in vault.list_connections()}
 
-    # Clear any stale redirect marker before running
+    # Clear any stale status from a previous run
     setattr(session, "_pending_connect_redirect", None)
+    setattr(session, "_pending_connect_status", None)
 
     await handle_connect_datasource(
         console,
@@ -71,8 +72,11 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         setattr(session, "_pending_connect_redirect", None)
         return redirect_text
 
-    # User cancelled or connection failed — show briefly with spinner
-    # so user knows the agent is picking back up
+    # No new connection was saved. Distinguish *why* — the LLM should
+    # not be told "user pressed Escape" when really the test failed.
+    status = getattr(session, "_pending_connect_status", None)
+    setattr(session, "_pending_connect_status", None)
+
     from rich.live import Live
     from rich.spinner import Spinner
     from rich.text import Text
@@ -88,11 +92,24 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     ):
         await asyncio.sleep(1.5)
     console.print()
+
+    if status == "test_failed":
+        return (
+            f"CONNECTION TEST FAILED: The '{engine}' credentials were entered "
+            f"but the connection test did not succeed, and the user declined to "
+            f"re-enter them. The connection was NOT saved. Ask the user what "
+            f"they'd like to do — for example, double-check the host/credentials, "
+            f"try a different datasource, or do something else. "
+            f"Do NOT silently retry connect_new_datasource with the same values. "
+            f"Respond with TEXT ONLY — no tool calls."
+        )
+
+    # Default: user cancelled (pressed Escape) at some point
     return (
-        f"CANCELLED: The user pressed Escape and cancelled the '{engine}' connection. "
-        f"STOP — do NOT call connect_new_datasource again. Do NOT retry. "
-        f"Acknowledge the cancellation briefly and ask the user what they'd like to do instead. "
-        f"Respond with TEXT ONLY — no tool calls."
+        f"CANCELLED: The user cancelled the '{engine}' connection setup before "
+        f"it completed. Ask the user what they'd like to do instead. "
+        f"Do NOT immediately call connect_new_datasource again unless they "
+        f"explicitly ask for it. Respond with TEXT ONLY — no tool calls."
     )
 
 

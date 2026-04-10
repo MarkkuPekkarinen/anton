@@ -660,6 +660,52 @@ class TestHandleConnectDatasource:
         assert "postgresql" in last["content"].lower()
 
     @pytest.mark.asyncio
+    async def test_test_failed_decline_sets_status(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """When the connection test fails and the user declines to
+        re-enter credentials, the handler should set
+        session._pending_connect_status = 'test_failed' so the tool
+        wrapper can return an accurate (non-misleading) message to the
+        LLM instead of claiming the user pressed Escape.
+        """
+        session = make_session()
+        console = MagicMock()
+        vault = DataVault(vault_dir=vault_dir)
+
+        pad = make_pad(make_cell(stdout="", error="connection refused"))
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        # Engine pick + decline retry after the test fails
+        responses = iter(["PostgreSQL", "n"])
+
+        with (
+            patch("anton.commands.datasource.DataVault", return_value=vault),
+            patch("anton.commands.datasource.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+        ):
+            await handle_connect_datasource(
+                console,
+                session._scratchpads,
+                session,
+                known_variables={
+                    "host": "db.example.com",
+                    "port": "5432",
+                    "database": "prod_db",
+                    "user": "alice",
+                    "password": "wrong",
+                },
+            )
+
+        # Connection NOT saved
+        assert vault.list_connections() == []
+        # Status correctly marked as test_failed (not "escaped")
+        assert getattr(session, "_pending_connect_status", None) == "test_failed"
+
+    @pytest.mark.asyncio
     async def test_fully_prefilled_known_variables_skips_help_prompt(
         self, registry, vault_dir, make_session, make_cell, make_pad
     ):

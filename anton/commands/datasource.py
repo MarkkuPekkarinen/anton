@@ -1263,6 +1263,11 @@ async def handle_connect_datasource(
         if not await run_connection_test(
             console, scratchpads, vault, engine_def, credentials, active_fields
         ):
+            # Either the test failed and the user declined to re-enter
+            # credentials, or the user pressed Escape during the retry
+            # prompt. Mark this so the tool wrapper can return an
+            # accurate (non-misleading) message to the LLM.
+            session._pending_connect_status = "test_failed"
             return session
 
     conn_name = registry.derive_name(engine_def, credentials)

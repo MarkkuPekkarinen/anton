@@ -77,7 +77,7 @@ Set up a WhatsApp integration so I can message you from my phone.
 
 Anton doesn't wait for someone to build a connector. It writes the integration code itself, sets it up, and gets it running - so you can chat with it from WhatsApp, Telegram, or whatever channel you need.
 
-### 🔧 Ask for anything that takes requires action
+### 🔧 Ask for anything that requires action
 - **Send emails** - connect accounts, draft messages or even send them on your behalf.
 - **Manage Calendarss** - Summarize your day, create meetings, block time, etc. All just by asking.
 - **Automated reporting** - pull from multiple databases, crunch numbers, deliver a report on a schedule.

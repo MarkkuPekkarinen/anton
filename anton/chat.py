@@ -2309,7 +2309,7 @@ async def _chat_loop(
                 from anton.channel.theme import get_palette as _gp
                 _you_color = _gp().user_prompt
                 user_input = await prompt_session.prompt_async(
-                    [(f"bold fg:{_you_color}", "you>"), ("", " ")]
+                    [(f"bold fg:{_you_color}", "you>"), ("", '\u2009')]
                 )
             except EOFError:
                 break

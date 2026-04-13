@@ -949,6 +949,8 @@ class ChatSession:
                 )
 
                 # Process each tool call
+                import time as _time
+
                 tool_results: list[dict] = []
                 for tc in llm_response.tool_calls:
                     if self._episodic is not None:
@@ -958,6 +960,8 @@ class ChatSession:
                             str(tc.input)[:2000],
                             tool=tc.name,
                         )
+
+                    _tool_t0 = _time.monotonic()
 
                     try:
                         if tc.name == "scratchpad" and tc.input.get("action") == "exec":
@@ -978,7 +982,6 @@ class ChatSession:
                                     message=description or "Running code",
                                     eta_seconds=estimated_seconds,
                                 )
-                                import time as _time
 
                                 _sp_t0 = _time.monotonic()
                                 from anton.core.backends.base import Cell
@@ -1044,8 +1047,19 @@ class ChatSession:
                                 message="Analyzing results...",
                             )
                         else:
+                            # Non-scratchpad, non-interactive tool — track elapsed
+                            yield StreamTaskProgress(
+                                phase="tool_start",
+                                message=tc.name,
+                            )
                             result_text = await self.tool_registry.dispatch_tool(
                                 self, tc.name, tc.input
+                            )
+                            _tool_elapsed = _time.monotonic() - _tool_t0
+                            yield StreamTaskProgress(
+                                phase="tool_done",
+                                message=tc.name,
+                                eta_seconds=_tool_elapsed,
                             )
                             if (
                                 tc.name == "scratchpad"
@@ -1081,9 +1095,10 @@ class ChatSession:
 
                 self._history.append({"role": "user", "content": tool_results})
 
-                # Signal that tools are done and LLM is now analyzing
+                # Signal that tools are done and LLM is now reasoning
+                _reasoning_t0 = _time.monotonic()
                 yield StreamTaskProgress(
-                    phase="analyzing", message="Analyzing results..."
+                    phase="reasoning_start", message="Thinking..."
                 )
 
                 # Stream follow-up
@@ -1094,6 +1109,17 @@ class ChatSession:
                         messages=self._history,
                         tools=tools,
                     ):
+                        # Capture reasoning elapsed on first text or tool event
+                        if _reasoning_t0 and isinstance(
+                            event, (StreamTextDelta, StreamComplete)
+                        ):
+                            _reasoning_elapsed = _time.monotonic() - _reasoning_t0
+                            _reasoning_t0 = 0  # only fire once
+                            yield StreamTaskProgress(
+                                phase="reasoning_done",
+                                message="",
+                                eta_seconds=_reasoning_elapsed,
+                            )
                         yield event
                         if isinstance(event, StreamComplete):
                             response = event

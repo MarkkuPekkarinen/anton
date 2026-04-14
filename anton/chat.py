@@ -70,7 +70,7 @@ from anton.minds_client import (
     list_datasources,
     test_llm,
 )
-from anton.core.datasources.data_vault import DataVault
+from anton.core.datasources.data_vault import LocalDataVault
 from anton.utils.datasources import (
     register_secret_vars,
 )
@@ -935,7 +935,7 @@ async def _chat_loop(
 
     # Inject all Local Vault connections as namespaced DS_* env vars so every
     # scratchpad subprocess inherits them. Must happen before any ChatSession is created.
-    dv = DataVault()
+    dv = LocalDataVault()
     dreg = DatasourceRegistry()
     for conn in dv.list_connections():
         dv.inject_env(conn["engine"], conn["name"])  # flat=False by default
@@ -1217,14 +1217,15 @@ async def _chat_loop(
                         session._scratchpads,
                         session,
                         prefill=arg or None,
+                        vault=session._data_vault,
                     )
                     continue
                 elif cmd == "/list":
-                    handle_list_data_sources(console)
+                    handle_list_data_sources(console, vault=session._data_vault)
                     continue
                 elif cmd == "/remove":
                     arg = parts[1].strip() if len(parts) > 1 else ""
-                    await handle_remove_data_source(console, arg)
+                    await handle_remove_data_source(console, arg, vault=session._data_vault)
                     continue
                 elif cmd == "/edit":
                     arg = parts[1].strip() if len(parts) > 1 else ""
@@ -1239,12 +1240,13 @@ async def _chat_loop(
                             session._scratchpads,
                             session,
                             datasource_name=arg,
+                            vault=session._data_vault,
                         )
                     continue
                 elif cmd == "/test":
                     arg = parts[1].strip() if len(parts) > 1 else ""
                     await handle_test_datasource(
-                        console, session._scratchpads, arg
+                        console, session._scratchpads, arg, vault=session._data_vault
                     )
                     continue
                 elif cmd == "/skill":

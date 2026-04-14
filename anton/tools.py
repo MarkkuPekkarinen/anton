@@ -31,10 +31,9 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     )
 
     from anton.commands.datasource import handle_connect_datasource
-    from anton.core.datasources.data_vault import DataVault
 
-    # Check which connections exist before
-    vault = DataVault()
+    from anton.core.datasources.data_vault import LocalDataVault
+    vault = session._data_vault or LocalDataVault()
     before = {f"{c['engine']}-{c['name']}" for c in vault.list_connections()}
 
     # Clear any stale status from a previous run
@@ -48,6 +47,7 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
         prefill=engine,
         known_variables=known_variables or None,
         from_tool_call=True,
+        vault=vault,
     )
 
     # Check if a new connection was actually added

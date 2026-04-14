@@ -28,13 +28,54 @@ class _ToolActivity:
     eta_str: str = ""
     printed: bool = False  # whether the activity line has been printed
     done: bool = False  # whether execution is complete
+    start_time: float = 0.0  # monotonic timestamp when execution began
 
 
-_TOOL_LABELS: dict[str, str] = {
-    "scratchpad": "Scratchpad",
-    "memorize": "Memory",
-    "recall": "Recall",
+# Witty one-liners for non-scratchpad tool display. One is picked at
+# random each time the tool fires, so the UI never feels repetitive.
+_TOOL_PHRASES: dict[str, list[str]] = {
+    "recall_skill": [
+        "Pulling up the procedure\u2026",
+        "Recalling the recipe\u2026",
+        "Loading the playbook\u2026",
+        "Reaching into procedural memory\u2026",
+        "Activating muscle memory\u2026",
+    ],
+    "memorize": [
+        "Jotting this down\u2026",
+        "Committing to memory\u2026",
+        "Filing away for later\u2026",
+        "Encoding a new engram\u2026",
+        "Stashing that in long-term storage\u2026",
+    ],
+    "recall": [
+        "Digging through the archives\u2026",
+        "Searching episodic memory\u2026",
+        "Rewinding the tape\u2026",
+        "Scanning past conversations\u2026",
+        "Activating hippocampal recall\u2026",
+    ],
+    "publish_or_preview": [
+        "Preparing the preview\u2026",
+        "Rendering your dashboard\u2026",
+        "Getting things ready to show\u2026",
+        "Spinning up the preview\u2026",
+    ],
+    "connect_new_datasource": [
+        "Setting up the connection\u2026",
+        "Wiring up the datasource\u2026",
+        "Establishing the link\u2026",
+    ],
 }
+
+# Fallback for tools without their own phrase list
+_GENERIC_TOOL_PHRASES = [
+    "On it\u2026",
+    "Working on that\u2026",
+    "Running the tool\u2026",
+    "Processing\u2026",
+    "Executing\u2026",
+]
 
 _MAX_DESC = 60
 
@@ -45,24 +86,27 @@ _MAX_THOUGHT_LEN = 80
 
 
 def _tool_display_text(name: str, input_json: str) -> str:
-    """Map tool name + raw JSON input to a human-readable description."""
-    label = _TOOL_LABELS.get(name, name)
+    """Map tool name + raw JSON input to a human-readable description.
+
+    For scratchpad: return just the description text (no wrapper).
+    For other tools: return a witty random phrase from _TOOL_PHRASES.
+    """
     try:
         data = json.loads(input_json)
     except (json.JSONDecodeError, TypeError):
-        return label
+        data = {}
 
-    desc = ""
     if name == "scratchpad":
         desc = data.get("one_line_description") or data.get("action", "")
-    elif name == "memorize":
-        entries = data.get("entries", [])
-        desc = f"{len(entries)} entry/entries"
-    if desc:
-        if len(desc) > _MAX_DESC:
-            desc = desc[: _MAX_DESC - 1] + "\u2026"
-        return f"{label}({desc})"
-    return label
+        if desc:
+            if len(desc) > _MAX_DESC:
+                desc = desc[: _MAX_DESC - 1] + "\u2026"
+            return desc
+        return "Running code"
+
+    # Non-scratchpad: pick a witty phrase
+    phrases = _TOOL_PHRASES.get(name, _GENERIC_TOOL_PHRASES)
+    return random.choice(phrases)  # noqa: S311
 
 
 THINKING_MESSAGES = [
@@ -270,11 +314,15 @@ class StreamDisplay:
 
     def on_tool_use_start(self, tool_id: str, name: str) -> None:
         """Track a new tool use."""
+        import time as _time
+
         if not self._active:
             return
         self._in_tool_phase = True
         self._last_was_tool = True
-        activity = _ToolActivity(tool_id=tool_id, name=name)
+        activity = _ToolActivity(
+            tool_id=tool_id, name=name, start_time=_time.monotonic()
+        )
         self._activities.append(activity)
 
     def on_tool_use_delta(self, tool_id: str, json_delta: str) -> None:
@@ -315,11 +363,10 @@ class StreamDisplay:
             return
 
         if phase == "scratchpad_start":
-            # Print the scratchpad activity line NOW (before execution)
+            # Print the scratchpad description line NOW (no estimate — just
+            # the description, since LLM estimates are unreliable).
             for act in reversed(self._activities):
                 if act.name == "scratchpad" and not act.printed:
-                    if eta:
-                        act.eta_str = f"~{int(eta)}s"
                     self._stop_spinner()
                     self._print_activity_line(act)
                     act.printed = True
@@ -356,6 +403,43 @@ class StreamDisplay:
         if phase in ("connect_datasource", "interactive"):
             # Interactive tool — stop spinner so user can see and type
             self._stop_spinner()
+            return
+
+        if phase == "tool_start":
+            # Non-scratchpad tool started execution — spinner shows the
+            # witty phrase; the activity line was already printed at
+            # on_tool_use_end with the description.
+            self._line2_status = message
+            self._update_spinner()
+            return
+
+        if phase == "tool_done":
+            # Non-scratchpad tool finished — print ✔ + actual elapsed
+            elapsed = eta if eta else 0
+            for act in reversed(self._activities):
+                if act.name == message and act.printed and not act.done:
+                    act.done = True
+                    self._stop_spinner()
+                    self._print_done_line(act, elapsed)
+                    self._start_spinner()
+                    break
+            return
+
+        if phase == "reasoning_start":
+            # LLM is thinking between tool rounds. Spinner shows a
+            # fresh witty message. The elapsed time will be printed
+            # when reasoning_done arrives.
+            self._line1_fun = random.choice(THINKING_MESSAGES)  # noqa: S311
+            self._line2_status = random.choice(WORKING_FOOTER_MESSAGES)  # noqa: S311
+            self._line3_peek = ""
+            self._update_spinner()
+            return
+
+        if phase == "reasoning_done":
+            elapsed = eta if eta else 0
+            self._stop_spinner()
+            self._print_reasoning_line(elapsed)
+            self._start_spinner()
             return
 
         label = PHASE_LABELS.get(phase, phase)
@@ -424,14 +508,18 @@ class StreamDisplay:
         return last
 
     def _print_activity_line(self, act: _ToolActivity) -> None:
-        """Print a single activity line permanently (before execution)."""
+        """Print a single activity line permanently (before execution).
+
+        For scratchpad: just the description text.
+        For other tools: the witty phrase from _tool_display_text.
+        No estimate is shown — only the actual elapsed time is printed
+        later by _print_done_line.
+        """
         line = Text()
-        label = act.description or _TOOL_LABELS.get(act.name, act.name)
+        label = act.description or act.name
         prefix = "\u23bf " if act is self._activities[0] else "  "
         line.append(prefix)
         line.append(label, style="bold")
-        if act.eta_str:
-            line.append(f" {act.eta_str}", style="anton.muted")
         self._console.print(line)
 
     def _print_done_line(self, act: _ToolActivity, elapsed: float) -> None:
@@ -439,6 +527,14 @@ class StreamDisplay:
         line = Text()
         line.append("  \u2714 ", style="green")
         elapsed_str = f"{elapsed:.1f}s" if elapsed >= 1 else f"{int(elapsed * 1000)}ms"
+        line.append(elapsed_str, style="anton.muted")
+        self._console.print(line)
+
+    def _print_reasoning_line(self, elapsed: float) -> None:
+        """Print the LLM's reasoning time between tool rounds."""
+        line = Text()
+        elapsed_str = f"{elapsed:.1f}s" if elapsed >= 1 else f"{int(elapsed * 1000)}ms"
+        line.append("  Reasoning: ", style="anton.muted")
         line.append(elapsed_str, style="anton.muted")
         self._console.print(line)
 

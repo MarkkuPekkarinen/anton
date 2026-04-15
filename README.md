@@ -16,11 +16,11 @@ It doesn't just answer questions. It *does things*: cleans your inbox, builds in
 ## Quick start
 **macOS - Desktop App:**
 
-<a href="https://mindsdb-anton.s3.us-east-2.amazonaws.com/anton-latest-universal-signed.pkg">
+<a href="https://mindsdb-anton.s3.us-east-2.amazonaws.com/mac/anton-latest.pkg">
 <img width="64" alt="DesktopApp" src="https://github.com/user-attachments/assets/ed7c1e3a-3700-45cc-a9a8-efb57b43dcfd" />
 </a>
 
- Click [here to download](https://mindsdb-anton.s3.us-east-2.amazonaws.com/anton-latest-universal-signed.pkg) the Anton Desktop App for MacOS.
+ Click [here to download](https://mindsdb-anton.s3.us-east-2.amazonaws.com/mac/anton-latest.pkg) the Anton Desktop App for MacOS.
 
 
 **macOS / Linux - CLI:**

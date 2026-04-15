@@ -21,11 +21,6 @@ from anton.clipboard import (
 )
 
 
-# ---------------------------------------------------------------------------
-# is_clipboard_supported
-# ---------------------------------------------------------------------------
-
-
 class TestIsClipboardSupported:
     def test_supported_darwin_with_pillow(self):
         with patch("anton.clipboard.platform") as mock_platform:
@@ -44,11 +39,6 @@ class TestIsClipboardSupported:
             # Force ImportError for PIL.ImageGrab
             with patch.dict("sys.modules", {"PIL": None, "PIL.ImageGrab": None}):
                 assert is_clipboard_supported() is False
-
-
-# ---------------------------------------------------------------------------
-# grab_clipboard
-# ---------------------------------------------------------------------------
 
 
 class TestGrabClipboard:
@@ -119,11 +109,6 @@ class TestGrabClipboard:
         assert result.image is None
 
 
-# ---------------------------------------------------------------------------
-# _grab_image internals
-# ---------------------------------------------------------------------------
-
-
 class TestGrabImageInternal:
     def test_returns_none_without_pillow(self):
         from anton.clipboard import _grab_image
@@ -143,11 +128,6 @@ class TestGrabImageInternal:
             result = _grab_image()
 
         assert result is None
-
-
-# ---------------------------------------------------------------------------
-# save_clipboard_image
-# ---------------------------------------------------------------------------
 
 
 class TestSaveClipboardImage:
@@ -218,11 +198,6 @@ class TestSaveClipboardImage:
         assert r1.path.name != r2.path.name
 
 
-# ---------------------------------------------------------------------------
-# cleanup_old_uploads
-# ---------------------------------------------------------------------------
-
-
 class TestCleanupOldUploads:
     def test_deletes_old_keeps_recent(self, tmp_path):
         uploads = tmp_path / "uploads"
@@ -253,11 +228,6 @@ class TestCleanupOldUploads:
         nonexistent = tmp_path / "nope"
         removed = cleanup_old_uploads(nonexistent)
         assert removed == 0
-
-
-# ---------------------------------------------------------------------------
-# parse_dropped_paths
-# ---------------------------------------------------------------------------
 
 
 class TestParseDroppedPaths:

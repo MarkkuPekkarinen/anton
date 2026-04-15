@@ -62,6 +62,7 @@ class Scratchpad:
     _coding_provider: str = field(default="anthropic", repr=False)
     _coding_model: str = field(default="", repr=False)
     _coding_api_key: str = field(default="", repr=False)
+    _coding_base_url: str = field(default="", repr=False)
     _venv_dir: str | None = field(default=None, repr=False)
     _venv_python: str | None = field(default=None, repr=False)
     _installed_packages: set[str] = field(default_factory=set, repr=False)
@@ -345,6 +346,12 @@ class Scratchpad:
             env["OPENAI_API_KEY"] = env["ANTON_OPENAI_API_KEY"]
         if "OPENAI_BASE_URL" not in env and "ANTON_OPENAI_BASE_URL" in env:
             env["OPENAI_BASE_URL"] = env["ANTON_OPENAI_BASE_URL"]
+        # Minds credentials can serve as OpenAI-compatible fallback when
+        # ANTON_OPENAI_* vars aren't persisted (new clean config path).
+        if "OPENAI_API_KEY" not in env and "ANTON_MINDS_API_KEY" in env and self._coding_provider == "openai-compatible":
+            env["OPENAI_API_KEY"] = env["ANTON_MINDS_API_KEY"]
+        if "OPENAI_BASE_URL" not in env and "ANTON_MINDS_URL" in env and self._coding_provider == "openai-compatible":
+            env["OPENAI_BASE_URL"] = f"{env['ANTON_MINDS_URL'].rstrip('/')}/api/v1"
         # If settings provided an explicit API key (e.g. from ~/.anton/.env or
         # Pydantic settings), inject it so the subprocess SDK can authenticate.
         if self._coding_api_key:
@@ -353,8 +360,21 @@ class Scratchpad:
                 "openai": "OPENAI_API_KEY",
                 "openai-compatible": "OPENAI_API_KEY",
             }.get(self._coding_provider, "")
-            if sdk_key and sdk_key not in env:
+            if sdk_key:
                 env[sdk_key] = self._coding_api_key
+        # For openai-compatible (Minds), force OPENAI_BASE_URL so get_llm()
+        # doesn't default to api.openai.com. The explicit _coding_base_url from
+        # settings takes top priority, then ANTON_OPENAI_BASE_URL from .env.
+        if self._coding_provider in ("openai", "openai-compatible"):
+            base_url = (
+                self._coding_base_url
+                or env.get("ANTON_OPENAI_BASE_URL")
+                or env.get("OPENAI_BASE_URL")
+                or ""
+            )
+            if base_url:
+                env["OPENAI_BASE_URL"] = base_url
+                env["ANTON_OPENAI_BASE_URL"] = base_url
         # Pass uv path so the boot script can use it for auto-installing
         # missing modules (same installer that created the venv).
         uv = self._find_uv()
@@ -879,12 +899,14 @@ class ScratchpadManager:
         coding_provider: str = "anthropic",
         coding_model: str = "",
         coding_api_key: str = "",
+        coding_base_url: str = "",
         workspace_path: Path | None = None,
     ) -> None:
         self._pads: dict[str, Scratchpad] = {}
         self._coding_provider: str = coding_provider
         self._coding_model: str = coding_model
         self._coding_api_key: str = coding_api_key
+        self._coding_base_url: str = coding_base_url
         if workspace_path is not None:
             self._venvs_base = workspace_path / ".anton" / "scratchpad-venvs"
         else:
@@ -906,6 +928,7 @@ class ScratchpadManager:
                 _coding_provider=self._coding_provider,
                 _coding_model=self._coding_model,
                 _coding_api_key=self._coding_api_key,
+                _coding_base_url=self._coding_base_url,
                 _venvs_base=self._venvs_base,
             )
             await pad.start()

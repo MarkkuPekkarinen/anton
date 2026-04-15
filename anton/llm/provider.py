@@ -27,9 +27,6 @@ class LLMResponse:
     usage: Usage = field(default_factory=Usage)
     stop_reason: str | None = None
 
-
-# --- Streaming event types ---
-
 @dataclass
 class StreamTextDelta:
     text: str
@@ -89,8 +86,6 @@ StreamEvent = (
 )
 
 
-# --- Context window lookup ---
-
 _CONTEXT_WINDOWS: list[tuple[str, int]] = [
     # Anton defaults (exact model IDs first)
     ("claude-sonnet-4-6", 200_000),
@@ -122,8 +117,6 @@ def compute_context_pressure(model: str, input_tokens: int) -> float:
     return min(input_tokens / window, 1.0)
 
 
-# --- Exceptions ---
-
 class ContextOverflowError(Exception):
     """Raised when the LLM rejects a request due to context length exceeded."""
 
@@ -131,6 +124,10 @@ class ContextOverflowError(Exception):
         super().__init__(message)
         self.input_tokens = input_tokens
         self.limit = limit
+
+
+class TokenLimitExceeded(Exception):
+    """Raised when the LLM returns 429 due to billing/token limits."""
 
 
 class LLMProvider(ABC):

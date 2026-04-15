@@ -20,9 +20,6 @@ def episodes_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
-# --- save / load round-trip ---
-
-
 def test_save_load_roundtrip(store: HistoryStore, episodes_dir: Path) -> None:
     history = [
         {"role": "user", "content": "hello"},
@@ -40,9 +37,6 @@ def test_save_overwrites(store: HistoryStore) -> None:
     assert loaded == [{"role": "user", "content": "v2"}]
 
 
-# --- load edge cases ---
-
-
 def test_load_missing_returns_none(store: HistoryStore) -> None:
     assert store.load("nonexistent") is None
 
@@ -57,9 +51,6 @@ def test_load_non_list_returns_none(store: HistoryStore, episodes_dir: Path) -> 
     path = episodes_dir / "20260301_120000_history.json"
     path.write_text('{"not": "a list"}', encoding="utf-8")
     assert store.load("20260301_120000") is None
-
-
-# --- list_sessions ---
 
 
 def test_list_sessions_newest_first(store: HistoryStore) -> None:
@@ -174,9 +165,6 @@ def test_list_sessions_multimodal_preview(store: HistoryStore) -> None:
 def test_list_sessions_no_dir(tmp_path: Path) -> None:
     store = HistoryStore(tmp_path / "nonexistent")
     assert store.list_sessions() == []
-
-
-# --- save is fire-and-forget ---
 
 
 def test_save_never_raises(tmp_path: Path) -> None:

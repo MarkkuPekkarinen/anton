@@ -5,10 +5,10 @@ from unittest.mock import patch
 
 import pytest
 
-from anton.chat import (
+from anton.utils.datasources import (
     _DS_KNOWN_VARS,
     _DS_SECRET_VARS,
-    _scrub_credentials,
+    scrub_credentials,
 )
 
 
@@ -34,7 +34,7 @@ class TestScrubCredentials:
         """A 6-character registered secret is scrubbed regardless of length."""
         _DS_SECRET_VARS.add("DS_PASSWORD")
         monkeypatch.setenv("DS_PASSWORD", "abc123")
-        result = _scrub_credentials("auth failed: abc123")
+        result = scrub_credentials("auth failed: abc123")
         assert "abc123" not in result
         assert "[DS_PASSWORD]" in result
 
@@ -42,7 +42,7 @@ class TestScrubCredentials:
         """An 8-character registered secret is scrubbed (was at the old threshold)."""
         _DS_SECRET_VARS.add("DS_API_KEY")
         monkeypatch.setenv("DS_API_KEY", "tok12345")
-        result = _scrub_credentials("token=tok12345 rejected")
+        result = scrub_credentials("token=tok12345 rejected")
         assert "tok12345" not in result
         assert "[DS_API_KEY]" in result
 
@@ -50,7 +50,7 @@ class TestScrubCredentials:
         """A 1-character registered secret is scrubbed."""
         _DS_SECRET_VARS.add("DS_SECRET")
         monkeypatch.setenv("DS_SECRET", "x")
-        result = _scrub_credentials("value=x here")
+        result = scrub_credentials("value=x here")
         assert "=x " not in result
         assert "[DS_SECRET]" in result
 
@@ -58,11 +58,11 @@ class TestScrubCredentials:
         """A known but non-secret DS_* var (e.g. DS_HOST) stays readable."""
         _DS_KNOWN_VARS.add("DS_HOST")
         monkeypatch.setenv("DS_HOST", "mydbhostname")
-        result = _scrub_credentials("host=mydbhostname")
+        result = scrub_credentials("host=mydbhostname")
         assert "mydbhostname" in result
 
     def test_unknown_short_ds_var_not_scrubbed(self, monkeypatch):
         """Unknown DS_* vars with short values are NOT scrubbed (heuristic threshold)."""
         monkeypatch.setenv("DS_ENABLE_FEATURE", "on")
-        result = _scrub_credentials("flag=on active")
+        result = scrub_credentials("flag=on active")
         assert "on" in result

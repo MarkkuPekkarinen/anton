@@ -51,6 +51,7 @@ class AntonSettings(BaseSettings):
     disable_autoupdates: bool = False
 
     terms_consent: bool = False
+    first_run_done: bool = False
 
     # Analytics — anonymous usage events (set ANTON_ANALYTICS_ENABLED=false to opt out)
     analytics_enabled: bool = True
@@ -65,12 +66,26 @@ class AntonSettings(BaseSettings):
     minds_datasource_engine: str | None = None
     minds_ssl_verify: bool = True
 
+    # Publish service (anton-services API Gateway)
+    publish_url: str = "https://4nton.ai"
+
     @field_validator("minds_ssl_verify", mode="before")
     @classmethod
     def _parse_minds_ssl_verify(cls, v):
         if isinstance(v, str) and v.strip() == "":
             return True
         return v
+
+    def model_post_init(self, __context) -> None:
+        """Derive openai vars from minds credentials when appropriate."""
+        if (
+            self.minds_api_key
+            and not self.openai_api_key
+            and (self.planning_provider == "openai-compatible" or self.coding_provider == "openai-compatible")
+        ):
+            self.openai_api_key = self.minds_api_key
+            if not self.openai_base_url:
+                self.openai_base_url = f"{self.minds_url.rstrip('/')}/api/v1"
 
     _workspace: Path = PrivateAttr(default=None)
 

@@ -53,7 +53,7 @@ You are a memory compaction system. Review these memory entries and:
 4. Keep all unique, useful entries
 
 Return a JSON object with:
-- "kept": array of entry strings to keep (cleaned up, no metadata comments)
+- "kept": array of entry strings to keep — preserve the trailing `<!-- ... -->` metadata comment on each entry exactly as it appears
 - "merged": array of strings describing what was merged
 - "pruned": array of strings describing what was removed and why
 
@@ -411,8 +411,6 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             new_content = "\n".join(lines) + "\n"
 
         hc._encode_with_lock(path, new_content, mode="write")
-
-    # --- Profile Extraction ---
 
     async def maybe_update_identity(self, user_message: str) -> None:
         """Check if conversation reveals identity facts worth profiling.

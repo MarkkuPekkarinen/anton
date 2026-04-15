@@ -22,10 +22,6 @@ def em(episodes_dir: Path) -> EpisodicMemory:
     return EpisodicMemory(episodes_dir)
 
 
-# ---------------------------------------------------------------------------
-# TestStartSession
-# ---------------------------------------------------------------------------
-
 class TestStartSession:
     def test_creates_file(self, em: EpisodicMemory, episodes_dir: Path):
         sid = em.start_session()
@@ -43,10 +39,6 @@ class TestStartSession:
         em.start_session()
         assert episodes_dir.is_dir()
 
-
-# ---------------------------------------------------------------------------
-# TestLog
-# ---------------------------------------------------------------------------
 
 class TestLog:
     def test_appends_jsonl(self, em: EpisodicMemory, episodes_dir: Path):
@@ -131,11 +123,6 @@ class TestLog:
         path = episodes_dir / f"{sid}.jsonl"
         assert path.read_text() == ""
 
-
-# ---------------------------------------------------------------------------
-# TestLogTurn
-# ---------------------------------------------------------------------------
-
 class TestLogTurn:
     def test_convenience_method(self, em: EpisodicMemory, episodes_dir: Path):
         sid = em.start_session()
@@ -168,11 +155,6 @@ class TestLogTurn:
         path = episodes_dir / f"{sid}.jsonl"
         data = json.loads(path.read_text().strip())
         assert len(data["content"]) == 2000
-
-
-# ---------------------------------------------------------------------------
-# TestRecall
-# ---------------------------------------------------------------------------
 
 class TestRecall:
     def _populate(self, em: EpisodicMemory, messages: list[str]) -> str:
@@ -242,10 +224,6 @@ class TestRecall:
         assert results == []
 
 
-# ---------------------------------------------------------------------------
-# TestRecallFormatted
-# ---------------------------------------------------------------------------
-
 class TestRecallFormatted:
     def test_formatted_string(self, em: EpisodicMemory):
         sid = em.start_session()
@@ -278,10 +256,6 @@ class TestRecallFormatted:
         assert "2026-02-27T14:30:52" in result
 
 
-# ---------------------------------------------------------------------------
-# TestSessionCount
-# ---------------------------------------------------------------------------
-
 class TestSessionCount:
     def test_counts_files(self, em: EpisodicMemory):
         em.start_session()
@@ -295,10 +269,6 @@ class TestSessionCount:
         em = EpisodicMemory(episodes_dir)
         assert em.session_count() == 0
 
-
-# ---------------------------------------------------------------------------
-# TestDisabled
-# ---------------------------------------------------------------------------
 
 class TestDisabled:
     def test_log_noop(self, episodes_dir: Path):
@@ -331,10 +301,6 @@ class TestDisabled:
         lines = path.read_text().strip().splitlines()
         assert len(lines) == 2  # only messages 1 and 3
 
-
-# ---------------------------------------------------------------------------
-# TestWorkspaceIsolation
-# ---------------------------------------------------------------------------
 
 class TestWorkspaceIsolation:
     def test_recall_isolated_across_workspaces(self, tmp_path: Path):

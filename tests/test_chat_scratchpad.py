@@ -4,7 +4,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from anton.chat import SCRATCHPAD_TOOL, ChatSession, _handle_resume
+from anton.chat import SCRATCHPAD_TOOL, ChatSession
+from anton.commands.session import handle_resume
 from anton.llm.provider import LLMResponse, StreamComplete, StreamToolResult, ToolCall, Usage
 
 
@@ -369,10 +370,10 @@ class TestResumeSessionScratchpadCleanup:
         new_session._turn_count = 0
 
         with (
-            patch("anton.chat._prompt_or_cancel", new=AsyncMock(return_value="1")),
-            patch("anton.chat._rebuild_session", return_value=new_session),
+            patch("anton.commands.session.prompt_or_cancel", new=AsyncMock(return_value="1")),
+            patch("anton.commands.session.rebuild_session", return_value=new_session),
         ):
-            await _handle_resume(
+            await handle_resume(
                 console=MagicMock(),
                 settings=MagicMock(),
                 state={},

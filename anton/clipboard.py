@@ -48,12 +48,6 @@ class UploadedFile:
     size_bytes: int
     format: str
 
-
-# ---------------------------------------------------------------------------
-# Clipboard inspection
-# ---------------------------------------------------------------------------
-
-
 def is_clipboard_supported() -> bool:
     """Return True if we can attempt clipboard image grabs on this platform."""
     if platform.system() not in ("Darwin", "Windows"):
@@ -167,11 +161,6 @@ def _grab_text() -> str:
     return ""
 
 
-# ---------------------------------------------------------------------------
-# File saving
-# ---------------------------------------------------------------------------
-
-
 def save_clipboard_image(image: Any, uploads_dir: Path) -> UploadedFile:
     """Save a PIL Image to *uploads_dir* as PNG and write a .meta.json sidecar.
 
@@ -221,11 +210,6 @@ def save_clipboard_image(image: Any, uploads_dir: Path) -> UploadedFile:
     )
 
 
-# ---------------------------------------------------------------------------
-# Lifecycle
-# ---------------------------------------------------------------------------
-
-
 def cleanup_old_uploads(uploads_dir: Path, max_age_days: int = 7) -> int:
     """Delete uploads older than *max_age_days*.  Returns count of files removed."""
     if not uploads_dir.is_dir():
@@ -243,11 +227,6 @@ def cleanup_old_uploads(uploads_dir: Path, max_age_days: int = 7) -> int:
             continue
 
     return removed
-
-
-# ---------------------------------------------------------------------------
-# Path parsing (shared with drag-and-drop in chat.py)
-# ---------------------------------------------------------------------------
 
 
 def parse_dropped_paths(text: str) -> list[Path]:

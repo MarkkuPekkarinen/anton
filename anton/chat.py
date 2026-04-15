@@ -32,7 +32,6 @@ from anton.core.llm.provider import (
 )
 from anton.checks import TokenLimitInfo, TokenLimitStatus, check_minds_token_limits
 from anton.commands.setup import (
-    handle_memory,
     handle_setup,
     handle_setup_models,
 )
@@ -82,6 +81,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.styles import Style as PTStyle
 from rich.prompt import Prompt
+from anton.memory.manage import handle_memory_cmd
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -1208,7 +1208,7 @@ async def _chat_loop(
                     )
                     continue
                 elif cmd == "/memory":
-                    handle_memory(console, settings, cortex, episodic=episodic)
+                    handle_memory_cmd(stripped, console, settings, cortex, episodic=episodic)
                     continue
                 elif cmd == "/connect":
                     arg = parts[1].strip() if len(parts) > 1 else ""

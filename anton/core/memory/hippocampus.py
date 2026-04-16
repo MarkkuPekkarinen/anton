@@ -18,6 +18,8 @@ Each Hippocampus instance manages one scope's files:
 
 from __future__ import annotations
 
+import datetime as dt
+import hashlib
 import re
 import sys
 import time
@@ -41,6 +43,15 @@ class Engram:
     confidence: Literal["high", "medium", "low"] = "medium"
     topic: str = ""
     source: Literal["user", "consolidation", "llm"] = "llm"
+
+
+@dataclass
+class Entry:
+
+    text: str
+    created_at: dt.datetime = None
+    def __post_init__(self):
+        self.id = hashlib.sha256(self.text.encode("utf-8")).hexdigest()
 
 
 class Hippocampus:
@@ -78,6 +89,18 @@ class Hippocampus:
         except (OSError, UnicodeDecodeError):
             return ""
 
+    # def get_identities(self):
+    #     as_text = self.recall_identity()
+    #     entries = []
+    #     if as_text:
+    #         for line in as_text.splitlines():
+    #             stripped = line.strip()
+    #             if stripped.startswith("- "):
+    #                 entries.append(stripped[2:])
+    #             elif stripped and not stripped.startswith("#"):
+    #                 entries.append(stripped)
+    #     return entries
+
     def recall_rules(self) -> str:
         """Load behavioral gates (rules.md) as formatted always/never/when.
 
@@ -92,21 +115,33 @@ class Hippocampus:
         except (OSError, UnicodeDecodeError):
             return ""
 
-    def recall_lessons(self, token_budget: int = 1000) -> str:
+    def recall_lessons(self, token_budget: int|None = 1000) -> str:
+        """Load semantic knowledge (lessons.md), most recent first, within budget.
+
+        Brain analog: Anterior Temporal Lobe — the convergence hub for semantic
+        facts distilled from many episodes. Budget enforced at ~4 chars/token.
+        """
+        return '\n'.join([
+            entry.text
+            for entry in self.get_lessons(token_budget)
+        ])
+
+
+    def get_lessons(self, token_budget: int = 1000) -> list[Entry]:
         """Load semantic knowledge (lessons.md), most recent first, within budget.
 
         Brain analog: Anterior Temporal Lobe — the convergence hub for semantic
         facts distilled from many episodes. Budget enforced at ~4 chars/token.
         """
         if not self._lessons_path.is_file():
-            return ""
+            return []
         try:
             content = self._lessons_path.read_text(encoding="utf-8").strip()
         except (OSError, UnicodeDecodeError):
-            return ""
+            return []
 
         if not content:
-            return ""
+            return []
 
         # Extract individual entries (lines starting with "- ")
         lines = [ln for ln in content.splitlines() if ln.strip()]
@@ -119,21 +154,60 @@ class Hippocampus:
             else:
                 header_lines.append(ln)
 
+        entries = [
+            Entry(text=text)
+            for text in header_lines
+        ]
+
+        if token_budget is None:
+            return entries
+
         # Reverse entries so most recent are first
-        entry_lines.reverse()
+        entries.reverse()
 
         # Budget: ~4 chars per token
         char_budget = token_budget * 4
         result_lines = list(header_lines)
         used = sum(len(ln) for ln in result_lines)
 
-        for ln in entry_lines:
-            if used + len(ln) + 1 > char_budget:
+        for ln in entries:
+            if used + len(ln.text) + 1 > char_budget:
                 break
             result_lines.append(ln)
-            used += len(ln) + 1
+            used += len(ln.text) + 1
 
-        return "\n".join(result_lines)
+        return result_lines
+
+    def del_lesson(self, id):
+        entries = self.get_lessons()
+        entries_out = []
+        for entry in entries:
+            if entry.id != id:
+                entries_out.append(entry)
+
+        if len(entries_out) != len(entries):
+            lessons = [
+                entry.text for entry in entries_out
+            ]
+
+            self._encode_with_lock(self._rules_path, "".join(lessons), mode="write")
+
+    def update_lesson(self, id, text):
+        entries = self.get_lessons()
+
+        for entry in entries:
+            if entry.id != id:
+                continue
+            entry.text = text
+            entry.created_at = dt.datetime.now()
+
+            lessons = [
+                entry.text for entry in entries
+            ]
+
+            self._encode_with_lock(self._rules_path, "".join(lessons), mode="write")
+
+            break
 
     def recall_topic(self, slug: str) -> str:
         """Load deep domain expertise on demand (topics/{slug}.md).
@@ -173,7 +247,7 @@ class Hippocampus:
                     parts.append(line.strip())
 
         # Extract scratchpad-related lessons
-        lessons = self._read_full_lessons()
+        lessons = self.recall_lessons(token_budget=None)
         for line in lessons.splitlines():
             if line.strip().startswith("- ") and "scratchpad" in line.lower():
                 stripped = line.strip()
@@ -193,14 +267,14 @@ class Hippocampus:
 
         return "\n".join(parts)
 
-    def _read_full_lessons(self) -> str:
-        """Read lessons.md without budget constraint (for internal use)."""
-        if not self._lessons_path.is_file():
-            return ""
-        try:
-            return self._lessons_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            return ""
+    # def _read_full_lessons(self) -> str:
+    #     """Read lessons.md without budget constraint (for internal use)."""
+    #     if not self._lessons_path.is_file():
+    #         return ""
+    #     try:
+    #         return self._lessons_path.read_text(encoding="utf-8").strip()
+    #     except (OSError, UnicodeDecodeError):
+    #         return ""
 
     def encode_rule(
         self,

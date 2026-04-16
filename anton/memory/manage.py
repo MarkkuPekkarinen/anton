@@ -46,6 +46,7 @@ def _numbered_bullets(text: str) -> list[tuple[int, str, str]]:
     return result
 
 
+
 def _delete_bullet(path: Path, n: int) -> bool:
     """Remove the n-th bullet entry (1-indexed) from a markdown file."""
     if not path.exists():
@@ -107,6 +108,11 @@ class MemoryManage:
         if len(parts) == 0:
             return self.info()
 
+        if self.cortex is None:
+            self.console.print("  [anton.warning]Memory system not initialized.[/]")
+            self.console.print()
+            return
+
         if parts[0] not in self.SUBCOMMANDS:
             c = self.console
             c.print()
@@ -116,7 +122,7 @@ class MemoryManage:
 
         handler = self.SUBCOMMANDS[parts[0]]
 
-        return handler(parts[1:])
+        return handler(*parts[1:])
 
     def help(self) -> None:
         """Show available /memory sub-commands."""
@@ -157,21 +163,62 @@ class MemoryManage:
         for label, hc in self._pick_hc(scope):
             self._print_entries(f"{label} — Rules", hc.recall_rules() or "")
 
-    def lessons(self, scope: str = "both") -> None:
+    def lessons(self, action: str = None, num: str = None) -> None:
         """Display stored lessons, numbered for easy reference."""
-        if self.cortex is None:
-            self.console.print("[anton.warning]Memory system not initialized.[/]")
-            return
-        for label, hc in self._pick_hc(scope):
-            self._print_entries(f"{label} — Lessons", hc._read_full_lessons() or "")
+        global_items = dict(enumerate(self.cortex.global_hc.get_lessons(), start=1))
+        project_items = dict(enumerate(self.cortex.project_hc.get_lessons(), start=len(global_items) + 1))
+
+        index = {
+            **global_items,
+            **project_items,
+        }
+
+        if action is not None:
+            nums = list(index.keys())
+
+            if num is None:
+                return self.console.print(f"Choose item to {action}: {min(nums)}-{max(nums)}")
+
+            if num.isdigit():
+                num = int(num)
+            if num not in index:
+                return self.console.print(f"Item {num} not found, choose number between {min(nums)} and {max(nums)}")
+
+            if action == 'delete':
+                if num in global_items:
+                    return self.cortex.global_hc.delete_lesson(global_items[num].id)
+                else:
+                    return self.cortex.project_hc.delete_lesson(global_items[num].id)
+
+            elif action == 'edit':
+                old_text = index[num].text
+                text = self.get_updated_text_from_user(old_text)
+
+                if num in global_items:
+                    return self.cortex.global_hc.update_lesson(global_items[num].id, text)
+                else:
+                    return self.cortex.project_hc.update_lesson(global_items[num].id, text)
+
+            return self.console.print(f"Unknown action use one of: delete, edit")
+
+        if len(global_items) > 0:
+            self._print_title('Global')
+            self._print_numbered_items(global_items)
+
+        if len(project_items) > 0:
+            self._print_title('Global')
+            self._print_numbered_items(project_items)
+
+        self.console.print(f"Actions:")
+        self.console.print(f"  delete <num> to delete record")
+        self.console.print(f"  edit <num> to update record")
+
 
     def profile(self, scope: str = "both") -> None:
         """Display the identity profile, numbered for easy reference."""
-        if self.cortex is None:
-            self.console.print("[anton.warning]Memory system not initialized.[/]")
-            return
+
         for label, hc in self._pick_hc(scope):
-            self._print_entries(f"{label} — Profile", hc.recall_identity() or "")
+            self._print_entries(f"{label} — Profile", hc.recall_lessons(token_budget=None) or "")
 
     def episodes(self, query: str = "") -> None:
         """Search and display episodic memory logs."""
@@ -329,12 +376,11 @@ class MemoryManage:
     # Internal helpers
     # ------------------------------------------------------------------
 
-
     def _show_scope(self, label: str, hc) -> int:
         console = self.console
         identity = hc.recall_identity()
         rules = hc.recall_rules()
-        lessons_raw = hc._read_full_lessons()
+        lessons_raw = hc.recall_lessons(token_budget=None)
         rule_count = (
             sum(1 for ln in rules.splitlines() if ln.strip().startswith("- "))
             if rules
@@ -383,6 +429,17 @@ class MemoryManage:
         if scope == "project":
             return [("Project", self.cortex.project_hc)]
         return [("Global", self.cortex.global_hc), ("Project", self.cortex.project_hc)]
+
+    def _print_title(self, title: str) -> None:
+        c = self.console
+        c.print()
+        c.print(f"[anton.cyan]{title}[/]")
+        c.print()
+
+    def _print_numbered_items(self, entries) -> None:
+        c = self.console
+        for n, entry in entries.items():
+            c.print(f"    [dim]{n:>3}.[/]  {entry.text}")
 
     def _print_entries(self, title: str, raw: str) -> None:
         """Print numbered bullet entries under a heading, grouped by markdown section."""

@@ -49,6 +49,44 @@ class Engram:
         self.id = hashlib.sha256(self.text.encode("utf-8")).hexdigest()
 
 
+def _extract_metadata(text: str) -> tuple[str, dict]:
+    """Find and remove the trailing metadata comment from an entry line.
+
+    Parses <!-- key:value ... --> annotations and returns structured
+    metadata as a dict whose keys match Engram fields. 'ts' maps to
+    'updated_at' and is parsed into a datetime; all other keys are kept
+    as strings.
+
+    Returns:
+        (clean_text, metadata_dict)
+        metadata_dict is empty when no comment is present.
+    """
+    match = re.search(r"\s*<!--(.*?)-->\s*$", text)
+    if not match:
+        return text.strip(), {}
+
+    raw: dict[str, str] = dict(re.findall(r"(\w+):(\S+)", match.group(1)))
+    clean_text = text[: match.start()].strip()
+
+    meta: dict = {}
+
+    ts = raw.pop("ts", None)
+    if ts:
+        for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+            try:
+                meta["updated_at"] = dt.datetime.strptime(ts, fmt)
+                break
+            except ValueError:
+                pass
+
+    for key in ("topic", "kind", "confidence", "source"):
+        if key in raw:
+            if raw[key]:
+                meta[key] = raw[key]
+
+    return clean_text, meta
+
+
 class Hippocampus:
     """Reads and writes memory traces at a single scope (global OR project).
 
@@ -68,6 +106,8 @@ class Hippocampus:
         self._profile_path = base_dir / "profile.md"
         self._rules_path = base_dir / "rules.md"
         self._lessons_path = base_dir / "lessons.md"
+
+    # ---------- identity -------------------
 
     def recall_identity(self) -> str:
         """Load the always-on self-model (profile.md).
@@ -95,60 +135,20 @@ class Hippocampus:
     #                 entries.append(stripped)
     #     return entries
 
-    def recall_rules(self) -> str:
-        """Load behavioral gates (rules.md) as formatted always/never/when.
 
-        Brain analog: Basal Ganglia (Go/No-Go pathways) + Orbitofrontal Cortex
-        (conditional behavioral rules). These aren't memories to recall —
-        they're constraints that shape action selection.
+    def rewrite_identity(self, entries: list[str]) -> None:
+        """Replace the identity snapshot (profile.md) — full rewrite, not append.
+
+        Unlike other memory operations, identity is a coherent snapshot, not
+        an append log. Like how your self-concept updates as a whole, not
+        by appending new facts to old ones.
         """
-        if not self._rules_path.is_file():
-            return ""
-        try:
-            return self._rules_path.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            return ""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        content = "# Profile\n" + "\n".join(f"- {e}" for e in entries) + "\n"
+        self._encode_with_lock(self._profile_path, content, mode="write")
 
-    def get_rules(self):
-        raw = self._rules_path.read_text(encoding="utf-8").strip()
 
-    @staticmethod
-    def _extract_metadata(text: str) -> tuple[str, dict]:
-        """Find and remove the trailing metadata comment from an entry line.
-
-        Parses <!-- key:value ... --> annotations and returns structured
-        metadata as a dict whose keys match Engram fields. 'ts' maps to
-        'updated_at' and is parsed into a datetime; all other keys are kept
-        as strings.
-
-        Returns:
-            (clean_text, metadata_dict)
-            metadata_dict is empty when no comment is present.
-        """
-        match = re.search(r"\s*<!--(.*?)-->\s*$", text)
-        if not match:
-            return text.strip(), {}
-
-        raw: dict[str, str] = dict(re.findall(r"(\w+):(\S+)", match.group(1)))
-        clean_text = text[: match.start()].strip()
-
-        meta: dict = {}
-
-        ts = raw.pop("ts", None)
-        if ts:
-            for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
-                try:
-                    meta["updated_at"] = dt.datetime.strptime(ts, fmt)
-                    break
-                except ValueError:
-                    pass
-
-        for key in ("topic", "kind", "confidence", "source"):
-            if key in raw:
-                if raw[key]:
-                    meta[key] = raw[key]
-
-        return clean_text, meta
+    # ---------  lessons --------------
 
     def recall_lessons(self, token_budget: int|None = 1000) -> str:
         """Load semantic knowledge (lessons.md), most recent first, within budget.
@@ -188,7 +188,7 @@ class Hippocampus:
 
         entries = []
         for text in entry_lines:
-            text, meta = self._extract_metadata(text)
+            text, meta = _extract_metadata(text)
             entries.append(Engram(text=text.removeprefix("- "), **meta))
 
         if token_budget is None:
@@ -330,6 +330,63 @@ class Hippocampus:
     #     except (OSError, UnicodeDecodeError):
     #         return ""
 
+
+    # ---------- rules -------------------
+
+    def recall_rules(self) -> str:
+        """Load behavioral gates (rules.md) as formatted always/never/when.
+
+        Brain analog: Basal Ganglia (Go/No-Go pathways) + Orbitofrontal Cortex
+        (conditional behavioral rules). These aren't memories to recall —
+        they're constraints that shape action selection.
+        """
+        if not self._rules_path.is_file():
+            return ""
+        try:
+            return self._rules_path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            return ""
+
+    def get_rules(self) -> list[Engram]:
+        """Load behavioral rules (rules.md) as Engrams, grouped by kind."""
+        if not self._rules_path.is_file():
+            return []
+        try:
+            content = self._rules_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return []
+
+        current_kind = None
+        entries: list[Engram] = []
+
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                current_kind = stripped[3:].lower()
+            elif stripped.startswith("- ") and current_kind:
+                text, meta = _extract_metadata(stripped[2:])
+                if text and current_kind is not None:
+                    entries.append(Engram(text=text, kind=current_kind, **meta))
+
+        return entries
+
+    def save_rules(self, rules: list[Engram]) -> None:
+        self._dir.mkdir(parents=True, exist_ok=True)
+        sections: dict[str, list[Engram]] = {"always": [], "never": [], "when": []}
+        for rule in rules:
+            if rule.kind in sections:
+                sections[rule.kind].append(rule)
+
+        lines = ["# Rules\n"]
+        for section, entries in sections.items():
+            lines.append(f"\n## {section.capitalize()}\n")
+            for e in entries:
+                ts = e.updated_at.strftime("%Y-%m-%d") if e.updated_at else time.strftime("%Y-%m-%d")
+                meta = f"<!-- confidence:{e.confidence} source:{e.source} ts:{ts} -->"
+                lines.append(f"- {e.text} {meta}\n")
+
+        self._encode_with_lock(self._rules_path, "".join(lines), mode="write")
+
     def encode_rule(
         self,
         text: str,
@@ -345,57 +402,23 @@ class Hippocampus:
         """
         self._dir.mkdir(parents=True, exist_ok=True)
 
-        ts = time.strftime("%Y-%m-%d")
-        metadata = f"<!-- confidence:{confidence} source:{source} ts:{ts} -->"
-        entry = f"- {text} {metadata}\n"
+        rules = self.get_rules()
 
-        section_header = f"## {kind.capitalize()}"
-
-        # Read existing content or create skeleton
-        if self._rules_path.is_file():
-            content = self._rules_path.read_text(encoding="utf-8")
-        else:
-            content = "# Rules\n\n## Always\n\n## Never\n\n## When\n"
+        new_rule = Engram(
+            text=text,
+            updated_at=time.strftime("%Y-%m-%d"),
+            confidence=confidence,
+            source=source,
+        )
 
         # Check for duplicate (exact entry match, ignoring metadata)
-        if text in self._extract_entry_texts(content):
-            return
+        for rule in rules:
+            if rule.text == new_rule.text:
+                return
 
-        # Find the section and append
-        lines = content.splitlines(keepends=True)
-        new_lines: list[str] = []
-        inserted = False
+        rules.append(new_rule)
 
-        i = 0
-        while i < len(lines):
-            new_lines.append(lines[i])
-            if lines[i].strip() == section_header and not inserted:
-                # Skip to end of section (next ## or end of file)
-                i += 1
-                section_entries: list[str] = []
-                while i < len(lines) and not (
-                    lines[i].strip().startswith("## ")
-                    and lines[i].strip() != section_header
-                ):
-                    section_entries.append(lines[i])
-                    i += 1
-                # Add existing entries
-                new_lines.extend(section_entries)
-                # Ensure we have a blank line before the entry if needed
-                if section_entries and section_entries[-1].strip():
-                    new_lines.append("\n")
-                elif not section_entries:
-                    pass  # Section was empty, entry follows header
-                new_lines.append(entry)
-                inserted = True
-                continue
-            i += 1
-
-        if not inserted:
-            # Section didn't exist — add it
-            new_lines.append(f"\n{section_header}\n{entry}")
-
-        self._encode_with_lock(self._rules_path, "".join(new_lines), mode="write")
+        self.save_rules(rules)
 
     def encode_lesson(
         self,
@@ -443,17 +466,6 @@ class Hippocampus:
         #         existing = topic_path.read_text(encoding="utf-8")
         #         if text not in self._extract_entry_texts(existing):
         #             self._encode_with_lock(topic_path, entry, mode="append")
-
-    def rewrite_identity(self, entries: list[str]) -> None:
-        """Replace the identity snapshot (profile.md) — full rewrite, not append.
-
-        Unlike other memory operations, identity is a coherent snapshot, not
-        an append log. Like how your self-concept updates as a whole, not
-        by appending new facts to old ones.
-        """
-        self._dir.mkdir(parents=True, exist_ok=True)
-        content = "# Profile\n" + "\n".join(f"- {e}" for e in entries) + "\n"
-        self._encode_with_lock(self._profile_path, content, mode="write")
 
     def entry_count(self) -> int:
         """Count total entries across rules.md and lessons.md."""

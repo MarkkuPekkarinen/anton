@@ -150,13 +150,30 @@ class MemoryManage:
     # Inspect
     # ------------------------------------------------------------------
 
-    def rules(self, scope: str = "both") -> None:
+    async def rules(self, action: str = None, num: str = None) -> None:
         """Display stored rules, numbered for easy reference."""
-        if self.cortex is None:
-            self.console.print("[anton.warning]Memory system not initialized.[/]")
-            return
-        for label, hc in self._pick_hc(scope):
-            self._print_entries(f"{label} — Rules", hc.recall_rules() or "")
+        global_items = dict(enumerate(self.cortex.global_hc.get_rules(), start=1))
+        project_items = dict(enumerate(self.cortex.project_hc.get_rules(), start=len(global_items) + 1))
+
+        index = {
+            **global_items,
+            **project_items,
+        }
+
+        if action is not None:
+            ...
+
+        if len(global_items) > 0:
+            self._print_title('Global')
+            self._print_numbered_items(global_items)
+
+        if len(project_items) > 0:
+            self._print_title('Project')
+            self._print_numbered_items(project_items)
+
+        self.console.print(f"Actions:")
+        self.console.print(f" /memory rules delete <n> to delete record")
+        self.console.print(f" /memory rules edit <n> to update record")
 
     async def lessons(self, action: str = None, num: str = None) -> None:
         """Display stored lessons, numbered for easy reference."""
@@ -263,50 +280,50 @@ class MemoryManage:
     #     self.console.print(f"[dim]Opening {path} in {editor}…[/]")
     #     subprocess.call([editor, str(path)])
 
-    def delete(self, args: list[str]) -> None:
-        """Delete a specific numbered entry from a memory file.
-
-        Usage: delete rule|lesson|profile <n> [global|project]
-        """
-        if self.cortex is None:
-            self.console.print("[anton.warning]Memory system not initialized.[/]")
-            return
-
-        if len(args) < 2:
-            self.console.print(
-                "[anton.warning]Usage: /memory delete rule|lesson|profile <n> [global|project][/]"
-            )
-            return
-
-        kind = args[0]
-        try:
-            n = int(args[1])
-        except ValueError:
-            self.console.print(
-                f"[anton.warning]Entry number must be an integer, got {args[1]!r}[/]"
-            )
-            return
-
-        scope = _parse_scope(args, 2)
-        if scope == "both":
-            scope = "project"
-
-        file_map = {"rule": "rules.md", "lesson": "lessons.md", "profile": "profile.md"}
-        if kind not in file_map:
-            self.console.print(
-                f"[anton.warning]Unknown kind {kind!r}. Use: rule, lesson, profile[/]"
-            )
-            return
-
-        _, hc = self._pick_hc(scope)[0]
-        path: Path = hc._dir / file_map[kind]
-
-        if _delete_bullet(path, n):
-            self.console.print(f"  Deleted {kind} #{n} from {scope} memory.")
-        else:
-            self.console.print(
-                f"[anton.warning]Entry #{n} not found in {scope} {kind}s.[/]"
-            )
+    # def delete(self, args: list[str]) -> None:
+    #     """Delete a specific numbered entry from a memory file.
+    #
+    #     Usage: delete rule|lesson|profile <n> [global|project]
+    #     """
+    #     if self.cortex is None:
+    #         self.console.print("[anton.warning]Memory system not initialized.[/]")
+    #         return
+    #
+    #     if len(args) < 2:
+    #         self.console.print(
+    #             "[anton.warning]Usage: /memory delete rule|lesson|profile <n> [global|project][/]"
+    #         )
+    #         return
+    #
+    #     kind = args[0]
+    #     try:
+    #         n = int(args[1])
+    #     except ValueError:
+    #         self.console.print(
+    #             f"[anton.warning]Entry number must be an integer, got {args[1]!r}[/]"
+    #         )
+    #         return
+    #
+    #     scope = _parse_scope(args, 2)
+    #     if scope == "both":
+    #         scope = "project"
+    #
+    #     file_map = {"rule": "rules.md", "lesson": "lessons.md", "profile": "profile.md"}
+    #     if kind not in file_map:
+    #         self.console.print(
+    #             f"[anton.warning]Unknown kind {kind!r}. Use: rule, lesson, profile[/]"
+    #         )
+    #         return
+    #
+    #     _, hc = self._pick_hc(scope)[0]
+    #     path: Path = hc._dir / file_map[kind]
+    #
+    #     if _delete_bullet(path, n):
+    #         self.console.print(f"  Deleted {kind} #{n} from {scope} memory.")
+    #     else:
+    #         self.console.print(
+    #             f"[anton.warning]Entry #{n} not found in {scope} {kind}s.[/]"
+    #         )
 
     # ------------------------------------------------------------------
     # Dashboard
@@ -354,15 +371,9 @@ class MemoryManage:
     # ------------------------------------------------------------------
 
     def _info_scope(self, label: str, hc) -> int:
-
         console = self.console
         identity = hc.recall_identity()
-        rules = hc.recall_rules()
-        rule_count = (
-            sum(1 for ln in rules.splitlines() if ln.strip().startswith("- "))
-            if rules
-            else 0
-        )
+        rule_count = len(hc.get_rules())
         lessons = hc.get_lessons()
         topics = {
             entry.topic

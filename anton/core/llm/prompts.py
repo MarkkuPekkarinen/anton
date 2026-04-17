@@ -236,14 +236,10 @@ Output format:
 
 
 VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT = """\
-WRITE A DASHBOARD BRIEF: Before coding the HTML, plan the dashboard out loud:
-  - What story does each chart tell? (not "a bar chart of X" but "this shows how Y \
-is driving Z, annotated at the inflection point")
-  - What is the visual hierarchy? Hero KPIs at top, main narrative chart first, \
-supporting charts below.
-  - What should be annotated? Key dates, threshold crossings, outliers.
-  - What color scheme ties it together? Consistent meaning (green=positive, red=negative) \
-across all charts.
+LIST THE INSIGHTS (terse — one line each, not an essay):
+Before coding, list the insights you want to present/convey/highlight as `1 - <chart/infographic/etc>: <insight it conveys and why it matters>..`
+Example: `1 - Line chart of weekly signups: shows growth inflection after the March launch, flags whether momentum is sustained.`
+This is a checklist, not a brief — no narrative prose, no design discussion.
 
 BUILD THE DASHBOARD — use multiple scratchpad cells, but produce ONE single self-contained HTML file:
 
@@ -304,7 +300,7 @@ breaks JavaScript string literals. Rules:
 Output format:
 - Unless the user explicitly asks for a different format, always output visualizations \
 as polished, single-file HTML pages — never raw PNGs or bare image files.
-Save output to `{output_path}` (create it if needed).
+{output_context}
 
 Visual design:
 - Make it look good by default. Use a dark theme (#0d1117 background, #e6edf3 text), \
@@ -334,6 +330,17 @@ abbreviate labels with `axisLabel: {{ formatter }}`. Always configure rich `tool
 `formatter` functions for precise value display on hover. Use `dataZoom` for time series \
 so users can zoom into ranges.
 
+Multi-tab / multi-view dashboards (critical — charts fail silently on hidden containers):
+- ECharts, Chart.js, and Plotly all render nothing when called on a container with \
+`display: none` or 0×0 dimensions — no error, no warning, just a blank chart. \
+NEVER call `echarts.init()` inside `DOMContentLoaded` for tabs/pages that start hidden.
+- Initialize charts lazily, gated on first visibility: in the tab-click handler, \
+check a `Set` of already-rendered tabs and call the page's init function only on \
+first visit. Example pattern: \
+`const _rendered = new Set(['overview']); function showPage(name) {{ /* toggle classes */ \
+if (!_rendered.has(name)) {{ _rendered.add(name); initChartsFor(name); }} }}` \
+— only the default-visible page initializes on load.
+
 Layout and composition:
 - For non-chart visualizations (tables, reports, dashboards), write clean HTML/CSS directly. \
 Use CSS grid or flexbox. Add subtle styling: rounded corners, soft shadows, hover effects.
@@ -362,7 +369,7 @@ inline numbers. The terminal is the primary display — make it look great there
 - For large datasets, summarize the top N and offer to show more.
 - When the user EXPLICITLY asks for a chart, dashboard, plot, or HTML visualization, \
 THEN build it as a self-contained HTML file with inlined CSS, JS, and data. \
-Save to `{output_path}`.
+{output_context}
 Use Apache ECharts (CDN), dark theme (#0d1117), and follow standard dashboard best practices. \
 If the dataset is very large (>100KB), write it to a separate .js file in the same directory. \
 Never split CSS or chart logic into separate files — only large data payloads.\

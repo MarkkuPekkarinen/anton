@@ -161,7 +161,32 @@ class MemoryManage:
         }
 
         if action is not None:
-            ...
+            nums = list(index.keys())
+
+            if num is None:
+                return self.console.print(f"Choose item to {action}: {min(nums)}-{max(nums)}")
+
+            if num.isdigit():
+                num = int(num)
+            if num not in index:
+                return self.console.print(f"Item {num} not found, choose number between {min(nums)} and {max(nums)}")
+
+            if action == 'delete':
+                if num in global_items:
+                    return self.cortex.global_hc.del_rule(global_items[num].id)
+                else:
+                    return self.cortex.project_hc.del_rule(project_items[num].id)
+
+            elif action == 'edit':
+                text = await prompt_or_cancel("Edit the text>", default_text=index[num].text)
+
+                if text is None:
+                    return
+
+                if num in global_items:
+                    return self.cortex.global_hc.update_rule(global_items[num].id, text)
+                else:
+                    return self.cortex.project_hc.update_rule(project_items[num].id, text)
 
         for scope_title, items in [("Global", global_items), ("Project", project_items)]:
             if not items:

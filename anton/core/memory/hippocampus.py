@@ -368,6 +368,8 @@ class Hippocampus:
                 if text and current_kind is not None:
                     entries.append(Engram(text=text, kind=current_kind, **meta))
 
+        entries.sort(key=lambda x: x.kind)
+
         return entries
 
     def save_rules(self, rules: list[Engram]) -> None:

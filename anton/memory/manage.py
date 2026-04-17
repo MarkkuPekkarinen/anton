@@ -163,13 +163,16 @@ class MemoryManage:
         if action is not None:
             ...
 
-        if len(global_items) > 0:
-            self._print_title('Global')
-            self._print_numbered_items(global_items)
-
-        if len(project_items) > 0:
-            self._print_title('Project')
-            self._print_numbered_items(project_items)
+        for scope_title, items in [("Global", global_items), ("Project", project_items)]:
+            if not items:
+                continue
+            self._print_title(scope_title)
+            prev_kind = None
+            for n, engram in items.items():
+                if engram.kind != prev_kind:
+                    self.console.print(f"  [dim]{engram.kind}[/]")
+                    prev_kind = engram.kind
+                self.console.print(f"    [dim]{n:>3}.[/]  {engram.text}")
 
         self.console.print(f"Actions:")
         self.console.print(f" /memory rules delete <n> to delete record")

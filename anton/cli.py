@@ -21,7 +21,7 @@ from rich.text import Text
 from anton import __version__
 
 from anton.utils.prompt import prompt_or_cancel
-from anton.core.llm.openai import build_chat_completion_kwargs
+from anton.core.llm.openai import build_chat_completion_kwargs, _is_azure_endpoint
 
 from anton.chat import ChatSession
 from anton.core.session import ChatSessionConfig
@@ -976,13 +976,6 @@ def _setup_gemini(settings, ws) -> None:
     ws.set_secret("ANTON_PLANNING_MODEL", model)
     ws.set_secret("ANTON_CODING_MODEL", model)
 
-
-def _is_azure_endpoint(url: str) -> bool:
-    """Return True if the URL looks like an Azure OpenAI endpoint."""
-    from urllib.parse import urlparse
-    parsed = urlparse(url if "://" in url else f"https://{url}")
-    host = (parsed.netloc or parsed.path).lower()
-    return host.endswith(".openai.azure.com") or host.endswith(".cognitiveservices.azure.com")
 
 
 def _strip_to_azure_endpoint(raw_url: str) -> str:

@@ -176,6 +176,16 @@ def _translate_user_blocks(blocks: list[dict]) -> list[dict]:
     return result
 
 
+def _is_azure_endpoint(url: str | None) -> bool:
+    """Return True if the URL looks like an Azure OpenAI endpoint."""
+    if not url:
+        return False
+    from urllib.parse import urlparse
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    host = (parsed.netloc or parsed.path).lower()
+    return host.endswith(".openai.azure.com") or host.endswith(".cognitiveservices.azure.com")
+
+
 def build_chat_completion_kwargs(
     *,
     model: str,
@@ -212,7 +222,7 @@ class OpenAIProvider(LLMProvider):
 
         import httpx
 
-        if api_version:
+        if api_version and _is_azure_endpoint(base_url):
             # Azure OpenAI: use the dedicated client which handles deployment
             # URL construction and api-version automatically.
             azure_kwargs: dict = {"api_version": api_version}

@@ -302,7 +302,8 @@ class MemoryManage:
         self._print_title("Episodic Memory")
         max_shown_items = 50
         if len(items) > max_shown_items:
-            items = items[-max_shown_items:]
+            # keep only last items
+            items = dict(sorted(items.items())[-max_shown_items:])
             self.console.print(f"Only the last {max_shown_items} are shown:")
         if len(items) == 0:
             print("(no items)")

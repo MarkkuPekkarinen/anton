@@ -41,45 +41,35 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     from anton.core.datasources.data_vault import LocalDataVault
     vault = session._data_vault or LocalDataVault()
 
-    # ── Non-interactive path ─────────────────────────────────────────
-    # When the LLM extracts credentials from the conversation, save them
-    # directly without running the interactive prompt loop.
-    # Three guards: (1) known_variables present, (2) engine is a known
-    # built-in (find_by_name returns non-None), (3) at least one key
-    # overlaps with the engine's declared fields.
     if known_variables:
         import time
         from anton.core.datasources.datasource_registry import DatasourceRegistry
         from anton.utils.datasources import save_connection
-        _registry = DatasourceRegistry()
-        _engine_def = _registry.find_by_name(engine)
-        if _engine_def is not None:
-            _all_fields = {f.name for f in _engine_def.fields}
-            for _am in _engine_def.auth_methods or []:
-                _all_fields.update(f.name for f in _am.fields)
-            _fields_to_save = {k: v for k, v in known_variables.items() if k in _all_fields}
-            if _fields_to_save:
-                _conn_name = _registry.derive_name(_engine_def, known_variables)
-                if not _conn_name:
-                    _conn_name = str(int(time.time()) % 100000)
-                # Merge with any existing connection to avoid silently dropping
-                # previously saved fields (including secrets). The YOLO subset
-                # may be narrower than what's stored; preserve what isn't being
-                # explicitly replaced.
-                _existing = vault.load(_engine_def.engine, _conn_name) or {}
-                _merged = {**_existing, **_fields_to_save}
-                _preserved = [k for k in _existing if k not in _fields_to_save]
-                _slug = save_connection(vault, _engine_def, _conn_name, _merged)
+        registry = DatasourceRegistry()
+        engine_def = registry.find_by_name(engine)
+        if engine_def is not None:
+            all_fields = {f.name for f in engine_def.fields}
+            for am in engine_def.auth_methods or []:
+                all_fields.update(f.name for f in am.fields)
+            fields_to_save = {k: v for k, v in known_variables.items() if k in all_fields}
+            if fields_to_save:
+                conn_name = registry.derive_name(engine_def, known_variables)
+                if not conn_name:
+                    conn_name = str(int(time.time()) % 100000)
+                existing = vault.load(engine_def.engine, conn_name) or {}
+                merged = {**existing, **fields_to_save}
+                preserved = [k for k in existing if k not in fields_to_save]
+                slug = save_connection(vault, engine_def, conn_name, merged)
                 if _settings:
                     from anton.analytics import send_event
                     send_event(_settings, "ds_connect_success", engine=engine)
-                if _existing:
+                if existing:
                     _msg = (
-                        f"Updated connection `{_slug}` in vault. "
-                        f"Fields set/updated: {', '.join(_fields_to_save.keys())}."
+                        f"Updated connection `{slug}` in vault. "
+                        f"Fields set/updated: {', '.join(fields_to_save.keys())}."
                     )
-                    if _preserved:
-                        _msg += f" Preserved existing fields: {', '.join(_preserved)}."
+                    if preserved:
+                        _msg += f" Preserved existing fields: {', '.join(preserved)}."
                     _msg += (
                         " Future turns can reference this connection by its slug. "
                         "Access credentials via DS_<FIELD> environment variables "
@@ -87,8 +77,8 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
                     )
                     return _msg
                 return (
-                    f"Saved connection `{_slug}` to vault with fields: "
-                    f"{', '.join(_fields_to_save.keys())}. "
+                    f"Saved connection `{slug}` to vault with fields: "
+                    f"{', '.join(fields_to_save.keys())}. "
                     f"Future turns can reference this connection by its slug. "
                     f"Access credentials via DS_<FIELD> environment variables "
                     f"in scratchpad code — never embed raw values."

@@ -68,8 +68,8 @@ class StreamTaskProgress:
 class StreamToolResult:
     """Tool result that should be displayed to the user (e.g. scratchpad dump)."""
     name: str
-    action: str | None = None  # Relevant only for scratchpad tool calls.
     content: str
+    action: str | None = None  # Relevant only for scratchpad tool calls.
 
 
 @dataclass

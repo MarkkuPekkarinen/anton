@@ -276,7 +276,6 @@ async def handle_connect_datasource(
         if not stripped_answer:
             return session
 
-    # Priority 1: saved slug match → reconnect
     known_slugs = {f"{c['engine']}-{c['name']}": c for c in saved_connections}
     if stripped_answer in known_slugs:
         conn = known_slugs[stripped_answer]
@@ -285,10 +284,8 @@ async def handle_connect_datasource(
             from_tool_call=from_tool_call,
         )
 
-    # Priority 2: registry match → field collection
     engine_def = registry.find_by_name(stripped_answer)
 
-    # Priority 3: custom fallback
     if engine_def is None:
         _telemetry("ds_connect_attempt", engine=stripped_answer)
         result = await handle_add_custom_datasource(
@@ -328,7 +325,7 @@ async def handle_connect_datasource(
         return session
 
     assert engine_def is not None
-    _telemetry("ds_connect_attempt", engine=engine_def.engine)
+    # _telemetry("ds_connect_attempt", engine=engine_def.engine)
     active_fields = engine_def.fields
     chosen_method = None
     if engine_def.auth_method == "choice" and engine_def.auth_methods:

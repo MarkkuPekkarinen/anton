@@ -331,14 +331,12 @@ async def handle_connect_datasource(
     if engine_def.auth_method == "choice" and engine_def.auth_methods:
         console.print()
         console.print(
-            f"[anton.cyan](anton)[/] How would you like to authenticate with "
-            f"[bold]{engine_def.display_name}[/]?"
+            f"[anton.cyan](anton)[/] Auth method for [bold]{engine_def.display_name}[/]:"
         )
-        console.print()
         for i, am in enumerate(engine_def.auth_methods, 1):
             console.print(f"        {i}. {am.display}")
         console.print()
-        choice_str = await prompt_or_cancel("(anton) Enter a number")
+        choice_str = await prompt_or_cancel("(anton) Choose")
         if choice_str is None:
             return session
         choice_str = (choice_str or "").strip()
@@ -377,74 +375,21 @@ async def handle_connect_datasource(
     else:
         console.print()
         console.print(
-            f"[anton.cyan](anton)[/] To connect [bold]"
-            f"{engine_def.display_name}[/], I'll need the following:"
+            f"[anton.cyan](anton)[/] [bold]{engine_def.display_name}[/] needs:"
         )
-        console.print()
-
-        if required_fields:
-            console.print("        [bold]Required[/]      " + "─" * 39)
-            for f in required_fields:
-                marker = (
-                    "[green]✓[/] " if collector.collected.get(f.name) else "• "
-                )
-                console.print(
-                    f"        {marker}[bold]{f.name:<12}[/] "
-                    f"[anton.muted]— {f.description}[/]"
-                )
-
-        if optional_fields:
-            console.print()
-            console.print("        [bold]Optional[/]      " + "─" * 39)
-            for f in optional_fields:
-                marker = (
-                    "[green]✓[/] " if collector.collected.get(f.name) else "• "
-                )
-                console.print(
-                    f"        {marker}[bold]{f.name:<12}[/] "
-                    f"[anton.muted]— {f.description}[/]"
-                )
-
-        console.print()
-
-        if not collector.collected:
-            help_answer = await prompt_or_cancel(
-                "(anton) Do you need instructions on how to obtain these credentials?",
-                choices_display="y/n", default="n",
+        for f in required_fields:
+            marker = "[green]✓[/] " if collector.collected.get(f.name) else "• "
+            console.print(
+                f"        {marker}[bold]{f.name}[/] "
+                f"[anton.muted]— {f.description}[/]"
             )
-            if help_answer is None:
-                return session
-            normalized = help_answer.strip().lower()
-            if normalized == "y":
-                await show_credential_help(
-                    console, session, engine_def.display_name, None, active_fields,
-                )
-            elif normalized and normalized != "n":
-                extracted = await extract_variables(
-                    help_answer,
-                    expected_fields=collector.active_fields,
-                    current_engine=engine_def.engine,
-                    current_engine_display=engine_def.display_name,
-                    known_engine_slugs=known_engine_slugs,
-                    session=session,
-                )
-                if extracted.is_redirect:
-                    redirect_text = _build_redirect_message(
-                        collector, help_answer, extracted.redirect_engine
-                    )
-                    session._pending_connect_redirect = redirect_text
-                    if not from_tool_call:
-                        session._history.append(
-                            {"role": "assistant", "content": redirect_text}
-                        )
-                    return session
-                if extracted.variables:
-                    filled = collector.fill_many(extracted.variables)
-                    if filled:
-                        console.print(
-                            f"[anton.muted]        Got: {', '.join(filled)}[/]"
-                        )
-                        console.print()
+        for f in optional_fields:
+            marker = "[green]✓[/] " if collector.collected.get(f.name) else "• "
+            console.print(
+                f"        {marker}[bold]{f.name}[/] "
+                f"[anton.muted]— {f.description} (optional)[/]"
+            )
+        console.print()
 
     while not collector.is_complete:
         collector.format_status(console)
@@ -470,20 +415,27 @@ async def handle_connect_datasource(
             if not value:
                 partial = True
                 break
+            if value.strip().lower() == "help":
+                await show_credential_help(
+                    console, session, engine_def.display_name, next_field, active_fields,
+                )
+                continue
             collector.fill(next_field.name, value)
             continue
 
         missing_names = ", ".join(f.name for f in collector.missing_required)
-        prompt_label = (
-            f"(anton) Provide values for {missing_names} "
-            f"(one at a time, or 'key=value key2=value2', or 'skip')"
-        )
+        prompt_label = f"(anton) {missing_names} (value, 'key=value …', 'help', or 'skip')"
         value = await prompt_or_cancel(prompt_label)
         if value is None:
             return session
         if value.strip().lower() == "skip":
             partial = True
             break
+        if value.strip().lower() == "help":
+            await show_credential_help(
+                console, session, engine_def.display_name, None, active_fields,
+            )
+            continue
         if not value.strip():
             continue
 

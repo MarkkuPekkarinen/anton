@@ -621,7 +621,7 @@ class TestHandleConnectDatasource:
         session = make_session()
         console = MagicMock()
         vault = LocalDataVault(vault_dir=vault_dir)
-        responses = iter(["PostgreSQL", "n", "skip"])
+        responses = iter(["PostgreSQL", "skip"])
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
@@ -657,7 +657,6 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "db.example.com",
                 "5432",
                 "prod_db",
@@ -741,12 +740,12 @@ class TestHandleConnectDatasource:
         assert getattr(session, "_pending_connect_status", None) == "test_failed"
 
     @pytest.mark.asyncio
-    async def test_fully_prefilled_known_variables_skips_help_prompt(
+    async def test_fully_prefilled_known_variables_skips_prompts(
         self, registry, vault_dir, make_session, make_cell, make_pad
     ):
-        """When known_variables covers every required field, skip the
-        'Do you need instructions?' prompt entirely and go straight to
-        test + save. The user has already provided everything.
+        """When known_variables covers every required field, skip all
+        credential prompts and go straight to test + save. The user has
+        already provided everything.
         """
         session = make_session()
         console = MagicMock()
@@ -792,12 +791,11 @@ class TestHandleConnectDatasource:
         assert saved["password"] == "s3cr3t"
 
     @pytest.mark.asyncio
-    async def test_credentials_pasted_at_help_prompt(
+    async def test_credentials_pasted_at_first_prompt(
         self, registry, vault_dir, make_session, make_cell, make_pad
     ):
-        """Pasting credentials at the 'Do you need instructions?' prompt
-        should extract them instead of forcing a re-prompt or re-asking
-        for every field.
+        """Pasting credentials at the first credential prompt should extract
+        them instead of forcing a re-prompt or re-asking for every field.
         """
         session = make_session()
         console = MagicMock()
@@ -832,8 +830,8 @@ class TestHandleConnectDatasource:
             "password: s3cr3t"
         )
         # Only two user inputs needed: the engine pick, then the paste
-        # at the help prompt. The collector becomes complete immediately
-        # after extraction, so no further prompts are issued.
+        # at the first credential prompt. The collector becomes complete
+        # immediately after extraction, so no further prompts are issued.
         responses = iter(["PostgreSQL", pasted])
 
         with (
@@ -895,7 +893,6 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "db.example.com",
                 "5432",
                 "prod_db",
@@ -947,7 +944,6 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "db.example.com",
                 "5432",
                 "prod_db",
@@ -993,7 +989,6 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "db.example.com",
                 "5432",
                 "prod_db",
@@ -1037,7 +1032,6 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "db.example.com",
                 "5432",
                 "prod_db",
@@ -1071,7 +1065,7 @@ class TestHandleConnectDatasource:
         pad = make_pad()
         session._scratchpads.get_or_create = AsyncMock(return_value=pad)
 
-        responses = iter(["HubSpot", "1", "n", "pat-na1-abc123"])
+        responses = iter(["HubSpot", "1", "pat-na1-abc123"])
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
@@ -1123,7 +1117,6 @@ class TestHandleConnectDatasource:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "host=db.example.com port=5432 database=prod_db user=alice",
                 "s3cr3t",  # only password remains → single-field prompt
             ]
@@ -1227,6 +1220,176 @@ class TestHandleConnectDatasource:
         assert vault.list_connections() == []
         assert result is session
 
+    @pytest.mark.asyncio
+    async def test_no_proactive_help_prompt_for_builtin(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """Built-in connect flow must not ask 'need instructions on how
+        to obtain credentials?'. After the engine pick, the next prompt
+        is a credential prompt, not a y/n help prompt.
+        """
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        seen_labels: list[str] = []
+
+        async def _prompt(*args, **kwargs):
+            label = args[0] if args else kwargs.get("label", "")
+            seen_labels.append(label)
+            return next(responses)
+
+        responses = iter(
+            [
+                "PostgreSQL",
+                "db.example.com",
+                "5432",
+                "prod_db",
+                "alice",
+                "s3cr3t",
+            ]
+        )
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=_prompt,
+            ),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        joined = " | ".join(seen_labels).lower()
+        assert "instructions" not in joined
+        assert "need help" not in joined
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        assert conns[0]["name"] == "prod_db"
+
+    @pytest.mark.asyncio
+    async def test_help_keyword_triggers_credential_help(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """Typing 'help' at a credential prompt should invoke
+        show_credential_help (LLM-backed guide) and then keep prompting
+        for the same field, rather than treating 'help' as a literal value.
+        """
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        help_calls: list[str] = []
+
+        async def _fake_help(console_arg, session_arg, service_name, current_field, all_fields):
+            help_calls.append(service_name)
+
+        # Five required fields missing → first prompt is the bulk prompt.
+        # Type 'help' → show_credential_help fires, loop continues, next
+        # input is the actual paste that extracts all five.
+        from anton.connect_collector import _ExtractionResult
+        session._llm.generate_object = AsyncMock(
+            return_value=_ExtractionResult(
+                variables={
+                    "host": "db.example.com",
+                    "port": "5432",
+                    "database": "prod_db",
+                    "user": "alice",
+                    "password": "s3cr3t",
+                },
+            )
+        )
+
+        responses = iter(
+            [
+                "PostgreSQL",
+                "help",
+                "host=db.example.com port=5432 database=prod_db user=alice password=s3cr3t",
+            ]
+        )
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch(
+                "anton.commands.datasource.connect.show_credential_help",
+                new=_fake_help,
+            ),
+        ):
+            await handle_connect_datasource(console, session._scratchpads, session)
+
+        assert help_calls == ["PostgreSQL"]
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        saved = vault.load("postgresql", conns[0]["name"])
+        assert saved is not None
+        assert saved["password"] == "s3cr3t"
+
+    @pytest.mark.asyncio
+    async def test_help_keyword_at_single_field_prompt(
+        self, registry, vault_dir, make_session, make_cell, make_pad
+    ):
+        """When only one required field remains, typing 'help' there
+        triggers field-specific help and does not get saved as the value.
+        """
+        session = make_session()
+        console = MagicMock()
+        vault = LocalDataVault(vault_dir=vault_dir)
+
+        pad = make_pad()
+        session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+
+        help_calls: list[tuple[str, str]] = []
+
+        async def _fake_help(console_arg, session_arg, service_name, current_field, all_fields):
+            help_calls.append((service_name, current_field.name if current_field else ""))
+
+        # Pre-fill everything except password → the while-loop hits the
+        # single-field branch for 'password'. First response is 'help',
+        # second is the actual password.
+        responses = iter(["PostgreSQL", "help", "s3cr3t"])
+
+        with (
+            patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
+            patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
+            patch(
+                "anton.commands.datasource.connect.prompt_or_cancel",
+                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
+            ),
+            patch(
+                "anton.commands.datasource.connect.show_credential_help",
+                new=_fake_help,
+            ),
+        ):
+            await handle_connect_datasource(
+                console,
+                session._scratchpads,
+                session,
+                known_variables={
+                    "host": "db.example.com",
+                    "port": "5432",
+                    "database": "prod_db",
+                    "user": "alice",
+                },
+            )
+
+        assert help_calls == [("PostgreSQL", "password")]
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        saved = vault.load("postgresql", conns[0]["name"])
+        assert saved is not None
+        assert saved["password"] == "s3cr3t"
+
 
 class TestCredentialScrubbing:
     """_scrub_credentials and _register_secret_vars — flat and namespaced modes."""
@@ -1292,7 +1455,6 @@ class TestCredentialScrubbing:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "db.host.com",
                 "5432",
                 "mydb",
@@ -1818,7 +1980,6 @@ class TestEnvActivationCollisionFree:
         responses = iter(
             [
                 "PostgreSQL",
-                "n",
                 "db.example.com",
                 "5432",
                 "prod_db",

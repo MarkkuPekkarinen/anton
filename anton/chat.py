@@ -35,7 +35,9 @@ from anton.commands.setup import (
     handle_setup,
     handle_setup_models,
 )
-from anton.commands.ui import handle_explain, handle_theme, print_slash_help, SKILLS_COMMANDS
+from anton.commands.ui import handle_explain, handle_theme, print_slash_help, make_completer
+from anton.commands.ui import SKILLS_COMMANDS, THEME_COMMANDS, COMMANDS
+
 from anton.utils.clipboard import (
     ensure_clipboard,
     format_clipboard_image_message,
@@ -80,7 +82,6 @@ from anton.core.datasources.datasource_registry import (
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.styles import Style as PTStyle
-from anton.commands.ui import make_completer, THEME_COMMANDS, COMMANDS
 from rich.prompt import Prompt
 from anton.memory.manage import MemoryManage, MEMORY_COMMANDS
 

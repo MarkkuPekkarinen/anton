@@ -6,6 +6,7 @@ import os
 import re
 from typing import TYPE_CHECKING, Awaitable, Callable
 
+from anton.commands.datasource.helpers import prompt_field_value
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField, DatasourceRegistry
 from anton.utils.datasources import parse_connection_slug, register_secret_vars, restore_namespaced_env
@@ -87,13 +88,8 @@ async def run_connection_test(
                     return False
                 continue
             for f in retry_fields:
-                if not f.secret:
-                    continue
-                value = await prompt_or_cancel(f"(anton) {f.name}", password=True)
-                if value is None:
+                if not await prompt_field_value(f, credentials):
                     return False
-                if value:
-                    credentials[f.name] = value
             continue
 
         console.print("[anton.success]        ✓ Connected successfully![/]")

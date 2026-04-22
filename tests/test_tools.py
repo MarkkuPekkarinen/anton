@@ -343,6 +343,72 @@ class TestNonInteractiveSave:
         assert "host" in printed
 
     @pytest.mark.asyncio
+    async def test_yolo_dedups_matching_connection(self, vault_dir):
+        """YOLO save for a DB already in the vault reuses the existing slug."""
+        session = _make_session(vault_dir)
+        session._data_vault.save(
+            "postgres",
+            "abc12345",
+            {
+                "host": "db.example.com",
+                "port": "5432",
+                "database": "sales",
+                "user": "admin",
+                "password": "old-pw",
+            },
+        )
+        with _patch_test_ok():
+            result = await handle_connect_datasource(
+                session,
+                {
+                    "engine": "postgres",
+                    "known_variables": {
+                        "host": "db.example.com",
+                        "database": "sales",
+                        "user": "admin",
+                        "password": "new-pw",
+                    },
+                },
+            )
+        conns = session._data_vault.list_connections()
+        assert len(conns) == 1
+        assert conns[0]["name"] == "abc12345"
+        saved = session._data_vault.load("postgres", "abc12345")
+        assert saved["password"] == "new-pw"
+        assert result.startswith("Updated connection")
+        assert "password" in result
+
+    @pytest.mark.asyncio
+    async def test_yolo_different_db_does_not_dedup(self, vault_dir):
+        """Different database name → treated as a new connection."""
+        session = _make_session(vault_dir)
+        session._data_vault.save(
+            "postgres",
+            "abc12345",
+            {
+                "host": "db.example.com",
+                "database": "sales",
+                "user": "admin",
+                "password": "pw",
+            },
+        )
+        with _patch_test_ok():
+            await handle_connect_datasource(
+                session,
+                {
+                    "engine": "postgres",
+                    "known_variables": {
+                        "host": "db.example.com",
+                        "database": "analytics",
+                        "user": "admin",
+                        "password": "pw",
+                    },
+                },
+            )
+        conns = session._data_vault.list_connections()
+        assert len(conns) == 2
+
+    @pytest.mark.asyncio
     async def test_no_known_variables_runs_interactive(self, vault_dir):
         """No known_variables → interactive flow is invoked, no non-interactive save."""
         session = _make_session(vault_dir)

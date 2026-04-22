@@ -105,6 +105,7 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
             DatasourceRegistry,
         )
         from anton.utils.datasources import (
+            find_matching_connection,
             persist_custom_engine,
             save_connection,
         )
@@ -178,9 +179,13 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
                             f"known_variables or explain the issue to the user."
                         )
 
-                conn_name = uuid.uuid4().hex[:8]
-                while vault.load(engine_def.engine, conn_name) is not None:
+                conn_name = find_matching_connection(
+                    vault, engine_def, test_credentials
+                )
+                if conn_name is None:
                     conn_name = uuid.uuid4().hex[:8]
+                    while vault.load(engine_def.engine, conn_name) is not None:
+                        conn_name = uuid.uuid4().hex[:8]
                 existing = vault.load(engine_def.engine, conn_name) or {}
                 merged = {**existing, **test_credentials}
                 slug = save_connection(vault, engine_def, conn_name, merged)

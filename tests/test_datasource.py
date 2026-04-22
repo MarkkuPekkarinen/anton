@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 from textwrap import dedent
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -950,21 +951,25 @@ class TestHandleConnectDatasource:
                 "alice",
                 "wrongpassword",
                 "y",
-                "correctpassword",
+                # Retry re-prompts every field: empty = keep current for
+                # host/port/database/user/schema/ssl; new value for password.
+                "",       # host
+                "",       # port
+                "",       # database
+                "",       # user
+                "correctpassword",  # password
+                "",       # schema (optional)
+                "",       # ssl (optional)
             ]
         )
 
+        poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
             patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
-            patch(
-                "anton.commands.datasource.connect.prompt_or_cancel",
-                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
-            ),
-            patch(
-                "anton.commands.datasource.verify.prompt_or_cancel",
-                new=AsyncMock(side_effect=lambda *a, **kw: next(responses)),
-            ),
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.helpers.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.verify.prompt_or_cancel", new=poc),
         ):
             await handle_connect_datasource(console, session._scratchpads, session)
 
@@ -1050,8 +1055,10 @@ class TestHandleConnectDatasource:
         ):
             await handle_connect_datasource(console, session._scratchpads, session)
 
-        # name_from=database → name="prod_db" → prefix DS_POSTGRESQL_PROD_DB
-        assert os.environ.get("DS_POSTGRESQL_PROD_DB__HOST") == "db.example.com"
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        prefix = _slug_env_prefix(conns[0]["engine"], conns[0]["name"])
+        assert os.environ.get(f"{prefix}__HOST") == "db.example.com"
 
     @pytest.mark.asyncio
     async def test_auth_method_choice_selects_fields(
@@ -1268,7 +1275,7 @@ class TestHandleConnectDatasource:
         assert "need help" not in joined
         conns = vault.list_connections()
         assert len(conns) == 1
-        assert conns[0]["name"] == "prod_db"
+        assert re.fullmatch(r"[0-9a-f]{8}", conns[0]["name"])
 
     @pytest.mark.asyncio
     async def test_help_keyword_triggers_credential_help(
@@ -1432,15 +1439,12 @@ class TestHandleConnectDatasource:
         ):
             await handle_connect_datasource(console, session._scratchpads, session)
 
-        # First label is "Connect to" engine picker; the next three are
-        # sequential (>2 remaining), then a bulk label for the 2-field
-        # case (user+password), then single-field for password.
+        # First label is "Connect to" engine picker; then every required
+        # field is prompted individually — no bulk compact prompts.
         assert seen_labels[1] == "(anton) Host"
         assert seen_labels[2] == "(anton) Port"
         assert seen_labels[3] == "(anton) Database"
-        # 2 remaining → bulk compact prompt is allowed.
-        assert "user, password" in seen_labels[4]
-        # 1 remaining → single-field sequential.
+        assert seen_labels[4] == "(anton) User"
         assert seen_labels[5] == "(anton) Password"
 
         conns = vault.list_connections()
@@ -1631,8 +1635,10 @@ class TestCredentialScrubbing:
         ):
             await handle_connect_datasource(MagicMock(), session._scratchpads, session)
 
-        # name_from=database → name="mydb" → DS_POSTGRESQL_MYDB__PASSWORD
-        namespaced_pw_var = "DS_POSTGRESQL_MYDB__PASSWORD"
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        prefix = _slug_env_prefix(conns[0]["engine"], conns[0]["name"])
+        namespaced_pw_var = f"{prefix}__PASSWORD"
         assert namespaced_pw_var in _DS_SECRET_VARS
         monkeypatch.setenv(namespaced_pw_var, secret_pw)
         result = scrub_credentials(f"error: auth failed with {secret_pw}")
@@ -1967,16 +1973,16 @@ class TestEditDatasourceFlow:
                 "alice",
                 "newpass",
                 "",
+                "",
             ]
         )
+        poc = AsyncMock(side_effect=lambda *a, **kw: next(prompt_values))
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
             patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
-            patch(
-                "anton.commands.datasource.connect.prompt_or_cancel",
-                new=AsyncMock(side_effect=lambda *a, **kw: next(prompt_values)),
-            ),
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.helpers.prompt_or_cancel", new=poc),
         ):
             await handle_connect_datasource(
                 console,
@@ -2022,16 +2028,16 @@ class TestEditDatasourceFlow:
                 "alice",
                 "",  # password — Enter = keep original
                 "",  # schema
+                "",  # ssl
             ]
         )
+        poc = AsyncMock(side_effect=lambda *a, **kw: next(prompt_values))
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
             patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
-            patch(
-                "anton.commands.datasource.connect.prompt_or_cancel",
-                new=AsyncMock(side_effect=lambda *a, **kw: next(prompt_values)),
-            ),
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.helpers.prompt_or_cancel", new=poc),
         ):
             await handle_connect_datasource(
                 console,
@@ -2157,7 +2163,10 @@ class TestEnvActivationCollisionFree:
             await handle_connect_datasource(console, session._scratchpads, session)
 
         assert "DS_ACCESS_TOKEN" not in os.environ
-        assert os.environ.get("DS_POSTGRESQL_PROD_DB__HOST") == "db.example.com"
+        conns = vault.list_connections()
+        assert len(conns) == 1
+        prefix = _slug_env_prefix(conns[0]["engine"], conns[0]["name"])
+        assert os.environ.get(f"{prefix}__HOST") == "db.example.com"
 
     @pytest.mark.asyncio
     async def test_two_same_type_connections_no_collision(
@@ -3897,7 +3906,7 @@ class TestEditDatasourceWithTestSnippet:
 
         # Keep all non-secret fields; enter bad password; decline retry.
         responses = iter(
-            ["", "", "", "", "bad-pass", "", "n"]
+            ["", "", "", "", "bad-pass", "", "", "n"]
         )  # field values, then retry?
 
         poc = AsyncMock(side_effect=lambda *a, **kw: next(responses))
@@ -3905,6 +3914,7 @@ class TestEditDatasourceWithTestSnippet:
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
             patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
             patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.helpers.prompt_or_cancel", new=poc),
             patch("anton.commands.datasource.verify.prompt_or_cancel", new=poc),
         ):
             result = await handle_connect_datasource(
@@ -3940,16 +3950,16 @@ class TestEditDatasourceWithTestSnippet:
                 "",  # user
                 "new-pass",  # password (updated)
                 "",  # schema
+                "",  # ssl
             ]
         )
+        poc = AsyncMock(side_effect=lambda *a, **kw: next(prompt_responses))
 
         with (
             patch("anton.commands.datasource.connect.LocalDataVault", return_value=vault),
             patch("anton.commands.datasource.connect.DatasourceRegistry", return_value=registry),
-            patch(
-                "anton.commands.datasource.connect.prompt_or_cancel",
-                new=AsyncMock(side_effect=lambda *a, **kw: next(prompt_responses)),
-            ),
+            patch("anton.commands.datasource.connect.prompt_or_cancel", new=poc),
+            patch("anton.commands.datasource.helpers.prompt_or_cancel", new=poc),
         ):
             result = await handle_connect_datasource(
                 console,

@@ -9,9 +9,15 @@ from typing import TYPE_CHECKING
 from anton.connect_collector import ConnectionCollector, extract_variables
 from anton.core.datasources.data_vault import DataVault, LocalDataVault
 from anton.core.datasources.datasource_registry import DatasourceRegistry
-from anton.utils.datasources import parse_connection_slug, register_secret_vars, restore_namespaced_env, save_connection
+from anton.utils.datasources import (
+    find_matching_connection,
+    parse_connection_slug,
+    register_secret_vars,
+    restore_namespaced_env,
+    save_connection,
+)
 from anton.utils.prompt import prompt_or_cancel
-from anton.commands.datasource.helpers import show_credential_help
+from anton.commands.datasource.helpers import prompt_field_value, show_credential_help
 from anton.commands.datasource.custom import collect_custom_credentials, handle_add_custom_datasource
 from anton.commands.datasource.verify import run_connection_test
 
@@ -176,42 +182,8 @@ async def handle_connect_datasource(
 
         credentials: dict[str, str] = dict(existing)
         for f in active_fields:
-            current = existing.get(f.name, "")
-            field_label = f"(anton) {f.name}"
-            if not f.required:
-                field_label += " (optional)"
-
-            if f.secret:
-                masked = "••••••••" if current else ""
-                label = f"{field_label} [{masked}]" if masked else field_label
-                value = await prompt_or_cancel(label, password=True)
-                if value is None:
-                    return session
-                if value:
-                    credentials[f.name] = value
-            elif current:
-                value = await prompt_or_cancel(
-                    f"{field_label}",
-                    default=current,
-                )
-                if value is None:
-                    return session
-                credentials[f.name] = value if value else current
-            elif f.default:
-                value = await prompt_or_cancel(
-                    f"{field_label}",
-                    default=f.default,
-                )
-                if value is None:
-                    return session
-                if value:
-                    credentials[f.name] = value
-            else:
-                value = await prompt_or_cancel(field_label)
-                if value is None:
-                    return session
-                if value:
-                    credentials[f.name] = value
+            if not await prompt_field_value(f, credentials):
+                return session
 
         if engine_def.test_snippet:
             if not await run_connection_test(
@@ -407,11 +379,7 @@ async def handle_connect_datasource(
     while not collector.is_complete:
         next_field = collector.next_field
         remaining_count = len(collector.missing_required)
-        use_sequential = (
-            next_field is not None
-            and next_field.required
-            and remaining_count != 2
-        )
+        use_sequential = next_field is not None and next_field.required
 
         if use_sequential and next_field is not None:
             pretty = next_field.name.replace("_", " ").title()
@@ -548,60 +516,40 @@ async def handle_connect_datasource(
             session._pending_connect_status = "test_failed"
             return session
 
-    conn_name = registry.derive_name(engine_def, credentials)
-    if not conn_name:
+    existing_name = find_matching_connection(vault, engine_def, credentials)
+    if existing_name is not None:
+        conn_name = existing_name
+        is_update = True
+    else:
         conn_name = uuid.uuid4().hex[:8]
+        while vault.load(engine_def.engine, conn_name) is not None:
+            conn_name = uuid.uuid4().hex[:8]
+        is_update = False
 
     slug = f"{engine_def.engine}-{conn_name}"
-
-    if vault.load(engine_def.engine, conn_name) is not None:
-        console.print()
-        console.print(
-            f'[anton.warning](anton)[/] A connection [bold]"{slug}"[/bold] already exists.'
-        )
-        console.print()
-        choice = await prompt_or_cancel(
-            f"(anton) {_PROMPT_RECONNECT_CANCEL}",
-        )
-        if choice is None or choice.strip().lower() != "reconnect":
-            console.print("[anton.muted]Cancelled.[/]")
-            console.print()
-            return session
-        restore_namespaced_env(vault)
-        register_secret_vars(engine_def, engine=engine_def.engine, name=conn_name)
-        console.print()
-        console.print(
-            f'[anton.success]        ✓ Reconnected to [bold]"{slug}"[/bold].[/]'
-        )
-        console.print()
-        if not from_tool_call:
-            session._history.append(
-                {
-                    "role": "assistant",
-                    "content": (
-                        f'I\'ve reconnected to the {engine_def.display_name} connection "{slug}" '
-                        f"in the Local Vault. I can now query this data source when needed."
-                    ),
-                }
-            )
-        return session
 
     save_connection(vault, engine_def, conn_name, credentials)
     _telemetry("ds_connect_success", engine=engine_def.engine)
     session._active_datasource = slug
-    console.print(f'        Saved to Local Vault as [bold]"{slug}"[/bold].')
+    if is_update:
+        console.print(
+            f'        Updated existing connection [bold]"{slug}"[/bold].'
+        )
+    else:
+        console.print(f'        Saved to Local Vault as [bold]"{slug}"[/bold].')
 
     console.print()
     console.print("[anton.muted]        Ready to query your data.[/]")
     console.print()
 
     if not from_tool_call:
+        verb = "updated" if is_update else "saved"
         session._history.append(
             {
                 "role": "assistant",
                 "content": (
-                    f'I\'ve saved a {engine_def.display_name} connection named "{slug}" '
-                    f"to the Local Vault. I can now query this data source when needed."
+                    f'I\'ve {verb} the {engine_def.display_name} connection "{slug}" '
+                    f"in the Local Vault. I can now query this data source when needed."
                 ),
             }
         )

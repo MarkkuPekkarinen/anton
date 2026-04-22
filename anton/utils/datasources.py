@@ -157,6 +157,38 @@ def restore_namespaced_env(vault: DataVault) -> None:
             register_secret_vars(edef, engine=conn["engine"], name=conn["name"])
 
 
+def find_matching_connection(
+    vault: DataVault,
+    engine_def: "DatasourceEngine",
+    credentials: dict[str, str],
+) -> str | None:
+    """Return the name of an existing connection with matching identity fields.
+
+    Uses the engine's ``name_from`` declaration as the identity signature.
+    If those fields exist in both the incoming credentials and a stored
+    connection of the same engine (and all values match), the stored name
+    is returned so the caller can update in place instead of creating a
+    duplicate. Returns None when no match is found, or when the engine has
+    no ``name_from`` (custom/ad-hoc engines).
+    """
+    name_from = engine_def.name_from
+    if not name_from:
+        return None
+    if isinstance(name_from, str):
+        name_from = [name_from]
+    incoming_sig = tuple(credentials.get(f, "") for f in name_from)
+    if not any(incoming_sig):
+        return None
+    for conn in vault.list_connections():
+        if conn["engine"] != engine_def.engine:
+            continue
+        existing_fields = vault.load(conn["engine"], conn["name"]) or {}
+        existing_sig = tuple(existing_fields.get(f, "") for f in name_from)
+        if existing_sig == incoming_sig:
+            return conn["name"]
+    return None
+
+
 def save_connection(
     vault: DataVault,
     engine_def: "DatasourceEngine",

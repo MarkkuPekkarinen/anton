@@ -278,6 +278,71 @@ class TestNonInteractiveSave:
         assert session._data_vault.list_connections() == []
 
     @pytest.mark.asyncio
+    async def test_scrubbed_placeholder_values_are_dropped(self, vault_dir):
+        """Bracketed DS_* values look like scrubber output → drop before save."""
+        session = _make_session(vault_dir)
+        interactive = _fake_interactive(session)
+        with patch(
+            "anton.commands.datasource.handle_connect_datasource", new=interactive
+        ):
+            await handle_connect_datasource(
+                session,
+                {
+                    "engine": "posthog",
+                    "known_variables": {
+                        "api_key": "[DS_POSTHOG_ABCD1234__API_KEY]",
+                    },
+                },
+            )
+
+        interactive.assert_called_once()
+        assert session._data_vault.list_connections() == []
+        printed = " ".join(
+            str(c.args[0])
+            for c in session._console.print.call_args_list
+            if c.args
+        )
+        assert "scrubbed-placeholder" in printed
+        assert "api_key" in printed
+
+    @pytest.mark.asyncio
+    async def test_mixed_real_and_scrubbed_values(self, vault_dir, tmp_path):
+        """Real values are saved; scrubbed placeholders are dropped with a warning."""
+        session = _make_session(vault_dir)
+        ds_md = tmp_path / "datasources.md"
+        mock_path = MagicMock()
+        mock_path.return_value.expanduser.return_value = ds_md
+        with patch(
+            "anton.utils.datasources.Path", new=mock_path
+        ), patch(
+            "anton.core.datasources.datasource_registry."
+            "DatasourceRegistry._USER_PATH",
+            new=ds_md,
+        ):
+            await handle_connect_datasource(
+                session,
+                {
+                    "engine": "posthog",
+                    "known_variables": {
+                        "api_key": "phx_real",
+                        "host": "[DS_POSTHOG_X__HOST]",
+                    },
+                },
+            )
+        conns = session._data_vault.list_connections()
+        assert len(conns) == 1
+        saved = session._data_vault.load("posthog", conns[0]["name"])
+        assert saved["api_key"] == "phx_real"
+        assert "host" not in saved
+        printed = " ".join(
+            str(c.args[0])
+            for c in session._console.print.call_args_list
+            if c.args
+        )
+        assert "scrubbed-placeholder" in printed
+        assert "host" in printed
+
+    @pytest.mark.asyncio
     async def test_no_known_variables_runs_interactive(self, vault_dir):
         """No known_variables → interactive flow is invoked, no non-interactive save."""
         session = _make_session(vault_dir)

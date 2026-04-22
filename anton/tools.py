@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import TYPE_CHECKING
 
 from anton.core.tools.tool_defs import ToolDef
+
 
 if TYPE_CHECKING:
     from anton.core.datasources.datasource_registry import DatasourceEngine, DatasourceField
@@ -16,6 +18,7 @@ SECRET_NAME_TOKENS = (
     "password", "secret", "token", "api_key", "key",
     "auth", "credential", "private",
 )
+SCRUBBED_VALUE_RE = re.compile(r"^\[DS_\w+\]$")
 
 
 def looks_secret(field_name: str) -> bool:
@@ -61,6 +64,23 @@ async def handle_connect_datasource(session: ChatSession, tc_input: dict) -> str
     console = session._console
     if console is None:
         return "Cannot connect datasource — no console available."
+
+    dropped_scrubbed = [
+        k for k, v in known_variables.items() if SCRUBBED_VALUE_RE.match(v)
+    ]
+    if dropped_scrubbed:
+        known_variables = {
+            k: v
+            for k, v in known_variables.items()
+            if not SCRUBBED_VALUE_RE.match(v)
+        }
+        console.print()
+        console.print(
+            f"[anton.warning](anton)[/] Ignoring scrubbed-placeholder values "
+            f"for {', '.join(dropped_scrubbed)} — those [DS_...] strings are "
+            f"scrub-markers, not real credentials. Pass the actual secret "
+            f"values instead."
+        )
 
     # ── Telemetry: connection attempt ────────────────────────────────
     _settings = getattr(session, "_settings", None)

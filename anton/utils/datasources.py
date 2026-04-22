@@ -128,6 +128,11 @@ def build_datasource_context(vault: DataVault, active_only: str | None = None) -
         "environment variables. Use them directly in scratchpad code "
         "(e.g. DS_POSTGRES_PROD_DB__HOST). "
         "Never read the data vault files directly.\n"
+        "If you see `[DS_<NAME>]` patterns in scratchpad output, those are "
+        "scrub-markers where a secret value was redacted before returning "
+        "text to you — the actual value IS injected in the env var. Reference "
+        "it by name; never treat the bracket form as a literal credential "
+        "or pass it back as a value to any tool.\n"
     )
     for c in conns:
         slug = f"{c['engine']}-{c['name']}"

@@ -80,9 +80,9 @@ from anton.core.datasources.datasource_registry import (
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.styles import Style as PTStyle
-from anton.commands.ui import make_completer
+from anton.commands.ui import make_completer, THEME_COMMANDS, COMMANDS
 from rich.prompt import Prompt
-from anton.memory.manage import MemoryManage
+from anton.memory.manage import MemoryManage, MEMORY_COMMANDS
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -1127,9 +1127,6 @@ async def _chat_loop(
         }
     )
 
-    from anton.commands.ui import THEME_COMMANDS, COMMANDS
-    from anton.memory.manage import MEMORY_COMMANDS
-
     prompt_session: PromptSession[str] = PromptSession(
         mouse_support=False,
         bottom_toolbar=_bottom_toolbar,
@@ -1331,7 +1328,7 @@ async def _chat_loop(
 
                         cmds = [cmd.command for cmd in SKILLS_COMMANDS]
                         console.print(
-                            "[anton.warning]Usage: " + " | ".join(cmds)
+                            "[anton.warning]Usage: " + " | ".join(cmds) + "[/]"
                         )
                         console.print()
                     continue

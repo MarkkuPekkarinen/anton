@@ -76,7 +76,7 @@ def handle_theme(console: Console, arg: str) -> None:
     else:
         cmds = [cmd.command for cmd in THEME_COMMANDS]
         console.print(
-            f"[anton.warning]Unknown theme '{arg}'. Use: " + " | ".join(cmds)
+            f"[anton.warning]Unknown theme '{arg}'. Use: " + " | ".join(cmds) + "[/]"
         )
         console.print()
         return
@@ -179,9 +179,11 @@ def make_completer(command_sources: list[list]) -> Completer:
             current_word = text[word_start:]
             seen = set()
             for cmd in commands:
-                if not cmd.startswith(text) or cmd == text:
+                if not cmd.startswith(text):
                     continue
                 next_word = cmd[word_start:].split(" ")[0]
+                if next_word == current_word:
+                    continue
                 if next_word and next_word[0] not in ("<", "[") and next_word not in seen:
                     seen.add(next_word)
                     yield Completion(next_word, start_position=-len(current_word))

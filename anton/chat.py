@@ -370,8 +370,8 @@ async def _handle_publish(
             return
         api_key = api_key.strip()
         settings.minds_api_key = api_key
-        if workspace:
-            workspace.set_secret("ANTON_MINDS_API_KEY", api_key)
+        # Key is not persisted yet — wait until publish succeeds to avoid
+        # locking the user out with a bad key on every subsequent /publish call.
         console.print()
 
     # 2. Find the HTML file to publish
@@ -479,9 +479,20 @@ async def _handle_publish(
                 ssl_verify=settings.minds_ssl_verify,
             )
         except Exception as e:
-            console.print(f"  [anton.error]Publish failed: {e}[/]")
+            import urllib.error
+            if isinstance(e, urllib.error.HTTPError) and e.code == 401:
+                settings.minds_api_key = None
+                if workspace:
+                    workspace.set_secret("ANTON_MINDS_API_KEY", "")
+                console.print("  [anton.error]Invalid API key — run /publish again to enter a new one.[/]")
+            else:
+                console.print(f"  [anton.error]Publish failed: {e}[/]")
             console.print()
             return
+
+    # Persist the key now that we know it works
+    if workspace:
+        workspace.set_secret("ANTON_MINDS_API_KEY", settings.minds_api_key)
 
     view_url = result.get("view_url", "")
     returned_report_id = result.get("report_id", "")

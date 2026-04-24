@@ -11,7 +11,7 @@
 
 Anton is a self-improving AI coworker you can hand off any task to. An open, powerful alternative to Claude-Cowork.
 
-Anton lets any LLM complete work on its own. Describe the outcome and cadence, Anton learns, takes action and keeps you informed. Come back to the result.
+You simply describe the outcome and cadence, Anton learns, takes action and keeps you informed. Come back to the result.
 
 
 ![ezgif-24b9e7c74652f0dc](https://github.com/user-attachments/assets/c92f87c1-ff30-4272-92ba-49a8585d5954)
@@ -41,7 +41,8 @@ curl -sSf https://raw.githubusercontent.com/mindsdb/anton/main/install.sh | sh &
 irm https://raw.githubusercontent.com/mindsdb/anton/main/install.ps1 | iex
 ```
 
-That's it, you can now run it by simply typing the command:
+That's it, you can now run it by simply typing the command.
+
 ```
 anton
 ```

@@ -129,6 +129,13 @@ class Cortex:
         self._llm = llm_client
         self._turn_count = 0
 
+        # One-time migration: identity is singular and global. Any entries that
+        # landed in project scope from the old encode() bug are merged upward.
+        orphaned = [e.text for e in self.project_hc.get_identities()]
+        if orphaned:
+            self.global_hc.rewrite_identity(orphaned)
+            self.project_hc.clear_identity()
+
     # ~6000 chars ≈ ~1500 tokens — above this, use LLM to filter rules
     _RULES_BUDGET_CHARS = 6000
 
@@ -297,7 +304,10 @@ Do NOT add, modify, or summarize rules — return them verbatim.
 
         actions: list[str] = []
         for engram in engrams:
-            hc = self.global_hc if engram.scope == "global" else self.project_hc
+            if engram.kind == "profile":
+                hc = self.global_hc
+            else:
+                hc = self.global_hc if engram.scope == "global" else self.project_hc
 
             if engram.kind == "profile":
                 hc.rewrite_identity([engram.text])

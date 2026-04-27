@@ -1230,7 +1230,7 @@ async def _chat_loop(
             # Detect dragged file paths early — a dragged absolute path like
             # "/Users/foo/bar.txt" starts with "/" and would otherwise be
             # mistaken for a slash command.
-            if message_content is None and stripped.startswith("/"):
+            if message_content is None and stripped.startswith("/") and not stripped.startswith("/share"):
                 dropped_early = _parse_dropped_paths(stripped)
                 if dropped_early:
                     stripped = format_file_message(stripped, dropped_early, console)

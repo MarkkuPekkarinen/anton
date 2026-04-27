@@ -53,15 +53,6 @@ def _format_history_for_llm(history: list[dict], max_messages: int = 20) -> str:
         lines.append(f"{role}: {str(content)[:400]}")
     return "\n".join(lines)
 
-
-def _slugify(title: str) -> str:
-    slug = title.lower().strip()
-    slug = re.sub(r"[^\w\s-]", "", slug)
-    slug = re.sub(r"[\s_]+", "-", slug)
-    slug = re.sub(r"-+", "-", slug).strip("-")
-    return slug[:60] or "session"
-
-
 async def _generate_meta(
     llm_client: LLMClient,
     history: list[dict],
@@ -83,7 +74,8 @@ async def _generate_meta(
             }],
             max_tokens=300,
         )
-        return _slugify(result.title), result.summary
+
+        return result.title, result.summary
     except Exception:
         return f"session-{session_id}", ""
 
@@ -121,23 +113,17 @@ async def handle_share_export(
     episodes = episodic.get_memory_usage(
         session_id
     )
-    exportable = [e for e in episodes if e.meta.get("kind") != "profile"]
-    session_born = [
-        {
+    session_born, project_accessed = [], []
+    for e in episodes:
+        item = {
             "content": e.content,
             "kind": e.meta.get("kind", ""),
             "topic": e.meta.get("topic", ""),
         }
-        for e in exportable if e.role == "memory_write"
-    ]
-    project_accessed = [
-        {
-            "content": e.content,
-            "kind": e.meta.get("kind", ""),
-            "topic": e.meta.get("topic", ""),
-        }
-        for e in exportable if e.role == "memory_read"
-    ]
+        if e.role == "memory_write":
+            session_born.append(item)
+        if e.role == "memory_read":
+            project_accessed.append(item)
 
     # scratchpad cells
     cells: list[dict] = []
@@ -153,11 +139,17 @@ async def handle_share_export(
             })
 
     console.print("[anton.muted]Generating session summary…[/]")
-    title_slug, summary = await _generate_meta(llm_client, session._history, session_id)
+    title, summary = await _generate_meta(llm_client, session._history, session_id)
+
+    slug = title.lower().strip()
+    slug = re.sub(r"[^\w\s-]", "", slug)
+    slug = re.sub(r"[\s_]+", "-", slug)
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    slug = slug[:60] or "session"
 
     exported_at = datetime.now(timezone.utc).isoformat()
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d")
-    filename = f"{title_slug}_{timestamp}.anton"
+    filename = f"{slug}_{timestamp}.anton"
 
     payload = {
         "version": "0.1",
@@ -165,7 +157,7 @@ async def handle_share_export(
         "exported_at": exported_at,
         "session": {
             "id": session_id,
-            "title": title_slug.replace("-", " ").title(),
+            "title": title,
             "summary": summary,
             "conversation_history": history,
         },

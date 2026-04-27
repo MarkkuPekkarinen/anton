@@ -244,43 +244,21 @@ def _build_provenance_suffix(payload: dict) -> str:
     )
 
 
-async def handle_share_import(
-    console: Console,
-    session: "ChatSession",
-    workspace: "Workspace",
-    settings: "AntonSettings",
-    state: dict,
-    self_awareness,
-    cortex: "Cortex | None",
-    episodic: "EpisodicMemory | None",
-    history_store: "HistoryStore | None",
-    filepath: str,
+async def import_v0_1(
+        console: Console,
+        session: "ChatSession",
+        workspace: "Workspace",
+        settings: "AntonSettings",
+        state: dict,
+        self_awareness,
+        cortex: "Cortex | None",
+        episodic: "EpisodicMemory | None",
+        history_store: "HistoryStore | None",
+        payload: dict,
 ) -> "ChatSession":
     from anton.chat_session import rebuild_session
     from anton.core.llm.prompt_builder import SystemPromptContext
     from anton.utils.prompt import prompt_or_cancel
-
-    # 1. parse & validate
-    path = Path(filepath).expanduser()
-    if not path.is_file():
-        console.print(f"[anton.warning]File not found: {filepath}[/]")
-        console.print()
-        return session
-
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        console.print("[anton.warning]Could not read file — may be corrupted.[/]")
-        console.print()
-        return session
-
-    version = payload.get("version")
-    if version != "0.1":
-        console.print(
-            f"[anton.warning]Unsupported version: {version}. Expected 0.1.[/]"
-        )
-        console.print()
-        return session
 
     # 2. warn if active session
     if session._history:
@@ -412,3 +390,48 @@ async def handle_share_import(
     console.print()
 
     return new_session
+
+async def handle_share_import(
+    console: Console,
+    session: "ChatSession",
+    workspace: "Workspace",
+    settings: "AntonSettings",
+    state: dict,
+    self_awareness,
+    cortex: "Cortex | None",
+    episodic: "EpisodicMemory | None",
+    history_store: "HistoryStore | None",
+    filepath: str,
+) -> "ChatSession":
+
+    # 1. parse & validate
+    path = Path(filepath).expanduser()
+    if not path.is_file():
+        console.print(f"[anton.warning]File not found: {filepath}[/]")
+        console.print()
+        return session
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        console.print("[anton.warning]Could not read file — may be corrupted.[/]")
+        console.print()
+        return session
+
+    version = payload.get("version")
+
+    importers = {
+        "0.1": import_v0_1
+    }
+
+    if version not in importers:
+        console.print(
+            f"[anton.warning]Unsupported version: {version}. Supported versions: {list(importers.keys())}.[/]"
+        )
+        console.print()
+        return session
+
+    return await importers[version](
+        console, session, workspace, settings, state, self_awareness, cortex,
+        episodic, history_store, payload
+    )

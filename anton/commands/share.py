@@ -231,19 +231,6 @@ def _replay_to_episodic(episodic: "EpisodicMemory", history: list[dict]) -> None
             episodic.log_turn(turn, role, content)
 
 
-def _build_provenance_suffix(payload: dict) -> str:
-    sess = payload.get("session", {})
-    title = sess.get("title", "")
-    exported_by = payload.get("exported_by", "unknown")
-    exported_at = payload.get("exported_at", "")[:10]
-    return (
-        "## Note\n"
-        f'This session was imported from a .anton file: "{title}", '
-        f"exported by {exported_by} on {exported_at}. "
-        "The full conversation history has been restored."
-    )
-
-
 async def import_v0_1(
         console: Console,
         session: "ChatSession",
@@ -255,9 +242,10 @@ async def import_v0_1(
         episodic: "EpisodicMemory | None",
         history_store: "HistoryStore | None",
         payload: dict,
+        *,
+        source_path: Path,
 ) -> "ChatSession":
     from anton.chat_session import rebuild_session
-    from anton.core.llm.prompt_builder import SystemPromptContext
     from anton.utils.prompt import prompt_or_cancel
 
     # 2. warn if active session
@@ -282,6 +270,17 @@ async def import_v0_1(
         episodic.start_session()
 
     new_session_id = episodic._session_id if (episodic and episodic.enabled) else None
+
+    # stamp imported metadata and persist file to output/
+    payload["imported"] = {
+        "user": getpass.getuser(),
+        "date": datetime.now(timezone.utc).isoformat(),
+        "session_id": new_session_id,
+    }
+    output_dir = workspace.base / ".anton" / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    dest = output_dir / source_path.name
+    dest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # close old scratchpads
     if session._scratchpads.list_pads():
@@ -424,5 +423,6 @@ async def handle_share_import(
 
     return await importers[version](
         console, session, workspace, settings, state, self_awareness, cortex,
-        episodic, history_store, payload
+        episodic, history_store, payload,
+        source_path=path,
     )

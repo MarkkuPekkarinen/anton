@@ -204,6 +204,75 @@ async def handle_share_export(
     console.print()
 
 
+# ── status ───────────────────────────────────────────────────────────────────
+
+
+def _find_import_record(output_dir: Path, session_id: str) -> dict | None:
+    """Return the .anton payload that was imported into session_id, or None."""
+    if not output_dir.exists():
+        return None
+    for p in output_dir.glob("*.anton"):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            if data.get("imported", {}).get("session_id") == session_id:
+                return data
+        except Exception:
+            continue
+    return None
+
+
+def handle_share_status(
+    console: Console,
+    session: "ChatSession",
+    workspace: "Workspace",
+) -> None:
+    session_id = session._session_id
+
+    console.print()
+    console.print("[bold]Shared session status[/]")
+    console.print()
+
+    if not session_id:
+        console.print("[anton.muted]  No active session.[/]")
+        console.print()
+        return
+
+    output_dir = workspace.base / ".anton" / "output"
+    record = _find_import_record(output_dir, session_id)
+
+    if not record:
+        console.print(f"  [bold]Status:[/]  Session is not imported")
+        return
+
+    sess = record.get("session", {})
+    imp = record.get("imported", {})
+    console.print(f"  [bold]Title:[/]       {sess.get('title', '—')}")
+    console.print(
+        f"  [bold]Exported by:[/] {record.get('exported_by', '?')} · "
+        f"{record.get('exported_at', '')[:10]}"
+    )
+    if sess.get("summary"):
+        console.print(f"  [bold]Summary:[/]     {sess['summary']}")
+    console.print()
+    console.print(
+        f"  [bold]Imported by:[/] {imp.get('user', '?')} · "
+        f"{imp.get('date', '')[:10]}"
+    )
+
+    console.print()
+
+    vault = session._data_vault
+    connections = vault.list_connections() if vault else []
+    if connections:
+        console.print(f"  [bold]Data sources[/]  ({len(connections)} connected)")
+        for c in connections:
+            console.print(f"    {c.get('name', '?')} · {c.get('engine', '?')}")
+    else:
+        console.print("[anton.muted]  No data sources connected.[/]")
+
+    console.print()
+
+
 # ── import ────────────────────────────────────────────────────────────────────
 
 

@@ -354,15 +354,6 @@ async def import_v0_1(
             description=cell_data.get("description", ""),
         ))
 
-    # 8. inject provenance suffix
-    suffix = _build_provenance_suffix(payload)
-    new_session._system_prompt_context = SystemPromptContext(
-        runtime_context=new_session._system_prompt_context.runtime_context,
-        prefix=new_session._system_prompt_context.prefix,
-        output_context=new_session._system_prompt_context.output_context,
-        suffix=suffix,
-    )
-
     # 9. print briefing
     sess = payload.get("session", {})
     cells = payload.get("scratchpad", {}).get("cells", [])

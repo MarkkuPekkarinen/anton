@@ -217,9 +217,3 @@ class TestShareRoundtrip:
             source="import",
         )
         mock_hc.encode_rule.assert_not_called()
-
-        # suffix: provenance present, original session had none
-        exported_by = payload["exported_by"]
-        assert exported_by not in (session._system_prompt_context.suffix or "")
-        assert exported_by in result._system_prompt_context.suffix
-        assert payload["session"]["title"] in result._system_prompt_context.suffix

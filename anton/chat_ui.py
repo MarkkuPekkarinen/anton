@@ -553,8 +553,10 @@ class StreamDisplay:
         line.append("  \u2714 ", style="green")
         work_str = self._fmt_elapsed(work_elapsed)
 
-        import os
-        work_label = "Remote work" if os.environ.get("ANTON_REMOTE_SCRATCHPAD_URL") else "Worked"
+        from anton.config.settings import AntonSettings
+
+        settings = AntonSettings()
+        work_label = "Remote work" if settings.backend == "remote" else "Worked"
 
         if reasoning_elapsed > 0:
             reason_str = self._fmt_elapsed(reasoning_elapsed)

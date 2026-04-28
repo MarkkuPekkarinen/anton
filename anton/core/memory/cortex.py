@@ -215,7 +215,7 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         if project_lessons:
             sections.append(f"## Your Memory — Project Lessons\n{project_lessons}")
             if self._episodic is not None:
-                for engram in self.project_hc.get_lessons():
+                for engram in self.project_hc.get_lessons(token_budget=1000):
                     self._log_read_engram(engram)
 
         # 6. Minds datasource context (auto-loaded if present)

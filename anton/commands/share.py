@@ -110,9 +110,7 @@ async def handle_share_export(
         console.print()
 
     # memory snapshot
-    episodes = episodic.get_memory_usage(
-        session_id
-    )
+    episodes = episodic.get_memory_usage()
     session_born, project_accessed = [], []
     for e in episodes:
         item = {
@@ -148,7 +146,7 @@ async def handle_share_export(
     slug = slug[:60] or "session"
 
     exported_at = datetime.now(timezone.utc).isoformat()
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     filename = f"{slug}_{timestamp}.anton"
 
     payload = {
@@ -371,7 +369,7 @@ async def import_v0_1(
     from anton.chat_session import rebuild_session
     from anton.utils.prompt import prompt_or_cancel
 
-    # 2. warn if active session
+    # warn if active session
     if session._history:
         console.print(
             "[anton.warning]You have an active session in progress. "
@@ -388,7 +386,7 @@ async def import_v0_1(
             console.print()
             return session
 
-    # 3. start new episodic session
+    # start new episodic session
     if episodic and episodic.enabled:
         episodic.start_session()
 
@@ -409,7 +407,7 @@ async def import_v0_1(
     if session._scratchpads.list_pads():
         await session._scratchpads.close_all()
 
-    # 4. create new session
+    # create new session
     new_session = rebuild_session(
         settings=settings,
         state=state,
@@ -422,7 +420,7 @@ async def import_v0_1(
         session_id=new_session_id,
     )
 
-    # 5. inject conversation history into LLM context
+    # inject conversation history into LLM context
     history = payload.get("session", {}).get("conversation_history", [])
     new_session._history = list(history)
     new_session._turn_count = sum(1 for m in history if m.get("role") == "user")
@@ -430,11 +428,11 @@ async def import_v0_1(
     if history_store and new_session_id:
         history_store.save(new_session_id, history)
 
-    # 6. replay to episodic file
+    # replay to episodic file
     if episodic and episodic.enabled:
         _replay_to_episodic(episodic, history)
 
-    # 7. log memories to episodic
+    # log memories to episodic
     session_born = payload.get("memory", {}).get("session_born", [])
     project_accessed = payload.get("memory", {}).get("project_accessed", [])
 
@@ -450,7 +448,7 @@ async def import_v0_1(
                 kind=m.get("kind", ""), topic=m.get("topic", ""),
             )
 
-    # 7b. write session_born memories to project hippocampus
+    # write session_born memories to project hippocampus
     if cortex:
         for m in session_born:
             kind = m.get("kind", "")
@@ -462,7 +460,7 @@ async def import_v0_1(
                 cortex.project_hc.encode_lesson(content, topic=topic, source="import")
             # profile kind: skip — never import personal memories
 
-    # 7c. restore scratchpad cells into new session
+    # restore scratchpad cells into new session
     from anton.core.backends.base import Cell as _Cell  # noqa: PLC0415
     cells_data = payload.get("scratchpad", {}).get("cells", [])
     for cell_data in cells_data:
@@ -476,7 +474,7 @@ async def import_v0_1(
             description=cell_data.get("description", ""),
         ))
 
-    # 9. print briefing
+    # print briefing
     sess = payload.get("session", {})
     cells = payload.get("scratchpad", {}).get("cells", [])
     n_turns = sum(1 for m in history if m.get("role") == "user")
@@ -504,6 +502,7 @@ async def import_v0_1(
 
     return new_session
 
+
 async def handle_share_import(
     console: Console,
     session: "ChatSession",
@@ -517,7 +516,7 @@ async def handle_share_import(
     filepath: str,
 ) -> "ChatSession":
 
-    # 1. parse & validate
+    # parse & validate
     path = Path(filepath).expanduser()
     if not path.is_file():
         console.print(f"[anton.warning]File not found: {filepath}[/]")

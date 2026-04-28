@@ -252,7 +252,6 @@ class EpisodicMemory:
 
     def get_memory_usage(
         self,
-        session_id: str
     ) -> list[Episode]:
         """Return episodes for a session filtered by role, deduplicated by content.
 
@@ -260,7 +259,7 @@ class EpisodicMemory:
         """
         if not self._dir.is_dir():
             return []
-        path = self._dir / f"{session_id}.jsonl"
+        path = self._dir / f"{self._session_id}.jsonl"
         if not path.is_file():
             return []
         result: list[Episode] = []

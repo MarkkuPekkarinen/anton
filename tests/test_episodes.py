@@ -141,20 +141,24 @@ class TestLogTurn:
         assert data["meta"]["tool"] == "scratchpad"
 
     def test_tool_call_truncation(self, em: EpisodicMemory, episodes_dir: Path):
-        sid = em.start_session()
+        em.start_session()
         long_content = "x" * 5000
         em.log_turn(1, "tool_call", long_content)
-        path = episodes_dir / f"{sid}.jsonl"
-        data = json.loads(path.read_text().strip())
-        assert len(data["content"]) == 2000
+        result = em.recall_formatted("x" * 10)
+        # full content stored, but recall_formatted truncates to 2000
+        line = result.splitlines()[0]
+        content_part = line.split(") ", 1)[1]
+        assert len(content_part) == 2000
 
     def test_tool_result_truncation(self, em: EpisodicMemory, episodes_dir: Path):
-        sid = em.start_session()
+        em.start_session()
         long_content = "x" * 5000
         em.log_turn(1, "tool_result", long_content)
-        path = episodes_dir / f"{sid}.jsonl"
-        data = json.loads(path.read_text().strip())
-        assert len(data["content"]) == 2000
+        result = em.recall_formatted("x" * 10)
+        line = result.splitlines()[0]
+        content_part = line.split(") ", 1)[1]
+        assert len(content_part) == 2000
+
 
 class TestRecall:
     def _populate(self, em: EpisodicMemory, messages: list[str]) -> str:

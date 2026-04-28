@@ -386,6 +386,7 @@ async def _handle_remote(
 
     # Save and confirm
     console.print(f"  [anton.success]Remote scratchpad ready![/]")
+    console.print(f"  [link={settings.remote_scratchpad_url}]{settings.remote_scratchpad_url}[/link]")
     console.print()
 
 
@@ -504,8 +505,6 @@ async def _initialize_remote_lightsail_backend(
                 console.print("  [anton.muted]Run /remote again in a few minutes.[/]")
                 console.print()
                 return
-
-    console.print(f"  [link={endpoint}]{endpoint}[/link]")
 
     workspace.set_secret("ANTON_REMOTE_SCRATCHPAD_URL", endpoint)
     os.environ["ANTON_REMOTE_SCRATCHPAD_URL"] = endpoint

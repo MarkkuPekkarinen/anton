@@ -405,7 +405,7 @@ async def import_v0_1(
         *,
         source_path: Path,
 ) -> "ChatSession":
-    from anton.chat_session import rebuild_session
+    from anton.commands.session import restore_session
     from anton.utils.prompt import prompt_or_cancel
 
     # warn if active session
@@ -425,11 +425,20 @@ async def import_v0_1(
             console.print()
             return session
 
-    # start new episodic session
+    raw_history = payload.get("session", {}).get("conversation_history", [])
+
+    # 1. fill episodic from export
     if episodic and episodic.enabled:
         episodic.start_session()
-
     new_session_id = episodic._session_id if (episodic and episodic.enabled) else None
+
+    # if episodic and episodic.enabled and new_session_id:
+    #     _restore_episodes_to_episodic(episodic, raw_history, new_session_id)
+
+    # 2. reconstruct API history and save to history_store
+    api_history = _episodic_to_api_history(raw_history)
+    if history_store and new_session_id:
+        history_store.save(new_session_id, api_history)
 
     # stamp imported metadata and persist file to output/
     payload["imported"] = {
@@ -442,58 +451,25 @@ async def import_v0_1(
     dest = output_dir / source_path.name
     dest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # close old scratchpads
-    if session._scratchpads.list_pads():
-        await session._scratchpads.close_all()
-
-    # create new session
-    new_session = rebuild_session(
-        settings=settings,
-        state=state,
-        self_awareness=self_awareness,
-        cortex=cortex,
-        workspace=workspace,
-        console=console,
-        episodic=episodic,
-        history_store=history_store,
-        session_id=new_session_id,
+    # 3. resume session (closes old scratchpads, rebuild_session, loads _history)
+    new_session, _ = await restore_session(
+        new_session_id, console, settings, state, self_awareness, cortex, workspace,
+        session, episodic, history_store,
     )
 
-    # conversation_history is stored in episodic format (has "ts"/"turn" fields)
-    # or legacy Anthropic API format (has "role"/"content" only)
-    raw_history = payload.get("session", {}).get("conversation_history", [])
-
-    if episodic and episodic.enabled and new_session_id:
-        from anton.core.memory.episodes import Episode  # noqa: PLC0415
-
-        for ep_data in raw_history:
-            ep = Episode(**ep_data)
-            episodic.log(ep)
-    api_history = _episodic_to_api_history(raw_history)
-
-    new_session._history = api_history
-    new_session._turn_count = sum(1 for m in api_history if m.get("role") == "user")
-
-    if history_store and new_session_id:
-        history_store.save(new_session_id, api_history)
-
-    # log memories to episodic
     session_born = payload.get("memory", {}).get("session_born", [])
     project_accessed = payload.get("memory", {}).get("project_accessed", [])
 
+    # log memories to episodic
     if episodic and episodic.enabled:
         for m in session_born:
-            episodic.log_turn(
-                0, "memory_write", m["content"],
-                kind=m.get("kind", ""), topic=m.get("topic", ""),
-            )
+            episodic.log_turn(0, "memory_write", m["content"],
+                              kind=m.get("kind", ""), topic=m.get("topic", ""))
         for m in project_accessed:
-            episodic.log_turn(
-                0, "memory_read", m["content"],
-                kind=m.get("kind", ""), topic=m.get("topic", ""),
-            )
+            episodic.log_turn(0, "memory_read", m["content"],
+                              kind=m.get("kind", ""), topic=m.get("topic", ""))
 
-    # write session_born memories to project hippocampus
+    # restore memories to cortex
     if cortex:
         for m in session_born:
             kind = m.get("kind", "")
@@ -503,9 +479,8 @@ async def import_v0_1(
                 cortex.project_hc.encode_rule(content, kind=kind, source="import")
             elif kind == "lesson":
                 cortex.project_hc.encode_lesson(content, topic=topic, source="import")
-            # profile kind: skip — never import personal memories
 
-    # restore scratchpad cells into new session
+    # restore scratchpad cells
     from anton.core.backends.base import Cell as _Cell  # noqa: PLC0415
     cells_data = payload.get("scratchpad", {}).get("cells", [])
     for cell_data in cells_data:
@@ -522,7 +497,6 @@ async def import_v0_1(
     # print briefing
     sess = payload.get("session", {})
     cells = payload.get("scratchpad", {}).get("cells", [])
-    n_turns = new_session._turn_count
 
     console.print()
     console.print(f"[bold][anton.cyan]Imported: {sess.get('title', 'Session')}[/][/]")
@@ -532,8 +506,8 @@ async def import_v0_1(
     )
     if sess.get("summary"):
         console.print(f"  [bold]Summary:[/] {sess['summary']}")
-    if n_turns:
-        console.print(f"  [bold]Turns:[/]   {n_turns}")
+    if new_session._turn_count:
+        console.print(f"  [bold]Turns:[/]   {new_session._turn_count}")
     if session_born or project_accessed:
         console.print(
             f"  [bold]Memory:[/]  {len(session_born)} session-born, "

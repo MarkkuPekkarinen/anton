@@ -221,7 +221,6 @@ def _find_import_record(output_dir: Path, session_id: str) -> dict | None:
             continue
     return None
 
-
 def handle_share_status(
     console: Console,
     session: "ChatSession",
@@ -262,14 +261,29 @@ def handle_share_status(
 
     console.print()
 
-    vault = session._data_vault
-    connections = vault.list_connections() if vault else []
-    if connections:
-        console.print(f"  [bold]Data sources[/]  ({len(connections)} connected)")
-        for c in connections:
-            console.print(f"    {c.get('name', '?')} · {c.get('engine', '?')}")
+    from anton.core.datasources.data_vault import LocalDataVault
+    connections = LocalDataVault().list_connections()
+    connected_ds = {f"{c['engine']}_{c['name']}".lower() for c in connections}
+
+    used_ds = set()
+    for entry in record.get("session", {}).get("conversation_history", []):
+        if not isinstance(entry, dict):
+            continue
+        for ds_name in (entry.get("meta") or {}).get("datasources") or []:
+            used_ds.add(ds_name)
+
+    if used_ds:
+        console.print("  [bold]Data sources[/]")
+        for ds_name in used_ds:
+            if ds_name in connected_ds:
+                mark = "[green]✓[/]"
+                note = "connected"
+            else:
+                mark = "[yellow]![/]"
+                note = "[anton.warning]not connected[/]"
+            console.print(f"    {mark}  {ds_name} · {note}")
     else:
-        console.print("[anton.muted]  No data sources connected.[/]")
+        console.print("[anton.muted]  No data sources referenced in this session.[/]")
 
     console.print()
 

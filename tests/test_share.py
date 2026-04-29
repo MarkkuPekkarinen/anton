@@ -39,6 +39,7 @@ from anton.core.backends.base import Cell
 from anton.core.backends.manager import ScratchpadManager
 from anton.core.memory.episodes import EpisodicMemory
 from anton.core.session import ChatSession, ChatSessionConfig
+from anton.memory.history_store import HistoryStore
 from tests.conftest import make_mock_llm
 
 
@@ -64,20 +65,6 @@ PROJECT_MEMORY       = {"content": "Never use SELECT * in production",  "kind": 
 PROFILE_MEMORY       = {"content": "User prefers camel-case",              "kind": "profile", "topic": ""}
 SCRATCHPAD_CELL      = Cell(code="df.head()", stdout="   col1\n0  1\n", stderr="", error=None, description="Preview data")
 
-
-class _SimpleHistoryStore:
-    """Minimal in-memory history store for tests."""
-    def __init__(self):
-        self._data: dict = {}
-
-    def save(self, sid: str, history: list) -> None:
-        self._data[sid] = list(history)
-
-    def load(self, sid: str):
-        return self._data.get(sid)
-
-    def list_sessions(self, limit: int = 20):
-        return []
 
 
 def _build_exporter_session(
@@ -140,10 +127,10 @@ async def _do_import(
     can inspect restored cells via result._scratchpads._pads[name].cells.
     """
     mock_llm = make_mock_llm()
-    history_store = _SimpleHistoryStore()
 
     # episodic for the new session (recipient side)
     new_episodic = EpisodicMemory(tmp_path / "new_episodes")
+    history_store = HistoryStore(tmp_path / "new_episodes")
 
     # empty current session (no active history unless specified)
     current_session = ChatSession(ChatSessionConfig(

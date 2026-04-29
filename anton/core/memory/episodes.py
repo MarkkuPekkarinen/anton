@@ -222,11 +222,27 @@ class EpisodicMemory:
             if ep.role not in ["memory_write", "memory_read"]:
                 yield ep
 
-    def del_episode(self, session_id: str) -> bool:
-        path = self._dir / f"{session_id}.jsonl"
-        if not path.is_file():
+    def del_episode_entry(self, turn: int) -> bool:
+        """Remove all episode lines for *turn* from the current session file."""
+        if self._file is None or not self._file.is_file():
             return False
-        path.unlink()
+        kept = []
+        removed = 0
+        for line in self._file.read_text(encoding="utf-8").splitlines(keepends=True):
+            if not line.strip():
+                kept.append(line)
+                continue
+            try:
+                ep = Episode(**json.loads(line))
+                if ep.turn == turn:
+                    removed += 1
+                    continue
+            except Exception:
+                pass
+            kept.append(line)
+        if removed == 0:
+            return False
+        self._file.write_text("".join(kept), encoding="utf-8")
         return True
 
     def recall_formatted(

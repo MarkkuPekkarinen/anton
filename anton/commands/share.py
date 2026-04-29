@@ -440,15 +440,17 @@ async def import_v0_1(
 
     raw_history = payload.get("session", {}).get("conversation_history", [])
 
-    # 1. fill episodic from export
+    # fill episodic from export
     if episodic and episodic.enabled:
         episodic.start_session()
     new_session_id = episodic._session_id if (episodic and episodic.enabled) else None
 
-    # if episodic and episodic.enabled and new_session_id:
-    #     _restore_episodes_to_episodic(episodic, raw_history, new_session_id)
+    from anton.core.memory.episodes import Episode
+    for ep_data in raw_history:
+        ep = Episode(**ep_data)
+        episodic.log(ep)
 
-    # 2. reconstruct API history and save to history_store
+    # reconstruct API history and save to history_store
     api_history = _episodic_to_api_history(raw_history)
     if history_store and new_session_id:
         history_store.save(new_session_id, api_history)
@@ -464,7 +466,7 @@ async def import_v0_1(
     dest = output_dir / source_path.name
     dest.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # 3. resume session (closes old scratchpads, rebuild_session, loads _history)
+    # resume session (closes old scratchpads, rebuild_session, loads _history)
     new_session, _ = await restore_session(
         new_session_id, console, settings, state, self_awareness, cortex, workspace,
         session, episodic, history_store,

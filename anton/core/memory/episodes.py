@@ -264,7 +264,7 @@ class EpisodicMemory:
                 if not line.strip():
                     continue
                 try:
-                    yield Episode(**json.loads(line))
+                    result.append(Episode(**json.loads(line)))
                 except Exception:
                     continue
         except Exception:

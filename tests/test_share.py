@@ -212,6 +212,9 @@ class TestShareRoundtrip:
         # We verify the new session got its ID from the new episodic, not the payload
         assert new_session._session_id == new_episodic._session_id
 
+        # all records were restored
+        assert len(episodic.get_items()) == len(new_episodic.get_items())
+
         # memory in new episodic: session_born → memory_write
         mem_eps = new_episodic.get_memory_usage()
         writes = [e for e in mem_eps if e.role == "memory_write"]

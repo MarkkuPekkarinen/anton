@@ -103,11 +103,15 @@ class MemoryManage:
         settings: AntonSettings,
         cortex: "Cortex | None",
         episodic: "EpisodicMemory | None" = None,
+        history_store: "HistoryStore | None" = None,
+        session: "ChatSession | None" = None,
     ) -> None:
         self.console = console
         self.settings = settings
         self.cortex = cortex
         self.episodic = episodic
+        self.history_store = history_store
+        self.session = session
 
         self.SUBCOMMANDS: dict[str, object] = {
             "help":        self.help,
@@ -123,10 +127,12 @@ class MemoryManage:
     # Entry point
     # ------------------------------------------------------------------
 
-    async def handle(self, cmd: str) -> None:
+    async def handle(self, cmd: str, session) -> None:
         """Dispatch /memory [sub-command] or show the status dashboard."""
         sub_cmd = cmd.removeprefix("/memory").strip()
         parts = sub_cmd.split()
+        # session might be changed
+        self.session = session
 
         if len(parts) == 0:
             return self.info()
@@ -311,6 +317,10 @@ class MemoryManage:
 
             if action == 'delete':
                 if self.episodic.del_episode_entry(num):
+                    if self.history_store:
+                        new_history = self.history_store.rebuild_from_episodic(self.episodic)
+                        if self.session is not None:
+                            self.session._history[:] = new_history
                     self.console.print("[anton.cyan]Deleted[/]")
                 return await self.episodes()
             else:

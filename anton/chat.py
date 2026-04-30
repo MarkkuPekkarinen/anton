@@ -375,140 +375,14 @@ async def _handle_remote(
         _global_ws.set_secret("ANTON_MINDS_API_KEY", api_key_input)
         console.print()
 
-    # If an API key is provided, set the backend to the default remote backend
+    # If an API key is provided, set the backend to remote backend
     if settings.minds_api_key:
-        _global_ws.set_secret("ANTON_BACKEND", settings.default_remote_backend)
-
-    # Run the initialization to provision the remote Lightsail instance and set the endpoint
-    # This is set to the Minds URL by default, therefore, the remote backend does not need to be 'initialized'
-    if settings.default_remote_backend == "remote_lightsail":
-        await _initialize_remote_lightsail_backend(console, settings, _global_ws)
+        _global_ws.set_secret("ANTON_BACKEND", "remote")
 
     # Save and confirm
     console.print(f"  [anton.success]Remote scratchpad ready![/]")
-    remote_scratchpad_url = _global_ws.get_secret("ANTON_REMOTE_SCRATCHPAD_URL")
-    console.print(f"  [link={remote_scratchpad_url}]{remote_scratchpad_url}[/link]")
+    console.print(f"  [link={settings.minds_url}]{settings.minds_url}[/link]")
     console.print()
-
-
-async def _initialize_remote_lightsail_backend(
-    console: Console,
-    settings,
-    workspace,
-) -> None:
-    """Initialize the remote Lightsail backend."""
-    import asyncio
-    import json
-    import os
-    import time
-    from urllib.request import Request, urlopen
-
-    from rich.live import Live
-    from rich.spinner import Spinner
-
-    provision_url = settings.publish_url.rstrip("/") + "/provision"
-    api_key = settings.minds_api_key
-
-    # Check current status via GET /provision
-    with Live(Spinner("dots", text="  Checking remote scratchpad...", style="anton.cyan"), console=console, transient=True):
-        try:
-            req = Request(
-                provision_url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "User-Agent": "anton/1.0",
-                },
-            )
-            with urlopen(req, timeout=15) as resp:
-                result = json.loads(resp.read().decode())
-        except Exception as e:
-            console.print(f"  [anton.error]Failed to check status: {e}[/]")
-            console.print()
-            return
-
-    status = result.get("status", "none")
-    endpoint = result.get("endpoint", "")
-
-    # Already running — save and confirm
-    if status == "running":
-        console.print(f"  [anton.success]Remote scratchpad is running[/]")
-        console.print(f"  [anton.muted]{endpoint}[/]")
-        console.print()
-
-        workspace.set_secret("ANTON_REMOTE_SCRATCHPAD_URL", endpoint)
-        os.environ["ANTON_REMOTE_SCRATCHPAD_URL"] = endpoint
-        return
-
-    # Not provisioned — start provisioning
-    if status in ("none", "stopped"):
-        action = "Waking up" if status == "stopped" else "Provisioning"
-        console.print(f"  [anton.muted]{action} remote scratchpad...[/]")
-
-        with Live(Spinner("dots", text=f"  {action}...", style="anton.cyan"), console=console, transient=True):
-            try:
-                req = Request(
-                    provision_url,
-                    data=b"{}",
-                    method="POST",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                        "User-Agent": "anton/1.0",
-                    },
-                )
-                with urlopen(req, timeout=30) as resp:
-                    result = json.loads(resp.read().decode())
-            except Exception as e:
-                console.print(f"  [anton.error]Provisioning failed: {e}[/]")
-                console.print()
-                return
-
-        endpoint = result.get("endpoint", endpoint)
-        status = result.get("status", "")
-
-    # Poll until ready — 5s intervals, 3 min max
-    # Use /resolve to get the direct IP, then poll /health on it
-    if status in ("provisioning", "starting"):
-        max_wait = 180
-        poll_interval = 5
-        start_time = time.time()
-        direct_endpoint = None
-
-        with Live(Spinner("dots", text="  Waiting for instance to be ready...", style="anton.cyan"), console=console, transient=True):
-            while time.time() - start_time < max_wait:
-                await asyncio.sleep(poll_interval)
-                try:
-                    # First resolve the direct IP via Cloudflare Worker
-                    if not direct_endpoint:
-                        req = Request(
-                            f"{endpoint}/resolve",
-                            headers={"Authorization": f"Bearer {api_key}", "User-Agent": "anton/1.0"},
-                        )
-                        with urlopen(req, timeout=5) as resp:
-                            resolve_data = json.loads(resp.read().decode())
-                        if resolve_data.get("status") == "running":
-                            direct_endpoint = resolve_data.get("endpoint", "")
-
-                    # Then check health directly
-                    if direct_endpoint:
-                        req = Request(
-                            f"{direct_endpoint}/health",
-                            headers={"Authorization": f"Bearer {api_key}", "User-Agent": "anton/1.0"},
-                        )
-                        with urlopen(req, timeout=5) as resp:
-                            health = json.loads(resp.read().decode())
-                        if health.get("status") == "ok":
-                            break
-                except Exception:
-                    pass
-            else:
-                console.print("  [anton.warning]Instance is still setting up (3+ minutes).[/]")
-                console.print("  [anton.muted]Run /remote again in a few minutes.[/]")
-                console.print()
-                return
-
-    workspace.set_secret("ANTON_REMOTE_SCRATCHPAD_URL", endpoint)
-    os.environ["ANTON_REMOTE_SCRATCHPAD_URL"] = endpoint
 
 
 async def _handle_publish(

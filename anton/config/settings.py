@@ -72,22 +72,14 @@ class AntonSettings(CoreSettings):
 
     # Publish service
     publish_url: str = "https://4nton.ai"
-    remote_scratchpad_url: str | None = None
 
-    backend: str = "local"  # local | remote | remote_lightsail
-    default_remote_backend: str = "remote"  # remote | remote_lightsail
-
-    @model_validator(mode="after")
-    def _set_default_remote_scratchpad_url(self) -> AntonSettings:
-        if self.remote_scratchpad_url is None:
-            self.remote_scratchpad_url = self.minds_url
-        return self
+    backend: str = "local"  # local | remote
 
     @field_validator("backend", mode="after")
     @classmethod
     def _validate_backend(cls, v: str, info: ValidationInfo) -> str:
-        if v in ("remote", "remote_lightsail") and not info.data.get("minds_api_key"):
-            raise ValueError("Minds API key is required for remote backend")
+        if v == "remote" and (not info.data.get("minds_url") or not info.data.get("minds_api_key")):
+            raise ValueError("Minds URL and API key are required for remote backend")
         return v
 
     @field_validator("minds_ssl_verify", mode="before")

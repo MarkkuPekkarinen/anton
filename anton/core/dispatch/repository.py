@@ -311,6 +311,115 @@ class SqliteDispatchRepository(DispatchRepository):
         """Open the per-session SQLite message store."""
         return SQLiteSessionStore(session.store_path / "session.db")
 
+    # -----------------------------------------------------------------
+    # Listing / deletion (control-plane API for the dispatch UI)
+    # -----------------------------------------------------------------
+
+    async def list_agent_groups(self) -> list[AgentGroup]:
+        """Every persisted agent group, ordered by name."""
+        rows = self._conn.execute(
+            "SELECT id, name, workspace, policy_json, created_at "
+            "FROM agent_groups ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+        return [
+            AgentGroup(
+                id=r[0],
+                name=r[1],
+                workspace=Path(r[2]),
+                policy=_deserialize_policy(r[3]),
+                created_at=datetime.fromisoformat(r[4]),
+            )
+            for r in rows
+        ]
+
+    async def delete_agent_group(self, agent_group_id: str) -> bool:
+        """Remove an agent group. Fails if any wirings or sessions still reference it."""
+        used = self._conn.execute(
+            "SELECT 1 FROM messaging_group_agents WHERE agent_group_id = ? "
+            "UNION SELECT 1 FROM sessions WHERE agent_group_id = ? LIMIT 1",
+            (agent_group_id, agent_group_id),
+        ).fetchone()
+        if used is not None:
+            raise ValueError(
+                f"agent_group {agent_group_id} still has wirings or sessions; "
+                "remove those first."
+            )
+        cursor = self._conn.execute(
+            "DELETE FROM agent_groups WHERE id = ?", (agent_group_id,)
+        )
+        return cursor.rowcount > 0
+
+    async def list_messaging_groups(self) -> list[MessagingGroup]:
+        """Every messaging group seen so far. Created lazily on first inbound event."""
+        rows = self._conn.execute(
+            "SELECT id, channel_type, platform_id, display_name, is_group, created_at "
+            "FROM messaging_groups ORDER BY created_at DESC"
+        ).fetchall()
+        return [_row_to_messaging_group(r) for r in rows]
+
+    async def list_wirings(self) -> list[MessagingGroupAgent]:
+        """Every wiring across all messaging groups."""
+        rows = self._conn.execute(
+            "SELECT messaging_group_id, agent_group_id, session_mode, "
+            "trigger_rule, trigger_pattern, priority "
+            "FROM messaging_group_agents ORDER BY priority ASC"
+        ).fetchall()
+        return [
+            MessagingGroupAgent(
+                messaging_group_id=r[0],
+                agent_group_id=r[1],
+                session_mode=SessionMode(r[2]),
+                trigger_rule=TriggerRule(r[3]),
+                trigger_pattern=r[4],
+                priority=r[5],
+            )
+            for r in rows
+        ]
+
+    async def delete_wiring(
+        self,
+        messaging_group_id: str,
+        agent_group_id: str,
+    ) -> bool:
+        """Remove a single wiring; returns True if a row was deleted."""
+        cursor = self._conn.execute(
+            "DELETE FROM messaging_group_agents "
+            "WHERE messaging_group_id = ? AND agent_group_id = ?",
+            (messaging_group_id, agent_group_id),
+        )
+        return cursor.rowcount > 0
+
+    async def list_sessions(
+        self,
+        *,
+        agent_group_id: str | None = None,
+    ) -> list[Session]:
+        """Every session, optionally scoped to one agent group, newest activity first."""
+        if agent_group_id is None:
+            rows = self._conn.execute(
+                "SELECT id, agent_group_id, session_key, store_path, "
+                "created_at, last_active_at "
+                "FROM sessions ORDER BY last_active_at DESC"
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT id, agent_group_id, session_key, store_path, "
+                "created_at, last_active_at "
+                "FROM sessions WHERE agent_group_id = ? ORDER BY last_active_at DESC",
+                (agent_group_id,),
+            ).fetchall()
+        return [
+            Session(
+                id=r[0],
+                agent_group_id=r[1],
+                session_key=r[2],
+                store_path=Path(r[3]),
+                created_at=datetime.fromisoformat(r[4]),
+                last_active_at=datetime.fromisoformat(r[5]),
+            )
+            for r in rows
+        ]
+
     async def close(self) -> None:
         """Close the underlying SQLite connection."""
         self._conn.close()

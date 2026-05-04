@@ -110,6 +110,11 @@ async def handle_share_export(
             "Consider [bold]/share export --summary[/] for a lighter file.[/]"
         )
         console.print()
+    if msg_count == 0:
+        console.print(
+            f"[anton.warning]This session conversation is empty. Nothing to export.[/]"
+        )
+        return
 
     # memory snapshot
     episodes = episodic.get_memory_usage()

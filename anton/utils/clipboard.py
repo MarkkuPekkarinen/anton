@@ -213,21 +213,29 @@ def make_image_paste_bindings(registry: PastedImageRegistry, console: Console):
 
 
 def attach_image_path_detector(buffer, registry: PastedImageRegistry) -> None:
-    """Watch a Buffer for image paths typed/dropped in, swap them for [Image #N].
+    """Watch a Buffer for image paths *pasted* in, swap them for [Image #N].
 
     Most Linux terminals (GNOME Terminal, Konsole, …) deliver drag-and-drop as a
     burst of normal keypresses rather than bracketed paste, so the
-    BracketedPaste handler never fires. This watches every text change in the
-    buffer; when the text matches the image-extension regex AND a registered
-    file is found, the path is replaced in-place with ``[Image #N]``. Manual
-    char-by-char typing rarely triggers a match because the regex requires the
-    candidate path to *end* the token.
+    BracketedPaste handler never fires. We distinguish paste from typing by the
+    inter-event interval: a paste burst arrives in <1 ms gaps, manual typing
+    has 50–200 ms gaps even at 300 wpm. After ≥5 consecutive changes with
+    sub-20 ms gaps we schedule a 50 ms-debounced check that runs the path
+    detector on the settled buffer.
     """
+    import asyncio
+    import time
+
     from prompt_toolkit.document import Document
 
     in_handler: list[bool] = [False]
+    pending: list[asyncio.TimerHandle | None] = [None]
+    last_ts: list[float] = [0.0]
+    burst_size: list[int] = [0]
 
-    def _on_change(_):
+    def _do_check():
+        pending[0] = None
+        burst_size[0] = 0
         if in_handler[0]:
             return
         text = buffer.text
@@ -243,6 +251,26 @@ def attach_image_path_detector(buffer, registry: PastedImageRegistry) -> None:
             buffer.set_document(Document(rewritten, new_cursor), bypass_readonly=True)
         finally:
             in_handler[0] = False
+
+    def _on_change(_):
+        if in_handler[0]:
+            return
+        now = time.monotonic()
+        delta = now - last_ts[0]
+        last_ts[0] = now
+        if delta < 0.02:
+            burst_size[0] += 1
+        else:
+            burst_size[0] = 1
+        if burst_size[0] < 5:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if pending[0] is not None:
+            pending[0].cancel()
+        pending[0] = loop.call_later(0.05, _do_check)
 
     buffer.on_text_changed += _on_change
 

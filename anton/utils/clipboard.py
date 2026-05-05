@@ -118,6 +118,12 @@ async def ensure_clipboard(console: Console) -> bool:
     if reason == "unsupported_platform":
         console.print("[anton.warning]Clipboard is not supported on this platform.[/]")
         return False
+    if reason == "missing_linux_clipboard_tools":
+        console.print(
+            "[anton.warning]Clipboard on Linux requires [b]wl-clipboard[/] (Wayland) "
+            "or [b]xclip[/] (X11). Install one and try again.[/]"
+        )
+        return False
     # reason == "missing_pillow"
     console.print("[anton.muted]Clipboard image support requires Pillow.[/]")
     answer = console.input("[bold]Install Pillow now? (y/n):[/] ").strip().lower()

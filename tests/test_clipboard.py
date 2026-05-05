@@ -28,9 +28,23 @@ class TestIsClipboardSupported:
             with patch.dict("sys.modules", {"PIL": MagicMock(), "PIL.ImageGrab": MagicMock()}):
                 assert is_clipboard_supported() is True
 
-    def test_unsupported_linux(self):
+    def test_linux_supported_with_tools_and_pillow(self):
         with patch("anton.clipboard.platform") as mock_platform:
             mock_platform.system.return_value = "Linux"
+            with patch("anton.clipboard._linux_clipboard_tool", return_value="xclip"):
+                with patch.dict("sys.modules", {"PIL": MagicMock(), "PIL.ImageGrab": MagicMock()}):
+                    assert is_clipboard_supported() is True
+
+    def test_linux_unsupported_without_tools(self):
+        with patch("anton.clipboard.platform") as mock_platform:
+            mock_platform.system.return_value = "Linux"
+            with patch("anton.clipboard._linux_clipboard_tool", return_value=None):
+                with patch.dict("sys.modules", {"PIL": MagicMock(), "PIL.ImageGrab": MagicMock()}):
+                    assert is_clipboard_supported() is False
+
+    def test_unsupported_other_platform(self):
+        with patch("anton.clipboard.platform") as mock_platform:
+            mock_platform.system.return_value = "FreeBSD"
             assert is_clipboard_supported() is False
 
     def test_unsupported_no_pillow(self):

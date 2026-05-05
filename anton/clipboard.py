@@ -1,6 +1,6 @@
 """Clipboard image/file paste support.
 
-Grabs images or file paths from the system clipboard (macOS/Windows),
+Grabs images or file paths from the system clipboard (macOS/Windows/Linux),
 saves uploads to .anton/uploads/, and provides path-parsing utilities
 shared with the drag-and-drop logic in chat.py.
 """
@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import shlex
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -48,30 +50,38 @@ class UploadedFile:
     size_bytes: int
     format: str
 
+def _linux_clipboard_tool() -> str | None:
+    """Pick a Linux clipboard CLI tool (wl-paste/xclip), or None if absent."""
+    if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-paste"):
+        return "wl-paste"
+    if shutil.which("xclip"):
+        return "xclip"
+    if shutil.which("wl-paste"):
+        return "wl-paste"
+    return None
+
+
 def is_clipboard_supported() -> bool:
     """Return True if we can attempt clipboard image grabs on this platform."""
-    if platform.system() not in ("Darwin", "Windows"):
-        return False
-    try:
-        from PIL import ImageGrab  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
+    return clipboard_unavailable_reason() is None
 
 
 def clipboard_unavailable_reason() -> str | None:
     """Return a reason string if clipboard is unavailable, or None if OK.
 
-    Distinguishes between unsupported platform and missing Pillow.
+    Possible reasons: unsupported_platform, missing_pillow,
+    missing_linux_clipboard_tools.
     """
-    if platform.system() not in ("Darwin", "Windows"):
+    system = platform.system()
+    if system not in ("Darwin", "Windows", "Linux"):
         return "unsupported_platform"
     try:
         from PIL import ImageGrab  # noqa: F401
-        return None
     except ImportError:
         return "missing_pillow"
+    if system == "Linux" and _linux_clipboard_tool() is None:
+        return "missing_linux_clipboard_tools"
+    return None
 
 
 def grab_clipboard() -> ClipboardResult:
@@ -156,6 +166,22 @@ def _grab_text() -> str:
                 text=True,
                 timeout=5,
             ).stdout
+        elif system == "Linux":
+            tool = _linux_clipboard_tool()
+            if tool == "wl-paste":
+                return subprocess.run(
+                    ["wl-paste", "--no-newline"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                ).stdout
+            elif tool == "xclip":
+                return subprocess.run(
+                    ["xclip", "-selection", "clipboard", "-o"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                ).stdout
     except Exception:
         pass
     return ""

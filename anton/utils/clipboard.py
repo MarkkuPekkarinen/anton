@@ -232,7 +232,6 @@ def attach_image_path_detector(buffer, registry: PastedImageRegistry) -> None:
     pending: list[asyncio.TimerHandle | None] = [None]
     last_ts: list[float] = [0.0]
     burst_size: list[int] = [0]
-
     def _do_check():
         pending[0] = None
         burst_size[0] = 0
@@ -241,9 +240,21 @@ def attach_image_path_detector(buffer, registry: PastedImageRegistry) -> None:
         text = buffer.text
         if not text or "." not in text:
             return
+
+        # Insert space before processing if buffer doesn't end with whitespace
+        needs_space = text and text[-1] not in (' ', '\n', '\t')
+        if needs_space:
+            in_handler[0] = True
+            try:
+                buffer.insert_text(' ')
+            finally:
+                in_handler[0] = False
+            text = buffer.text
+
         rewritten, registered = replace_image_paths_in_pasted(text, registry)
         if not registered:
             return
+
         cursor = buffer.cursor_position
         new_cursor = max(0, min(cursor + (len(rewritten) - len(text)), len(rewritten)))
         in_handler[0] = True

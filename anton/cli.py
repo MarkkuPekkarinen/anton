@@ -1115,6 +1115,49 @@ def _looks_like_mdb_ai(base_url: str, settings) -> bool:
     return base == minds or base == f"{minds}/api/v1"
 
 
+def _current_search_label(settings) -> str:
+    """Human-readable summary of the currently-configured search provider.
+
+    Returns ``"none"`` if nothing is set, otherwise the provider name plus a
+    masked tail of the stored key so the user can recognize which key is
+    active without exposing it.
+    """
+    provider = (getattr(settings, "external_search_provider", None) or "").lower()
+    if not provider:
+        return "none"
+    if provider == "exa":
+        key = getattr(settings, "exa_api_key", None) or ""
+        label = "Exa.ai"
+    elif provider == "brave":
+        key = getattr(settings, "brave_api_key", None) or ""
+        label = "Brave Search"
+    else:
+        return provider
+    if len(key) >= 4:
+        return f"{label} (key: ****{key[-4:]})"
+    return label
+
+
+def _skip_search_provider(settings, ws) -> None:
+    """Disable ``web_search``. If a provider was configured, confirm first
+    so a stray keystroke can't silently wipe a working setup."""
+    if settings.external_search_provider:
+        current = _current_search_label(settings)
+        confirm = _setup_prompt(
+            f"Disable web_search and clear current config ({current})? [y/N]",
+            default="N",
+        ).strip().lower()
+        if confirm not in ("y", "yes"):
+            console.print("  [anton.muted]Keeping current search provider.[/]")
+            return
+    settings.external_search_provider = None
+    ws.set_secret("ANTON_EXTERNAL_SEARCH_PROVIDER", "")
+    console.print(
+        "  [anton.muted]web_search will be unavailable until you run "
+        "[bold]anton setup-search[/].[/]"
+    )
+
+
 def _setup_search_provider(settings, ws) -> None:
     """Configure an external search provider (Exa.ai or Brave Search).
 
@@ -1127,6 +1170,10 @@ def _setup_search_provider(settings, ws) -> None:
     console.print()
     console.print("[anton.cyan]Search provider[/]")
     console.print(
+        f"  [anton.muted]Currently:[/] {_current_search_label(settings)}"
+    )
+    console.print()
+    console.print(
         "  [bold]1[/]  [link=https://exa.ai][anton.cyan]Exa.ai[/][/link] "
         "[anton.muted]AI-native semantic search[/]"
     )
@@ -1134,24 +1181,20 @@ def _setup_search_provider(settings, ws) -> None:
         "  [bold]2[/]  [link=https://brave.com/search/api][anton.cyan]Brave Search[/][/link] "
         "[anton.muted]privacy-focused web search[/]"
     )
-    console.print("  [bold]3[/]  [anton.muted]Skip — disable web_search for now[/]")
+    console.print("  [bold]3[/]  [anton.muted]Skip — disable web_search[/]")
     console.print()
 
-    from rich.prompt import Prompt
-    choice = Prompt.ask(
-        "  Choose",
-        choices=["1", "2", "3"],
-        default="1",
-        console=console,
-    )
+    # ``_setup_prompt`` (prompt_toolkit) gives us ESC-to-go-back support and
+    # matches every other ``_setup_*`` helper in this file. Loop on invalid
+    # input — the underlying prompt has no built-in choice validation.
+    while True:
+        choice = _setup_prompt("Choose [1/2/3]", default="1").strip()
+        if choice in ("1", "2", "3"):
+            break
+        console.print("  [anton.warning]Please enter 1, 2, or 3.[/]")
 
     if choice == "3":
-        settings.external_search_provider = None
-        ws.set_secret("ANTON_EXTERNAL_SEARCH_PROVIDER", "")
-        console.print(
-            "  [anton.muted]web_search will be unavailable until you run "
-            "[bold]anton setup-search[/].[/]"
-        )
+        _skip_search_provider(settings, ws)
         return
 
     if choice == "1":
@@ -1197,14 +1240,14 @@ def _setup_exa(settings, ws) -> None:
         _validate_with_spinner(console, "Exa.ai", _test)
     except PermissionError as exc:
         console.print(f"  [anton.error]{exc}[/]")
-        _handle_search_retry(settings, ws)
+        _handle_search_retry(settings, ws, last_provider="exa")
         return
     except Exception as exc:
         if _is_transient_error(exc):
             console.print("  [anton.warning]Search service is temporarily overloaded.[/]")
         else:
             console.print(f"  [anton.error]Failed:[/] {exc}")
-        _handle_search_retry(settings, ws)
+        _handle_search_retry(settings, ws, last_provider="exa")
         return
 
     settings.external_search_provider = "exa"
@@ -1253,14 +1296,14 @@ def _setup_brave(settings, ws) -> None:
         _validate_with_spinner(console, "Brave Search", _test)
     except PermissionError as exc:
         console.print(f"  [anton.error]{exc}[/]")
-        _handle_search_retry(settings, ws)
+        _handle_search_retry(settings, ws, last_provider="brave")
         return
     except Exception as exc:
         if _is_transient_error(exc):
             console.print("  [anton.warning]Search service is temporarily overloaded.[/]")
         else:
             console.print(f"  [anton.error]Failed:[/] {exc}")
-        _handle_search_retry(settings, ws)
+        _handle_search_retry(settings, ws, last_provider="brave")
         return
 
     settings.external_search_provider = "brave"
@@ -1270,23 +1313,36 @@ def _setup_brave(settings, ws) -> None:
     console.print("  [anton.success]Brave Search configured.[/]")
 
 
-def _handle_search_retry(settings, ws) -> None:
-    """Retry / switch / skip after a search-provider validation failure."""
-    from rich.prompt import Prompt
-    choice = Prompt.ask(
-        "  Retry, switch provider, or skip?",
-        choices=["retry", "switch", "skip", "r", "s", "k"],
-        default="retry",
-        console=console,
-    )
-    if choice in ("retry", "r"):
-        _setup_search_provider(settings, ws)
-    elif choice in ("switch", "s"):
-        # Re-show the picker so the user can pick the other provider.
+def _handle_search_retry(settings, ws, *, last_provider: str) -> None:
+    """Retry the same provider, switch to the other, or skip web_search.
+
+    ``last_provider`` is the provider whose probe just failed (``"exa"`` or
+    ``"brave"``). ``retry`` re-enters that same helper so the user can fix a
+    typo without re-picking from the menu; ``switch`` re-shows the picker so
+    they can try the other provider; ``skip`` clears the config (with the
+    standard confirm if a previous provider was set).
+    """
+    other = "Brave Search" if last_provider == "exa" else "Exa.ai"
+    while True:
+        choice = _setup_prompt(
+            f"Retry, switch to {other}, or skip? [r/s/k]",
+            default="r",
+        ).strip().lower()
+        if choice in ("r", "retry", "s", "switch", "k", "skip"):
+            break
+        console.print("  [anton.warning]Please enter r, s, or k.[/]")
+
+    if choice in ("r", "retry"):
+        # Jump back into the same provider's helper — no menu detour.
+        if last_provider == "exa":
+            _setup_exa(settings, ws)
+        else:
+            _setup_brave(settings, ws)
+    elif choice in ("s", "switch"):
+        # Show the picker so the user can pick the other provider.
         _setup_search_provider(settings, ws)
     else:
-        settings.external_search_provider = None
-        ws.set_secret("ANTON_EXTERNAL_SEARCH_PROVIDER", "")
+        _skip_search_provider(settings, ws)
 
 
 @app.command("setup")

@@ -28,6 +28,7 @@ SCRATCHPAD_TOOL = ToolDef(
         "and data persist across cells — like a notebook you drive programmatically.\n\n"
         "Actions:\n"
         "- exec: Run code in the scratchpad (creates it if needed)\n"
+        "- serve: Start a long-running process (web server, background task) without blocking. Returns immediately.\n"
         "- view: See all cells and their outputs\n"
         "- reset: Restart the process, clearing all state (installed packages survive)\n"
         "- remove: Kill the scratchpad and delete its environment\n"
@@ -62,7 +63,7 @@ SCRATCHPAD_TOOL = ToolDef(
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["exec", "view", "reset", "remove", "dump", "install"],
+                "enum": ["exec", "serve", "view", "reset", "remove", "dump", "install"],
             },
             "name": {"type": "string", "description": "Scratchpad name"},
             "code": {

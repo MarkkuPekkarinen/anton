@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from .prompts import (
     BASE_VISUALIZATIONS_PROMPT,
+    BACKEND_GENERATION_PROMPT,
     CHAT_SYSTEM_PROMPT,
     VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
     VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
@@ -128,6 +129,7 @@ class ChatSystemPromptBuilder:
         current_datetime: str,
         system_prompt_context: SystemPromptContext,
         proactive_dashboards: bool,
+        output_dir: str,
         tool_defs: list["ToolDef"] | None = None,
         memory_context: str = "",
         project_context: str = "",
@@ -151,6 +153,8 @@ class ChatSystemPromptBuilder:
             visualizations_section=visualizations_section,
             current_datetime=current_datetime,
         )
+
+        prompt += "\n\n" + BACKEND_GENERATION_PROMPT.format(output_dir=output_dir)
 
         tool_prompts = self._build_tool_prompts_section(tool_defs)
         if tool_prompts:

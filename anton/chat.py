@@ -317,6 +317,22 @@ async def _handle_connect(
     )
 
 
+def _is_publishable_html(html_path: Path, output_dir: Path) -> bool:
+    """Check if an HTML file is publishable.
+
+    Returns False if:
+    - HTML is in a subdirectory that contains .py files (fullstack app)
+
+    Returns True if:
+    - HTML is in the root of output/
+    - HTML is in a subdirectory without any .py files
+    """
+    if html_path.parent == output_dir:
+        return True
+
+    parent_dir = html_path.parent
+    has_py_files = any(parent_dir.glob("*.py"))
+    return not has_py_files
 
 
 def _extract_html_title(path, re_module) -> str:
@@ -445,12 +461,19 @@ async def _handle_publish(
         if not target.is_absolute():
             target = Path(settings.workspace_path) / file_arg
     else:
-        # List HTML files sorted by modification time (most recent first)
-        html_files = sorted(
-            output_dir.glob("*.html"), key=lambda f: f.stat().st_mtime, reverse=True
-        ) if output_dir.is_dir() else []
+        # List publishable HTML files sorted by modification time (most recent first)
+        if output_dir.is_dir():
+            all_html = list(output_dir.rglob("*.html"))
+            html_files = sorted(
+                [f for f in all_html if _is_publishable_html(f, output_dir)],
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )
+        else:
+            html_files = []
+
         if not html_files:
-            console.print("  [anton.warning]No HTML files found in .anton/output/[/]")
+            console.print("  [anton.warning]No publishable HTML files found in .anton/output/[/]")
             console.print()
             return
 
@@ -464,9 +487,10 @@ async def _handle_publish(
             console.print("  [anton.cyan]Available reports:[/]")
             console.print()
             for i, f in enumerate(page, offset + 1):
+                rel_path = f.relative_to(output_dir).as_posix()
                 title = _extract_html_title(f, re)
                 label = title or f.name
-                console.print(f"  [bold]{i}[/]  {label}  [anton.muted]{f.name}[/]")
+                console.print(f"  [bold]{i}[/]  {label}  [anton.muted]{rel_path}[/]")
 
             if has_more:
                 console.print(f"\n  [anton.muted]m  Show more ({len(html_files) - offset - PAGE_SIZE} remaining)[/]")
@@ -498,6 +522,14 @@ async def _handle_publish(
         console.print()
         return
 
+    # Check if file is publishable
+    if not _is_publishable_html(target, output_dir):
+        console.print("  [anton.error]Cannot publish this HTML file:[/]")
+        console.print("  It is in a directory with Python files (fullstack application).")
+        console.print("  Only standalone HTML reports can be published.")
+        console.print()
+        return
+
     # 3. Check if this file was previously published
     published_json = output_dir / ".published.json"
     published_map = {}
@@ -508,7 +540,7 @@ async def _handle_publish(
         pass
 
     report_id = None
-    file_key = target.name
+    file_key = target.relative_to(output_dir).as_posix()
     prev = published_map.get(file_key)
 
     if prev and prev.get("report_id"):

@@ -85,7 +85,7 @@ async def build_chat_session(
         describe their UI affordances. None → no suffix.
     output_context
         Override for the per-session output-folder hint. None → use the default template
-        pointing at `settings.output_dir`.
+        pointing at `settings.artifacts_dir`.
 
     Returns
     -------
@@ -121,7 +121,7 @@ async def build_chat_session(
     workspace.apply_env_to_process()
 
     anton_dir = base / ".anton"
-    output_dir = Path(settings.output_dir)
+    output_dir = Path(settings.artifacts_dir)
     context_dir = Path(settings.context_dir)
     episodes_dir = anton_dir / "episodes"
     project_memory_dir = anton_dir / "memory"

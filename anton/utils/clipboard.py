@@ -186,15 +186,6 @@ def _media_type_for(fmt: str) -> str:
     return "image/png"
 
 
-# def announce_pasted_images(registered, console: Console) -> None:
-#     """Print one line per newly-registered pasted image."""
-#     for img in registered:
-#         console.print(
-#             f"  [anton.muted]attached as [b][Image #{img.id}][/b]: "
-#             f"{img.path.name} ({human_size(img.size_bytes)})[/]"
-#         )
-
-
 def make_image_paste_bindings(registry: PastedImageRegistry, console: Console):
     """Build a ``KeyBindings`` that swaps image paths in pasted text for [Image #N]."""
     from prompt_toolkit.key_binding import KeyBindings
@@ -206,7 +197,6 @@ def make_image_paste_bindings(registry: PastedImageRegistry, console: Console):
     def _(event):
         data = event.data.replace("\r\n", "\n").replace("\r", "\n")
         rewritten, registered = replace_image_paths_in_pasted(data, registry)
-        # announce_pasted_images(registered, console)
         event.current_buffer.insert_text(rewritten)
 
     return bindings

@@ -349,12 +349,21 @@ def build_image_ref_message(
                 text_buf.append(m.group(0))
             else:
                 flush_text()
+                fmt = item.format
+                # BMP is not supported by OpenAI or Claude APIs — convert to PNG on the fly.
+                if fmt.upper() == "BMP":
+                    import io
+                    from PIL import Image as _PILImage
+                    buf = io.BytesIO()
+                    _PILImage.open(io.BytesIO(raw)).save(buf, format="PNG")
+                    raw = buf.getvalue()
+                    fmt = "PNG"
                 b64 = base64.standard_b64encode(raw).decode("ascii")
                 blocks.append({
                     "type": "image",
                     "source": {
                         "type": "base64",
-                        "media_type": _media_type_for(item.format),
+                        "media_type": _media_type_for(fmt),
                         "data": b64,
                     },
                 })

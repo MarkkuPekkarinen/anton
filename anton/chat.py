@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import urllib.error
+from urllib.parse import quote
 import sys
 import time
 from pathlib import Path
@@ -375,10 +376,12 @@ async def _handle_remote(
             console.print()
             return
         if has_key.lower() == "n":
+            # Strip /api/v1 suffix if present.
+            base_url = settings.minds_url.rstrip("/").removesuffix("/api/v1")
             webbrowser.open(
-                "https://mdb.ai/auth/realms/mindsdb/protocol/openid-connect/registrations"
+                f"{base_url}/auth/realms/mindsdb/protocol/openid-connect/registrations"
                 "?client_id=public-client&response_type=code&scope=openid"
-                "&redirect_uri=https%3A%2F%2Fmdb.ai"
+                f"&redirect_uri={quote(base_url, safe='')}"
             )
             console.print()
 
@@ -454,18 +457,23 @@ async def _handle_publish(
     # 2. Find the HTML file to publish
     import re
 
-    output_dir = Path(settings.workspace_path) / ".anton" / "output"
+    # Search the new artifacts/<slug>/ tree (recursive — each artifact
+    # owns its own subfolder). The legacy `.anton/output/` flat
+    # directory is no longer scanned; users move old files into a
+    # proper artifact subfolder if they still want them publishable.
+    artifacts_root = Path(settings.artifacts_dir)
+    publish_index_dir = artifacts_root  # `.published.json` lives at the root
 
     if file_arg:
         target = Path(file_arg)
         if not target.is_absolute():
             target = Path(settings.workspace_path) / file_arg
     else:
-        # List publishable HTML files sorted by modification time (most recent first)
-        if output_dir.is_dir():
-            all_html = list(output_dir.rglob("*.html"))
+        # Recursively list publishable HTML files under any artifact, sorted by mtime.
+        if artifacts_root.is_dir():
+            all_html = list(artifacts_root.rglob("*.html"))
             html_files = sorted(
-                [f for f in all_html if _is_publishable_html(f, output_dir)],
+                [f for f in all_html if _is_publishable_html(f, artifacts_root)],
                 key=lambda f: f.stat().st_mtime,
                 reverse=True,
             )
@@ -473,7 +481,7 @@ async def _handle_publish(
             html_files = []
 
         if not html_files:
-            console.print("  [anton.warning]No publishable HTML files found in .anton/output/[/]")
+            console.print(f"  [anton.warning]No publishable HTML files found under {artifacts_root}/[/]")
             console.print()
             return
 
@@ -487,7 +495,7 @@ async def _handle_publish(
             console.print("  [anton.cyan]Available reports:[/]")
             console.print()
             for i, f in enumerate(page, offset + 1):
-                rel_path = f.relative_to(output_dir).as_posix()
+                rel_path = f.relative_to(artifacts_root).as_posix()
                 title = _extract_html_title(f, re)
                 label = title or f.name
                 console.print(f"  [bold]{i}[/]  {label}  [anton.muted]{rel_path}[/]")
@@ -523,7 +531,7 @@ async def _handle_publish(
         return
 
     # Check if file is publishable
-    if not _is_publishable_html(target, output_dir):
+    if not _is_publishable_html(target, artifacts_root):
         console.print("  [anton.error]Cannot publish this HTML file:[/]")
         console.print("  It is in a directory with Python files (fullstack application).")
         console.print("  Only standalone HTML reports can be published.")
@@ -531,7 +539,7 @@ async def _handle_publish(
         return
 
     # 3. Check if this file was previously published
-    published_json = output_dir / ".published.json"
+    published_json = publish_index_dir / ".published.json"
     published_map = {}
     try:
         if published_json.is_file():
@@ -540,7 +548,7 @@ async def _handle_publish(
         pass
 
     report_id = None
-    file_key = target.relative_to(output_dir).as_posix()
+    file_key = target.relative_to(artifacts_root).as_posix()
     prev = published_map.get(file_key)
 
     if prev and prev.get("report_id"):
@@ -832,16 +840,28 @@ async def _agent_zero(console: Console, session: "ChatSession", settings) -> str
 
     # Read the script and patch for scratchpad execution.
     # 1. __file__ doesn't exist inside exec() — set it so os.path.dirname works
-    # 2. Override OUTPUT_PATH to write to .anton/output/ instead of demo_data/
+    # 2. Override OUTPUT_PATH so the dashboard lands in the right artifact
+    #    folder. The demo creates a dedicated artifact directly via the
+    #    `ArtifactStore` so the dashboard appears in the Live Artifacts view
+    #    end-to-end with proper metadata + README, just like an LLM-driven
+    #    artifact would.
+    from anton.core.artifacts import ArtifactStore as _ArtifactStore
+    _store = _ArtifactStore(Path(settings.artifacts_dir))
+    _demo_artifact = _store.create(
+        name="NVDA BTC Dashboard",
+        description="Demo dashboard comparing NVDA stock and BTC prices over time.",
+        type="html-app",
+    )
     code = script_path.read_text()
-    output_dir = str(Path(settings.workspace_path) / ".anton" / "output")
-    output_html = str(Path(output_dir) / "nvda_btc_dashboard.html")
+    output_dir = str(_store.folder_for(_demo_artifact.slug))
+    output_html = str(Path(output_dir) / "dashboard.html")
     code = (
         f"import os as _os; _os.makedirs({output_dir!r}, exist_ok=True)\n"
         f"__file__ = {str(script_path)!r}\n"
         + code
     )
-    # Replace the OUTPUT_PATH line so the dashboard goes to .anton/output/
+    # Replace the OUTPUT_PATH line so the dashboard goes into the
+    # claimed artifact folder.
     code = code.replace(
         'OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nvda_btc_dashboard.html")',
         f'OUTPUT_PATH = {output_html!r}',
@@ -1157,7 +1177,7 @@ async def _chat_loop(
         history_store=history_store,
         session_id=current_session_id,
         proactive_dashboards=settings.proactive_dashboards,
-        output_dir=settings.output_dir,
+        output_dir=settings.artifacts_dir,
         tools=[CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL],
     ))
 

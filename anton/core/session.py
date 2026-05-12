@@ -27,9 +27,13 @@ from anton.core.llm.provider import (
 from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolRegistry
 from anton.core.tools.tool_defs import (
-    SCRATCHPAD_TOOL,
+    CREATE_ARTIFACT_TOOL,
+    LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
+    OPEN_ARTIFACT_TOOL,
     RECALL_TOOL,
+    SCRATCHPAD_TOOL,
+    SET_ARTIFACT_PRIMARY_TOOL,
     ToolDef,
 )
 from anton.core.utils.scratchpad import prepare_scratchpad_exec, format_cell_result
@@ -550,6 +554,17 @@ class ChatSession:
 
         # Procedural memory retrieval — always available, no-op if no skills.
         self.tool_registry.register_tool(RECALL_SKILL_TOOL)
+
+        # Artifacts — only register when a workspace is bound to the
+        # session. Bare-cwd CLI sessions without `resolve_workspace`
+        # have nowhere to write artifacts to, and the tool handlers
+        # would just return error strings — better to hide the tools
+        # entirely so the LLM doesn't try to use them.
+        if self._workspace is not None:
+            self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL)
+            self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
+            self.tool_registry.register_tool(OPEN_ARTIFACT_TOOL)
+            self.tool_registry.register_tool(SET_ARTIFACT_PRIMARY_TOOL)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
@@ -1357,6 +1372,7 @@ class ChatSession:
                                     phase="scratchpad_start",
                                     message=description or "Running code",
                                     eta_seconds=estimated_seconds,
+                                    id=tc.id,
                                 )
 
                                 _sp_t0 = _time.monotonic()
@@ -1374,7 +1390,7 @@ class ChatSession:
                                         break
                                     if isinstance(item, str):
                                         yield StreamTaskProgress(
-                                            phase="scratchpad", message=item
+                                            phase="scratchpad", message=item, id=tc.id,
                                         )
                                     elif isinstance(item, Cell):
                                         cell = item
@@ -1383,6 +1399,7 @@ class ChatSession:
                                     phase="scratchpad_done",
                                     message=description or "Done",
                                     eta_seconds=_sp_elapsed,
+                                    id=tc.id,
                                 )
                                 result_text = (
                                     format_cell_result(cell)
@@ -1398,7 +1415,8 @@ class ChatSession:
                                     yield StreamToolResult(
                                         name=tc.name,
                                         action="exec",
-                                        content=json.dumps(asdict(cell))
+                                        content=json.dumps(asdict(cell)),
+                                        id=tc.id,
                                     )
                                 if self._episodic is not None and cell is not None:
                                     self._episodic.log_turn(
@@ -1446,7 +1464,7 @@ class ChatSession:
                                 tc.name == "scratchpad"
                                 and tc.input.get("action") == "dump"
                             ):
-                                yield StreamToolResult(name=tc.name, action="dump", content=result_text)
+                                yield StreamToolResult(name=tc.name, action="dump", content=result_text, id=tc.id)
                                 result_text = (
                                     "The full notebook has been displayed to the user above. "
                                     "Do not repeat it. Here is the content for your reference:\n\n"

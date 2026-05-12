@@ -209,3 +209,4 @@ __marimo__/
 # Anton
 .anton/
 .DS_Store
+artifacts/

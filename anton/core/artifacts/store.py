@@ -58,6 +58,9 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
+_UNSET = object()
+
+
 def _sanitize_slug(value: str) -> str:
     """Map any name to a folder-safe slug.
 
@@ -172,20 +175,29 @@ class ArtifactStore:
         self._save(artifact)
         return artifact
 
-    def set_primary(self, slug: str, primary: str | None) -> Artifact | None:
-        """Update the primary-file pointer on an existing artifact.
+    def update(
+        self,
+        slug: str,
+        *,
+        primary: str | None = _UNSET,  # type: ignore[assignment]
+        port: int | None = _UNSET,  # type: ignore[assignment]
+    ) -> Artifact | None:
+        """Update mutable agent-supplied fields on an existing artifact.
 
-        Used when the agent created with no `primary` and decided
-        later, or when the primary file got renamed. Pass `None` to
-        clear (the renderer reverts to the heuristic). Returns the
-        updated artifact, or None when the slug is missing.
+        Only fields explicitly passed are modified; omitted fields are
+        left unchanged. Pass `primary=None` or `primary=""` to clear
+        the entry-point pointer. Pass `port=None` to clear the port.
+        Returns the updated artifact, or None when the slug is missing.
         """
         artifact = self._load_silent(slug)
         if artifact is None:
             return None
-        artifact.primary = (
-            primary.strip() if isinstance(primary, str) and primary.strip() else None
-        )
+        if primary is not _UNSET:
+            artifact.primary = (
+                primary.strip() if isinstance(primary, str) and primary.strip() else None
+            )
+        if port is not _UNSET:
+            artifact.port = int(port) if port is not None else None
         artifact.updatedAt = _utc_now()
         self._save(artifact)
         return artifact

@@ -108,6 +108,7 @@ class Artifact(BaseModel):
     # most cases — they generally know the filename they're going
     # to write).
     primary: str | None = None
+    port: int | None = None
 
     # ── Server-managed contents ─────────────────────────────────
     files: list[FileEntry] = Field(default_factory=list)

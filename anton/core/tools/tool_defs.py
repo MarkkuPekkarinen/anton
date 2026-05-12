@@ -5,7 +5,7 @@ from anton.core.tools.tool_handlers import (
     handle_open_artifact,
     handle_recall,
     handle_scratchpad,
-    handle_set_artifact_primary,
+    handle_update_artifact_metadata,
 )
 
 from dataclasses import dataclass
@@ -165,7 +165,7 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "`\"index.html\"` for a fullstack app, `\"report.pdf\"` for a "
         "document. The renderer uses it to decide what to open by default. "
         "Skip when you don't know yet — the renderer falls back to a "
-        "heuristic, and you can set it later via `set_artifact_primary`.\n\n"
+        "heuristic, and you can set it later via `update_artifact`.\n\n"
         "To MODIFY an existing artifact instead of creating a new one, call "
         "`list_artifacts` first to find it, then `open_artifact(slug)` to get "
         "the path."
@@ -204,15 +204,15 @@ CREATE_ARTIFACT_TOOL = ToolDef(
 )
 
 
-SET_ARTIFACT_PRIMARY_TOOL = ToolDef(
-    name="set_artifact_primary",
+UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
+    name="update_artifact",
     description=(
-        "Update the primary-file pointer on an existing artifact. Call this "
-        "when you created the artifact without a `primary` and now know what "
-        "it should be, or when the entry-point file's name changed. Pass an "
-        "empty string or omit `primary` to clear (the renderer reverts to "
-        "its heuristic — `index.html` → newest `.html` → newest non-"
-        "housekeeping file)."
+        "Update mutable fields on an existing artifact. Pass only the fields you want to change.\n\n"
+        "- `primary`: relative path of the entry-point file (e.g. \"index.html\"). "
+        "Pass empty string to clear (renderer reverts to heuristic: "
+        "`index.html` → newest `.html` → newest non-housekeeping file).\n"
+        "- `port`: port the backend process is listening on (fullstack-stateful-app only). "
+        "Set this after the server confirms it is up."
     ),
     input_schema={
         "type": "object",
@@ -223,12 +223,16 @@ SET_ARTIFACT_PRIMARY_TOOL = ToolDef(
             },
             "primary": {
                 "type": "string",
-                "description": "Relative path of the new entry-point file. Empty string to clear.",
+                "description": "Relative path of the entry-point file. Empty string to clear.",
+            },
+            "port": {
+                "type": "integer",
+                "description": "Port number the backend process is listening on.",
             },
         },
         "required": ["slug"],
     },
-    handler=handle_set_artifact_primary,
+    handler=handle_update_artifact_metadata,
 )
 
 

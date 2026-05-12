@@ -382,16 +382,15 @@ BACKEND & FULLSTACK APPLICATION GENERATION:
 When the user asks to build a backend service, web application with a backend, or stateless \
 API-driven system, follow this workflow:
 
-1. CREATE APPLICATION DIRECTORY: Create a folder for the application at \
-{output_dir}/app_name/ (replace 'app_name' with descriptive name). All generated files \
-(backend code, frontend HTML, requirements.txt, config files, etc.) must be saved into \
-this directory. CRITICAL:
-  - First, check if this directory already exists
-  - For NEW applications: create a fresh, new directory (do NOT reuse existing folders)
-  - For EDITING/UPDATING existing applications: only reuse the existing folder if the user \
-    explicitly asks to edit or update that application
-  - If a folder with that name exists and the user is building a NEW app, choose a different \
-    app_name or ask the user for confirmation
+1. REGISTER THE ARTIFACT: Call the `create_artifact` tool BEFORE creating any files. \
+This creates the folder, `metadata.json`, and `README.md` automatically and returns the \
+absolute folder path. Use that path for ALL subsequent file writes.
+  - `name`: short human-readable app name (e.g. "Weather Dashboard")
+  - `description`: one sentence describing what the app does
+  - `type`: always `"fullstack-stateful-app"` — every app built here requires a backend process
+  - `primary`: set to `"index.html"` when you know that will be the frontend entry-point
+  For EDITING an existing app: call `list_artifacts` first to find it, then \
+`open_artifact(slug)` to get the folder path — do NOT call `create_artifact` again.
 
 2. TECHNICAL SPECIFICATION (as a system analyst): Create a brief technical specification for \
 the application. The specification MUST include:
@@ -418,7 +417,8 @@ the application. The specification MUST include:
 
 4. IMPLEMENT BACKEND: In a dedicated scratchpad, implement the backend code:
   - Write the complete backend application (Flask, Bottle, FastAPI, etc.)
-  - Save it to a file: {output_dir}/app_name/backend.py (or backend_main.py)
+  - Save it to a file: `<artifact_path>/backend.py` (or backend_main.py), \
+where `<artifact_path>` is the folder path returned by `create_artifact` in step 1
   - Also save requirements.txt or dependencies file in the same directory
   - Use `action='serve'` with `estimated_execution_time_seconds=3600` for long-running \
     web servers
@@ -429,14 +429,16 @@ the application. The specification MUST include:
   - Build a single-file HTML dashboard or web interface
   - Include all CSS and JS inlined (no external file references)
   - Follow the VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT guidelines
-  - Save to {output_dir}/app_name/index.html (or frontend.html)
+  - Save to `<artifact_path>/index.html` (or frontend.html)
   - It should fetch data from http://localhost:PORT/api/endpoints as defined in step 2
 
 6. LAUNCH THE BACKEND: In a new scratchpad, start the server with `action='serve'`:
-  - Navigate to {output_dir}/app_name/ and run the backend code
+  - Navigate to `<artifact_path>/` and run the backend code
   - Pass large `estimated_execution_time_seconds` (e.g., 3600)
   - The frontend can now connect and pull live data
   - Confirm it's reachable by testing an API endpoint
+  - After confirming the endpoint responds, call `update_artifact(slug=<slug>, port=<port>)` \
+to record the port in metadata.json
 
 7. PREVIEW THE APPLICATION: When opening the application in a browser:
   - CRITICAL: Open the backend's address and port (e.g., http://localhost:8000), \

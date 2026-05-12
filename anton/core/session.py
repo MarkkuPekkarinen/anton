@@ -33,7 +33,7 @@ from anton.core.tools.tool_defs import (
     OPEN_ARTIFACT_TOOL,
     RECALL_TOOL,
     SCRATCHPAD_TOOL,
-    SET_ARTIFACT_PRIMARY_TOOL,
+    UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
 from anton.core.utils.scratchpad import prepare_scratchpad_exec, format_cell_result
@@ -564,7 +564,7 @@ class ChatSession:
             self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL)
             self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
             self.tool_registry.register_tool(OPEN_ARTIFACT_TOOL)
-            self.tool_registry.register_tool(SET_ARTIFACT_PRIMARY_TOOL)
+            self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""

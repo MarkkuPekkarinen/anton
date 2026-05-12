@@ -117,13 +117,12 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> str:
     }, indent=2)
 
 
-async def handle_set_artifact_primary(session: "ChatSession", tc_input: dict) -> str:
-    """Update or clear the primary-file pointer on an existing artifact.
+async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict) -> str:
+    """Update mutable metadata fields on an existing artifact.
 
-    The agent calls this when it created an artifact without a
-    primary and now knows what it should be, or when the primary
-    file's name changed. Pass `primary: null` to clear and revert
-    the renderer to its heuristic.
+    Only fields present in the input are modified. Supports:
+    - `primary`: entry-point file path (empty string to clear)
+    - `port`: backend port number (fullstack-stateful-app only)
     """
     import json
 
@@ -134,14 +133,20 @@ async def handle_set_artifact_primary(session: "ChatSession", tc_input: dict) ->
     slug = (tc_input.get("slug") or "").strip()
     if not slug:
         return "Error: `slug` is required."
-    raw = tc_input.get("primary")
-    primary = raw if isinstance(raw, str) else None
-    artifact = store.set_primary(slug, primary)
+
+    kwargs: dict = {}
+    if "primary" in tc_input:
+        kwargs["primary"] = tc_input["primary"]
+    if "port" in tc_input:
+        kwargs["port"] = tc_input["port"]
+
+    artifact = store.update(slug, **kwargs)
     if artifact is None:
         return f"Error: no artifact found for slug `{slug}`."
     return json.dumps({
         "slug": artifact.slug,
         "primary": artifact.primary,
+        "port": artifact.port,
     }, indent=2)
 
 

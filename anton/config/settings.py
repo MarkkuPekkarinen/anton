@@ -125,12 +125,15 @@ class AntonSettings(CoreSettings):
         """
         base = Path(folder).resolve() if folder else Path.cwd()
         self._workspace = base
-        memory_dir = base / self.memory_dir
 
         # Convert relative paths to absolute under base
-        if not memory_dir.is_absolute():
-            self.memory_dir = str(memory_dir)
+        if not Path(self.memory_dir).is_absolute():
+            memory_root = base / self.memory_dir
+            self.memory_dir = str(memory_root)
+        else:
+            memory_root = Path(self.memory_dir)
+
         if not Path(self.context_dir).is_absolute():
             self.context_dir = str(base / self.context_dir)
         if not Path(self.artifacts_dir).is_absolute():
-            self.artifacts_dir = str(memory_dir / self.artifacts_dir)
+            self.artifacts_dir = str(memory_root / self.artifacts_dir)

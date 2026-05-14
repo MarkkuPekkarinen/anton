@@ -601,7 +601,21 @@ Anton's ACC watches a turn unfold, classifies events as they arrive, and at end-
 
 ### Status
 
-Implemented as a standalone module at `anton/core/memory/acc.py` with 44 passing tests. **Not yet wired into `ChatSession`** — deliberate scope decision. Wiring will require calling `acc.observe(...)` at scratchpad/tool/repair hooks and routing `acc.at_end_of_turn()` lessons through `cortex.encode()`.
+Implemented at `anton/core/memory/acc.py` with 51 passing tests, plus 14 wiring tests at `tests/test_session_acc_init.py`. Layers 1 and 2 are wired into `ChatSession`:
+
+  - **Layer 1 — passive learning.** Emit sites fire `acc.observe(...)` at scratchpad/tool/repair/cap-exhaust hooks; `_schedule_acc_flush()` runs at end-of-turn alongside the cerebellum flush. Detected lessons become `Engram` objects whose `kind` (always/never/when) was tagged by the detector, so they flow into the right section of `rules.md`. Future turns pick them up via the existing memory→system-prompt pipeline.
+  - **Layer 2 — mid-turn nudges.** `at_round_n()` runs after each tool-call round; when a NEW detector fires (one nudge per detector per turn), the lesson text gets appended as a `text` block inside the same user-role message that carries the round's `tool_result` blocks. The LLM sees the alarm on its very next round, not on the next turn. Off by default — gated on `ANTON_ACC_MODE=active`.
+
+Modes (env var `ANTON_ACC_MODE`, mirrors `ANTON_MEMORY_MODE`):
+
+| Mode | Behaviour |
+|---|---|
+| `off` | ACC observes nothing — events drop at the safe-emit wrapper. Use to disable the feature entirely. |
+| `passive` (default) | Layer 1 only. Lessons drain to memory at end-of-turn; next turn's system prompt picks them up. Adds zero surface to the turn loop. |
+| `active` | Layer 1 + Layer 2. Lessons ALSO inject inline as text blocks in `tool_results` so the LLM sees them on the very next round. Stronger learning signal; more invasive. |
+
+What is NOT yet wired (deliberate):
+  - **Layer 3 — retrieval-scored rule ranking.** At system-prompt assembly, score each candidate rule by relevance to the current turn's context and load the top-K within the token budget. Per-rule retrieval counters age out rules that never make the cut. Pairs with optional outcome-tracking (did the rule reduce its target pattern after it landed?). Needs a small embedding index over rules + a ranker call on the load path.
 
 ### Vocabulary discipline
 
@@ -912,7 +926,48 @@ Two pure helper functions for forced-tool-call structured output. Used by both `
 
 ## Integration Points in chat.py
 
-The memory + skills + cerebellum systems are wired into `ChatSession` (defined in `anton/chat.py`, with runtime config in `anton/chat_session.py`) and `_chat_loop()`. The ACC is implemented but not yet wired — see its section above for the wiring shape it expects.
+The memory + skills + cerebellum + ACC systems are wired into `ChatSession` (defined in `anton/chat.py` for the CLI entry-points; the runtime class actually lives in `anton/core/session.py`, with chat-loop wiring at the top level in `anton/chat.py`). The cerebellum wires via the dispatcher's scratchpad observer list; the ACC wires via direct `session._acc.observe(...)` calls at each emit site (broader emit footprint than scratchpad alone — also tools, history-repair, round-cap).
+
+### ACC emit sites (Layer 1)
+
+| Event kind | Emit site | File |
+|---|---|---|
+| `scratchpad_call` | After args validation in `handle_scratchpad` exec branch | `core/tools/tool_handlers.py` |
+| `scratchpad_result` | After `pad.execute()` returns a non-killed cell | `core/tools/tool_handlers.py` |
+| `scratchpad_empty_code` | When `prepare_scratchpad_exec` rejects the call | `core/tools/tool_handlers.py` |
+| `scratchpad_reset` | After `pad.reset()` in the reset action | `core/tools/tool_handlers.py` |
+| `scratchpad_killed` | After `pad.execute()` returns a cell whose `error` starts with `Cancelled`/`Cell timed out`/`Cell killed` | `core/tools/tool_handlers.py` |
+| `tool_call` | At top of per-tc loop in `_stream_and_handle_tools` | `core/session.py` |
+| `tool_result` | After result_text is finalized, before `tool_results.append` | `core/session.py` |
+| `history_repair` | After `_seal_dangling_tool_uses` actually inserts synthetic blocks | `core/session.py` |
+| `cap_exhausted` | When `tool_round > self._max_tool_rounds` | `core/session.py` |
+
+### End-of-turn drain
+
+`_schedule_acc_flush()` lives next to `_schedule_cerebellum_flush()` and runs at the same two spots — end of `turn()` and end of `turn_stream()`. Fire-and-forget: detectors are pure (no LLM call) and the only async work is `cortex.encode()`, but we still wrap the encode in `asyncio.create_task` so file I/O doesn't block the user-facing reply.
+
+Each `Lesson` becomes an `Engram(text=rule, kind=lesson.kind, scope="global", confidence="high", source="consolidation")`. The `kind` is whatever the detector tagged (`always`/`never`/`when`) — no string-matching at the wiring layer. Lessons land in `~/.anton/memory/rules.md` under the corresponding `## Always` / `## Never` / `## When` section, and the next turn's system prompt picks them up via the existing `cortex.build_memory_context()` pipeline.
+
+### Mid-turn nudge (`_acc_maybe_nudge`)
+
+Called by `_stream_and_handle_tools` immediately after `tool_results` is built and before that user message gets appended to history. When `ANTON_ACC_MODE == "active"`:
+
+  1. Runs `acc.at_round_n()` — re-evaluates every detector against the events buffered so far this turn and returns only lessons whose detector hasn't already nudged this turn.
+  2. For each newly-fired lesson, appends `{"type": "text", "text": "[Anton self-check — <detector>] <rule>"}` to the `tool_results` content array.
+  3. The LLM sees those text blocks alongside the tool_result blocks on its very next round.
+
+One nudge per detector per turn — re-stating the same alarm round after round would inflate history without changing behaviour. Cleared on the same `clear()` boundary the event buffer uses. The mid-turn path deliberately does NOT consult `has_similar_lesson`: if a rule is already in `rules.md` but the LLM is violating it right now, repeating the rule inline is the whole point.
+
+### `_acc_observe` safe-emit wrapper
+
+Every emit site calls `session._acc_observe(kind, detail, ...)` rather than touching `session._acc` directly. This wrapper:
+  - Returns silently when the ACC isn't attached (defensive).
+  - Returns silently when the cortex is disabled (`mode == "off"`) — observation without persistence is pointless.
+  - Catches `ValueError` from `observe()` on unknown kinds so emit-site drift never breaks a turn.
+
+### De-dupe predicate
+
+The ACC is constructed with `has_similar_lesson=_acc_has_similar`, a closure that does a cheap substring match against the current `rules.md` content. Prevents the same lesson being re-encoded on every turn. Embedding similarity is a v2 upgrade.
 
 ```
 1. _chat_loop() startup:

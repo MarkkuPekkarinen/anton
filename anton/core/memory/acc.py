@@ -91,7 +91,7 @@ from __future__ import annotations
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
-from typing import Callable, Sequence
+from typing import Callable, Literal, Sequence
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -144,6 +144,9 @@ EVENT_KINDS = frozenset({
 })
 
 
+LessonKind = Literal["always", "never", "when"]
+
+
 @dataclass(frozen=True)
 class Lesson:
     """An actionable rule the ACC wants future-Anton to remember.
@@ -153,6 +156,14 @@ class Lesson:
             ("Use ONE scratchpad name per task — switching mid-task
             isolates variables in separate environments.") rather
             than judgement of past behaviour.
+        kind: Which behavioural section this rule lands in when it
+            flows through `Cortex.encode()`. Maps directly to
+            `Engram.kind`:
+              * `always` — unconditional habit ("Use ONE scratchpad…").
+              * `never`  — unconditional prohibition ("Don't reset…").
+              * `when`   — conditional rule ("When a tool fails…").
+            The detector knows the semantics; routing by string-
+            matching the rule at the wiring layer would be brittle.
         triggers: The event kinds that contributed to firing this
             lesson. Used for audit + for de-dupe across detectors.
         detector: Name of the detector function that produced it.
@@ -161,6 +172,7 @@ class Lesson:
     """
 
     rule: str
+    kind: LessonKind
     triggers: tuple[str, ...]
     detector: str
 
@@ -266,6 +278,7 @@ def detect_name_switch(events: Sequence[Event]) -> Lesson | None:
             "(e.g. `build_pres` → `write_html`) forces re-imports, re-fetches, "
             "and burns rounds on recovery."
         ),
+        kind="always",
         triggers=("scratchpad_call",),
         detector="detect_name_switch",
     )
@@ -304,6 +317,7 @@ def detect_oversized_cell(events: Sequence[Event]) -> Lesson | None:
             "writing it in a single cell occasionally drops the `code` "
             "parameter on the wire and silently burns a round."
         ),
+        kind="always",
         triggers=tuple({"scratchpad_call", "scratchpad_empty_code"} & {e.kind for e in (*too_big, *empty)}),
         detector="detect_oversized_cell",
     )
@@ -348,6 +362,7 @@ def detect_repeated_tool_error(events: Sequence[Event]) -> Lesson | None:
             "failures is signal to escalate — surface the error to the "
             "user or pick a different tool."
         ),
+        kind="when",
         triggers=("tool_result",),
         detector="detect_repeated_tool_error",
     )
@@ -394,6 +409,7 @@ def detect_repeated_error_signature(events: Sequence[Event]) -> Lesson | None:
             "precondition, pick a different tool, or surface the failure to "
             "the user. The error signature is the signal; the tool name is not."
         ),
+        kind="when",
         triggers=("tool_result", "scratchpad_result"),
         detector="detect_repeated_error_signature",
     )
@@ -423,6 +439,7 @@ def detect_reset_churn(events: Sequence[Event]) -> Lesson | None:
             "comment out the broken bit. Reach for reset only when the venv "
             "is genuinely corrupted, not when one cell raised."
         ),
+        kind="never",
         triggers=("scratchpad_reset",),
         detector="detect_reset_churn",
     )
@@ -450,6 +467,7 @@ def detect_kill_loop(events: Sequence[Event]) -> Lesson | None:
             "Two kills on the same scratchpad means the approach itself is "
             "too heavy, not that the same cell needs another try."
         ),
+        kind="when",
         triggers=("scratchpad_killed",),
         detector="detect_kill_loop",
     )
@@ -492,6 +510,7 @@ def detect_severity_climb(events: Sequence[Event]) -> Lesson | None:
                             "approach: different tool, different decomposition, "
                             "or surface the situation to the user."
                         ),
+                        kind="when",
                         triggers=("scratchpad_result", "tool_result"),
                         detector="detect_severity_climb",
                     )
@@ -522,6 +541,7 @@ def detect_repair_churn(events: Sequence[Event]) -> Lesson | None:
             "situation to the user, and ask for direction instead of "
             "continuing to retry."
         ),
+        kind="when",
         triggers=("history_repair",),
         detector="detect_repair_churn",
     )
@@ -543,6 +563,7 @@ def detect_cap_exhausted(events: Sequence[Event]) -> Lesson | None:
             "next turn should try differently. The user gets context; "
             "future turns get a lesson; nothing is lost in the void."
         ),
+        kind="when",
         triggers=("cap_exhausted",),
         detector="detect_cap_exhausted",
     )
@@ -596,6 +617,11 @@ class AnteriorCingulate:
         self._events: list[Event] = []
         self._has_similar = has_similar_lesson or (lambda _rule: False)
         self._detectors = tuple(detectors)
+        # Names of detectors that have already produced a mid-turn
+        # nudge (via at_round_n) this turn. Tracks "newly fired" so
+        # the same alarm isn't injected into history on every
+        # subsequent round. Reset by `clear()` between turns.
+        self._nudged_detectors: set[str] = set()
 
     def observe(
         self,
@@ -654,9 +680,52 @@ class AnteriorCingulate:
             out.append(lesson)
         return out
 
+    def at_round_n(self) -> list[Lesson]:
+        """Run detectors against the current buffer and return only
+        *newly-fired* lessons since the previous call this turn.
+
+        Layer 2 — mid-turn nudging. Where `at_end_of_turn()` runs once
+        per turn to drain lessons into long-term memory, this runs after
+        each tool-call round so the LLM sees the alarm right when the
+        pattern is happening, not on the next turn.
+
+        Brain analog: the ACC's ERN fires as soon as a divergence is
+        detected. The dlPFC reads the alarm and can adjust strategy on
+        the very next action — not at end-of-task.
+
+        Implementation notes:
+          - Detectors are pure functions, so re-running them on the
+            growing event buffer is cheap. No memoisation.
+          - We track *which detectors* have already nudged this turn
+            (`self._nudged_detectors`) so the same alarm doesn't get
+            injected into history on every subsequent round. One nudge
+            per detector per turn is enough — if the LLM ignores it,
+            re-stating it round after round won't help and would only
+            inflate the history.
+          - We deliberately do NOT consult `has_similar_lesson` here.
+            For mid-turn nudges we want to re-assert the rule inline
+            even when it already lives in `rules.md` — the LLM clearly
+            isn't following the in-prompt version, so making it visible
+            again in immediate context is the whole point.
+
+        Returns the newly-fired lessons (possibly empty).
+        """
+        fresh: list[Lesson] = []
+        for d in self._detectors:
+            name = getattr(d, "__name__", "")
+            if name in self._nudged_detectors:
+                continue
+            lesson = d(self._events)
+            if lesson is None:
+                continue
+            self._nudged_detectors.add(name)
+            fresh.append(lesson)
+        return fresh
+
     def clear(self) -> None:
         """Drop the event buffer. Call between turns."""
         self._events.clear()
+        self._nudged_detectors.clear()
 
     # ── Introspection helpers (used by tests + telemetry) ────────────
 

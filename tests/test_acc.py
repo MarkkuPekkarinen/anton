@@ -384,7 +384,7 @@ class TestAnteriorCingulate:
 
         def fake_detector(events):
             called["count"] += 1
-            return Lesson(rule="duplicate rule", triggers=(), detector=f"fake_{called['count']}")
+            return Lesson(rule="duplicate rule", kind="when", triggers=(), detector=f"fake_{called['count']}")
 
         acc = AnteriorCingulate(detectors=(fake_detector, fake_detector))
         acc.observe("scratchpad_call", {"name": "x", "code_len": 100})
@@ -398,6 +398,80 @@ class TestAnteriorCingulate:
         acc.observe("scratchpad_call", {"name": "b", "code_len": 100})
         acc.observe("tool_result",     {"name": "t", "success": False})
         assert acc.event_kind_counts == {"scratchpad_call": 2, "tool_result": 1}
+
+
+class TestAtRoundN:
+    """Layer 2 — mid-turn nudging contract.
+
+    Each detector is allowed to nudge AT MOST ONCE per turn.
+    Subsequent calls during the same turn only return lessons from
+    detectors that haven't nudged yet. `clear()` resets the nudge
+    tracking so the next turn starts fresh.
+    """
+
+    def test_returns_lessons_for_newly_fired_detectors(self):
+        acc = AnteriorCingulate()
+        acc.observe("scratchpad_call", {"name": "a", "code_len": 100}, round_idx=1)
+        acc.observe("scratchpad_call", {"name": "b", "code_len": 100}, round_idx=2)
+        lessons = acc.at_round_n()
+        assert len(lessons) == 1
+        assert lessons[0].detector == "detect_name_switch"
+
+    def test_second_call_same_turn_returns_empty_when_no_new_pattern(self):
+        acc = AnteriorCingulate()
+        acc.observe("scratchpad_call", {"name": "a", "code_len": 100}, round_idx=1)
+        acc.observe("scratchpad_call", {"name": "b", "code_len": 100}, round_idx=2)
+        first = acc.at_round_n()
+        second = acc.at_round_n()
+        assert len(first) == 1
+        assert second == []
+
+    def test_second_call_returns_new_pattern_when_one_emerges(self):
+        # Round 1: name_switch fires. Round 2: tool-error pattern emerges.
+        # Second call should return ONLY the tool-error lesson, not the
+        # already-nudged name-switch lesson.
+        acc = AnteriorCingulate()
+        acc.observe("scratchpad_call", {"name": "a", "code_len": 100}, round_idx=1)
+        acc.observe("scratchpad_call", {"name": "b", "code_len": 100}, round_idx=2)
+        first = acc.at_round_n()
+        assert [l.detector for l in first] == ["detect_name_switch"]
+
+        acc.observe("tool_result", {"name": "t", "success": False}, round_idx=3)
+        acc.observe("tool_result", {"name": "t", "success": False}, round_idx=4)
+        second = acc.at_round_n()
+        assert [l.detector for l in second] == ["detect_repeated_tool_error"]
+
+    def test_ignores_has_similar_lesson(self):
+        """Mid-turn nudges should fire even when the rule already
+        lives in memory. Skipping based on memory dedupe would mean
+        the LLM gets no in-context reminder of a rule it's actively
+        violating right now."""
+        def always_known(_rule):
+            return True
+
+        acc = AnteriorCingulate(has_similar_lesson=always_known)
+        acc.observe("scratchpad_call", {"name": "a", "code_len": 100}, round_idx=1)
+        acc.observe("scratchpad_call", {"name": "b", "code_len": 100}, round_idx=2)
+        assert acc.at_round_n() != []  # fires even though rule "is in memory"
+
+    def test_clear_resets_nudge_tracking(self):
+        acc = AnteriorCingulate()
+        acc.observe("scratchpad_call", {"name": "a", "code_len": 100}, round_idx=1)
+        acc.observe("scratchpad_call", {"name": "b", "code_len": 100}, round_idx=2)
+        first = acc.at_round_n()
+        assert len(first) == 1
+        # Simulate a turn boundary.
+        acc.clear()
+        acc.observe("scratchpad_call", {"name": "a", "code_len": 100}, round_idx=1)
+        acc.observe("scratchpad_call", {"name": "b", "code_len": 100}, round_idx=2)
+        again = acc.at_round_n()
+        # Fresh turn: same pattern fires again.
+        assert len(again) == 1
+
+    def test_silent_when_no_patterns(self):
+        acc = AnteriorCingulate()
+        acc.observe("scratchpad_call", {"name": "solo", "code_len": 50}, round_idx=1)
+        assert acc.at_round_n() == []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -504,6 +578,50 @@ def test_every_event_kind_is_read_by_at_least_one_detector():
         f"Either add a detector that reads them or remove them from EVENT_KINDS. "
         f"Producer-only kinds require an entry in KNOWN_PRODUCER_ONLY with a reason."
     )
+
+
+def test_every_lesson_has_a_valid_kind():
+    """Every detector must tag its Lesson with a `kind` so the wiring
+    layer can route it to the right Engram kind (always/never/when)
+    without parsing the rule text. Detectors that fire here drive the
+    smoke check; detectors that don't fire in this synthetic mix are
+    indirectly covered by their own positive unit tests."""
+    # Craft an event stream that fires every detector. Some need
+    # specific shapes — these were copied from the per-detector tests.
+    events = [
+        # name_switch + oversized_cell
+        Event("scratchpad_call", 1, {"name": "a", "code_len": 9000}, 1),
+        Event("scratchpad_call", 1, {"name": "b", "code_len": 11000}, 2),
+        # tool repeats
+        Event("tool_result", 5, {"name": "t", "success": False, "error": "same err"}, 3),
+        Event("tool_result", 5, {"name": "t", "success": False, "error": "same err"}, 4),
+        Event("tool_result", 5, {"name": "t", "success": False, "error": "same err"}, 5),
+        # reset + kill
+        Event("scratchpad_reset",  5, {"name": "a"}, 6),
+        Event("scratchpad_reset",  5, {"name": "a"}, 7),
+        Event("scratchpad_killed", 6, {"name": "c"}, 8),
+        Event("scratchpad_killed", 6, {"name": "c"}, 9),
+        # severity climb on producer "z"
+        Event("tool_result", 1, {"name": "z", "success": True}, 10),
+        Event("tool_result", 3, {"name": "z", "success": False, "error": "small"}, 11),
+        Event("tool_result", 7, {"name": "z", "success": False, "error": "big"}, 12),
+        # repair churn
+        Event("history_repair", 5, {"reason": "x"}, 13),
+        Event("history_repair", 5, {"reason": "x"}, 14),
+        Event("history_repair", 5, {"reason": "x"}, 15),
+        # cap exhausted
+        Event("cap_exhausted", 9, {}, 25),
+    ]
+    acc = AnteriorCingulate()
+    for e in events:
+        acc.observe(e.kind, e.detail, severity=e.severity, round_idx=e.round_idx)
+    lessons = acc.at_end_of_turn()
+    assert lessons, "Crafted event stream should fire multiple detectors"
+    for l in lessons:
+        assert l.kind in ("always", "never", "when"), (
+            f"Detector {l.detector} produced invalid kind {l.kind!r}; "
+            f"must be one of always/never/when so Cortex.encode() routes correctly."
+        )
 
 
 def test_no_dropped_kinds_lingering_in_event_kinds():

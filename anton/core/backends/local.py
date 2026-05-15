@@ -161,6 +161,17 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             bin_dir = os.path.join(self._venv_dir, "bin")
             self._venv_python = os.path.join(bin_dir, "python")
 
+    def venv_python(self) -> str | None:
+        """Public accessor for the scratchpad's Python interpreter path.
+
+        Returns None when the venv has not been provisioned yet (i.e.
+        no exec has run). Auxiliary tools that want to share installed
+        packages call this to discover the interpreter.
+        """
+        if self._venv_python and os.path.isfile(self._venv_python):
+            return self._venv_python
+        return None
+
     def _verify_venv_python(self) -> bool:
         if self._venv_python is None:
             return False

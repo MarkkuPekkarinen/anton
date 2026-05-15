@@ -1,5 +1,6 @@
 from anton.core.tools.tool_handlers import (
     handle_create_artifact,
+    handle_launch_backend,
     handle_list_artifacts,
     handle_memorize,
     handle_open_artifact,
@@ -274,6 +275,53 @@ OPEN_ARTIFACT_TOOL = ToolDef(
         "required": ["slug"],
     },
     handler=handle_open_artifact,
+)
+
+
+LAUNCH_BACKEND_TOOL = ToolDef(
+    name="launch_backend",
+    description=(
+        "Start an artifact's backend script as a standalone subprocess. "
+        "Picks a free TCP port, runs the script with `--port <port>` "
+        "(plus any `extra_args`), waits until the server is reachable, "
+        "records the port in the artifact's `metadata.json`, and returns "
+        "`{slug, port, pid, url, log_path}` as JSON.\n\n"
+        "Idempotent: a second call with the same slug terminates the "
+        "previously-launched backend before starting a new one.\n\n"
+        "Requirements on the backend script:\n"
+        "- MUST accept `--port` via argparse (or equivalent) and bind to it.\n"
+        "- MUST be reachable at `health_path` (default `/`) within "
+        "`health_timeout` seconds.\n"
+        "- stdout/stderr stream to `<artifact>/backend.log`."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "slug": {
+                "type": "string",
+                "description": "Folder slug of the artifact whose backend to launch.",
+            },
+            "path": {
+                "type": "string",
+                "description": "Backend script path relative to the artifact folder. Default: \"backend.py\".",
+            },
+            "extra_args": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Additional CLI arguments appended after `--port <port>`.",
+            },
+            "health_path": {
+                "type": "string",
+                "description": "URL path for the readiness probe. Default: \"/\". Any HTTP response (including 4xx) counts as ready.",
+            },
+            "health_timeout": {
+                "type": "number",
+                "description": "Seconds to wait for readiness before failing. Default: 10.",
+            },
+        },
+        "required": ["slug"],
+    },
+    handler=handle_launch_backend,
 )
 
 

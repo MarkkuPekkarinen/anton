@@ -28,6 +28,7 @@ from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolRegistry
 from anton.core.tools.tool_defs import (
     CREATE_ARTIFACT_TOOL,
+    LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
     OPEN_ARTIFACT_TOOL,
@@ -162,6 +163,11 @@ class ChatSession:
         # at the start of each turn. Prevents double-summarization when
         # the post-recovery response still reports high pressure.
         self._compacted_this_turn = False
+        # Backends launched via the launch_backend tool. Keyed by
+        # artifact slug; each entry holds the asyncio.subprocess.Process
+        # plus its port. Reaped in close() so backend processes don't
+        # outlive the chat session.
+        self._tracked_backends: dict[str, dict] = {}
 
     @property
     def history(self) -> list[dict]:
@@ -565,10 +571,33 @@ class ChatSession:
             self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
             self.tool_registry.register_tool(OPEN_ARTIFACT_TOOL)
             self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
+            self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
+        await self._reap_tracked_backends()
         await self._scratchpads.close_all()
+
+    async def _reap_tracked_backends(self) -> None:
+        """Terminate every backend launched via launch_backend.
+
+        SIGTERM first, then SIGKILL after a short grace period. Errors
+        are swallowed — close() must not raise on shutdown.
+        """
+        for slug, info in list(self._tracked_backends.items()):
+            proc = info.get("proc")
+            if proc is None or proc.returncode is not None:
+                continue
+            try:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=3)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+            except (ProcessLookupError, OSError):
+                pass
+        self._tracked_backends.clear()
 
     async def _summarize_history(self) -> None:
         """Compress old conversation turns into a summary using the coding model.

@@ -416,14 +416,17 @@ the application. The specification MUST include:
     specification based on what you learned about the actual data
 
 4. IMPLEMENT BACKEND: In a dedicated scratchpad, implement the backend code:
-  - Write the complete backend application (Flask, Bottle, FastAPI, etc.)
-  - Save it to a file: `<artifact_path>/backend.py` (or backend_main.py), \
-where `<artifact_path>` is the folder path returned by `create_artifact` in step 1
-  - Also save requirements.txt or dependencies file in the same directory
-  - Use `action='serve'` with `estimated_execution_time_seconds=3600` for long-running \
-    web servers
+  - Write the complete backend application (http.server, Bottle, Flask, FastAPI, etc.)
+  - Save it to `<artifact_path>/backend.py`, where `<artifact_path>` is the folder \
+path returned by `create_artifact` in step 1
+  - If the backend uses any non-stdlib libraries (Bottle, Flask, FastAPI, requests, \
+pandas, etc.), save a `requirements.txt` in the same directory listing them. \
+If the backend uses ONLY the Python standard library (http.server, json, sqlite3, etc.), \
+do NOT create requirements.txt.
+  - The backend MUST accept `--port` via argparse and bind to that port. \
+NEVER hardcode the port — `launch_backend` picks a free one and passes it in.
   - The backend serves the frontend at `/` (single-origin, no CORS for stateless backends)
-  - Verify with a test call: test one endpoint to confirm it's working
+  - Do NOT start the server inside the scratchpad — use `launch_backend` in step 6.
 
 5. BUILD FRONTEND (if needed): In a separate scratchpad:
   - Build a single-file HTML dashboard or web interface
@@ -435,23 +438,26 @@ where `<artifact_path>` is the folder path returned by `create_artifact` in step
 The frontend is served by the same backend at `/`, so relative paths resolve to the \
 correct origin automatically — this keeps the app portable across ports and hosts.
 
-6. LAUNCH THE BACKEND: In a new scratchpad, start the server with `action='serve'`:
-  - Navigate to `<artifact_path>/` and run the backend code
-  - Pass large `estimated_execution_time_seconds` (e.g., 3600)
-  - The frontend can now connect and pull live data
-  - Confirm it's reachable by testing an API endpoint
-  - After confirming the endpoint responds, call `update_artifact(slug=<slug>, port=<port>)` \
-to record the port in metadata.json
+6. LAUNCH THE BACKEND: Call the `launch_backend` tool with the artifact's slug:
+  - `launch_backend(slug=<slug>)` — the tool picks a free port, spawns \
+`python backend.py --port <port>` as a standalone process with `<artifact_path>` as cwd, \
+waits for readiness, writes the port into `metadata.json`, and returns \
+`{{slug, port, pid, url, log_path}}` as JSON.
+  - Backend stdout/stderr stream to `<artifact_path>/backend.log` — read it if \
+the launch fails or the API misbehaves.
+  - Do NOT call `update_artifact(port=...)` manually — `launch_backend` does it.
+  - The launched process outlives the scratchpad cell and is reaped automatically \
+when the Anton session ends.
+  - Calling `launch_backend` again for the same slug terminates the previous \
+process and starts a fresh one — use this for hot reloads after code changes.
 
-7. PREVIEW THE APPLICATION: When opening the application in a browser:
-  - CRITICAL: Open the backend's address and port (e.g., http://localhost:8000), \
-    NOT the HTML file from disk (file://...)
-  - The backend serves the frontend at the root path `/`. Opening localhost:PORT \
-    will automatically load the frontend HTML and allow it to make API calls
-  - If you open the HTML file directly from disk, fetch() calls will fail due to \
-    browser CORS/security restrictions (file:// protocol cannot make fetch requests)
-  - After confirming the backend is running, direct the user to http://localhost:PORT \
-    in their browser
+7. PREVIEW THE APPLICATION: Direct the user to the `url` returned by `launch_backend` \
+(e.g. http://127.0.0.1:54321):
+  - CRITICAL: Open that URL, NOT the HTML file from disk (file://...). \
+The backend serves the frontend at `/`, so opening the URL loads the page and \
+its `fetch()` calls land on the same origin.
+  - If the user opens the HTML file directly from disk, `fetch()` calls fail due \
+to browser CORS/file:// restrictions.
 
 DEPLOYMENT NOTES:
 - Backend must be stateless (no mutable global state that matters across requests)
@@ -461,7 +467,8 @@ DEPLOYMENT NOTES:
 
 PUBLISH OR SHARE:
 - Publishing is disabled for this MVP (per constraints), but preview is fully supported
-- After building, offer to preview the frontend in the browser (action='preview')
+- After building, offer to preview the frontend by directing the user to the \
+URL returned by `launch_backend`
 - The backend must be running for the frontend to work
 """
 

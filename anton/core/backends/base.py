@@ -92,6 +92,16 @@ class ScratchpadRuntime(ABC):
         Unlike close(), cleanup() removes persistent storage too.
         """
 
+    def venv_python(self) -> str | None:
+        """Path to the runtime's Python interpreter, if locally accessible.
+
+        Used by tools (e.g. launch_backend) that need to spawn auxiliary
+        processes sharing the scratchpad's installed packages. Returns
+        None for runtimes whose interpreter isn't reachable from the
+        host process (e.g. remote / Lightsail backends).
+        """
+        return None
+
     async def execute(
         self,
         code: str,

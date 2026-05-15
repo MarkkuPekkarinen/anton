@@ -497,8 +497,6 @@ async def handle_memorize(session: ChatSession, tc_input: dict) -> str:
 
 async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
     """Dispatch a scratchpad tool call by action."""
-    import asyncio
-
     action = tc_input.get("action", "")
     name = tc_input.get("name", "")
 
@@ -537,38 +535,6 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
             )
             await _fire_post_execute(session, cell)
         return format_cell_result(cell)
-
-    elif action == "serve":
-        result = await prepare_scratchpad_exec(session, tc_input)
-        if isinstance(result, str):
-            return result
-        pad, code, description, estimated_time, estimated_seconds = result
-
-        prelim_cell = Cell(
-            code=code,
-            stdout="",
-            stderr="",
-            error=None,
-            description=description,
-            estimated_time=estimated_time or str(estimated_seconds),
-        )
-        await _fire_pre_execute(session, prelim_cell)
-
-        async def _run_background():
-            cell = await pad.execute(
-                code,
-                description=description,
-                estimated_time=estimated_time,
-                estimated_seconds=estimated_seconds,
-            )
-            if cell is not None:
-                session._record_cell_explainability(
-                    pad_name=name, description=description, cell=cell,
-                )
-                await _fire_post_execute(session, cell)
-
-        asyncio.create_task(_run_background())
-        return f"Background server '{name}' started. Process running in the scratchpad."
 
     elif action == "view":
         # get_or_create: new ChatSession has empty _pads but replayed cells on the

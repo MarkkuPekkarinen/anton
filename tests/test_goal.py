@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from anton.chat import _parse_goal_args
+from anton.commands.goal import parse_goal_args as _parse_goal_args
 from anton.core.tools.registry import ToolRegistry
 from anton.core.tools.tool_defs import ToolDef
 

@@ -276,12 +276,13 @@ class DispatchRouter:
         *,
         is_group: bool | None,
     ) -> AgentGroup | None:
-        """Create a default agent group + wiring for an unwired channel.
+        """Create a default wiring for an unwired messaging group.
 
         A messaging group with no wiring drops every inbound message. The
-        first message instead bootstraps a working agent: one agent group
-        with an isolated per-channel workspace, wired so subsequent
-        messages route straight through.
+        first message instead bootstraps a working agent: the messaging
+        group is wired to the connection's single shared agent group (see
+        :meth:`_default_agent_group`), so subsequent messages route
+        straight through.
 
         ``trigger_rule`` adapts to the channel: a DM gets
         :attr:`TriggerRule.ALWAYS` (every message is for the agent), while
@@ -290,21 +291,14 @@ class DispatchRouter:
         Slack/Discord channel. An unknown ``is_group`` is treated as a
         group — the conservative choice.
 
-        Idempotent: ``create_agent_group`` / ``add_wiring`` both INSERT OR
-        REPLACE, and the agent-group id is derived from ``mg.id``, so a
-        concurrent first message re-creates identical rows. Returns the
-        group, or ``None`` if persistence raised (the caller logs + drops
-        the message).
+        Idempotent: the caller only invokes this when the messaging group
+        has no wiring, and :meth:`_default_agent_group` reuses the existing
+        group rather than recreating it. Returns the agent group, or
+        ``None`` if persistence raised (the caller logs + drops the
+        message).
         """
         try:
-            workspace = self._auto_workspace(mg)
-            workspace.mkdir(parents=True, exist_ok=True)
-            group = AgentGroup(
-                id=f"auto-{mg.id}",
-                name=f"{mg.channel_type} agent",
-                workspace=workspace,
-            )
-            await self.repo.create_agent_group(group)
+            group = await self._default_agent_group(mg.channel_type)
             await self.repo.add_wiring(
                 MessagingGroupAgent(
                     messaging_group_id=mg.id,
@@ -319,12 +313,10 @@ class DispatchRouter:
                 )
             )
             _log.info(
-                "auto-provisioned agent group %s for %s/%s "
-                "(workspace=%s, is_group=%s)",
-                group.id,
+                "auto-wired %s/%s to agent group %s (is_group=%s)",
                 mg.channel_type,
                 mg.platform_id,
-                workspace,
+                group.id,
                 is_group,
             )
             return group
@@ -336,13 +328,42 @@ class DispatchRouter:
             )
             return None
 
-    @staticmethod
-    def _auto_workspace(mg: MessagingGroup) -> Path:
-        """Resolve the isolated workspace dir for an auto-provisioned group.
+    async def _default_agent_group(self, channel_type: str) -> AgentGroup:
+        """Return the single shared agent group for a channel type.
 
-        Defaults to ``~/.anton/dispatch-workspaces/<channel>-<id>/`` — the
-        one location that exists and persists identically on the desktop
-        app, the headless web build, and the cloud container (whose only
+        One agent group backs every messaging group on a connection — all
+        the DMs and channels of a Slack workspace share one identity,
+        workspace, and memory, while :attr:`SessionMode.PER_MESSAGING_GROUP`
+        on each wiring keeps their conversations separate. The router
+        therefore never creates more than one auto agent group per channel
+        type.
+
+        Created once, on demand, then reused: an existing group is returned
+        untouched, so renaming it or repointing its workspace from the UI
+        survives later inbound messages.
+        """
+        group_id = f"auto-{channel_type}"
+        try:
+            return await self.repo.get_agent_group(group_id)
+        except KeyError:
+            pass
+        workspace = self._auto_workspace(channel_type)
+        workspace.mkdir(parents=True, exist_ok=True)
+        return await self.repo.create_agent_group(
+            AgentGroup(
+                id=group_id,
+                name=f"{channel_type} agent",
+                workspace=workspace,
+            )
+        )
+
+    @staticmethod
+    def _auto_workspace(channel_type: str) -> Path:
+        """Resolve the workspace dir for a channel type's shared agent group.
+
+        Defaults to ``~/.anton/dispatch-workspaces/<channel>/`` — the one
+        location that exists and persists identically on the desktop app,
+        the headless web build, and the cloud container (whose only
         persistent volume is mounted at ``~/.anton``). A home-directory or
         project-tree workspace would be lost on every cloud redeploy and
         would expose the operator's whole home tree to any inbound sender.
@@ -354,10 +375,11 @@ class DispatchRouter:
             if root
             else Path.home() / ".anton" / "dispatch-workspaces"
         )
-        # platform_id may carry '/', ':' or other unsafe characters —
-        # slugify so the workspace stays a single directory level deep.
-        raw = f"{mg.channel_type}-{mg.platform_id}"
-        slug = "".join(c if c.isalnum() or c in "-_." else "-" for c in raw)
+        # channel_type is a known adapter slug, but stay defensive and
+        # keep the workspace a single directory level deep regardless.
+        slug = "".join(
+            c if c.isalnum() or c in "-_." else "-" for c in channel_type
+        )
         return (base / slug).resolve()
 
     async def on_metadata(

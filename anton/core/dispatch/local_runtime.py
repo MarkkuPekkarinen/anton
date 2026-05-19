@@ -258,7 +258,7 @@ class LocalScratchpadOrchestrator(RuntimeOrchestrator):
         stop = self._stops.pop(session.id, None)
         wakeup = self._wakeups.pop(session.id, None)
         task = self._tasks.pop(session.id, None)
-        self._chat_sessions.pop(session.id, None)
+        chat = self._chat_sessions.pop(session.id, None)
         if stop is not None:
             stop.set()
         if wakeup is not None:
@@ -268,6 +268,11 @@ class LocalScratchpadOrchestrator(RuntimeOrchestrator):
                 await asyncio.wait_for(task, timeout=5.0)
             except asyncio.TimeoutError:
                 task.cancel()
+        # Close the ChatSession only after the task has stopped using it —
+        # close() tears down scratchpad subprocesses, which would otherwise
+        # leak (orphaned processes) once the cache entry is dropped.
+        if chat is not None:
+            await self._close_chat_session(chat)
 
     async def stop_all(self) -> None:
         """Stop every running session task. Used at dispatcher shutdown."""
@@ -279,6 +284,7 @@ class LocalScratchpadOrchestrator(RuntimeOrchestrator):
             if wakeup is not None:
                 wakeup.set()
         tasks = list(self._tasks.values())
+        chats = list(self._chat_sessions.values())
         self._tasks.clear()
         self._wakeups.clear()
         self._stops.clear()
@@ -288,6 +294,26 @@ class LocalScratchpadOrchestrator(RuntimeOrchestrator):
                 await asyncio.wait_for(t, timeout=5.0)
             except (asyncio.TimeoutError, asyncio.CancelledError):
                 t.cancel()
+        # Tear down every cached ChatSession after its task has stopped, so
+        # scratchpad subprocesses are terminated rather than orphaned.
+        for chat in chats:
+            await self._close_chat_session(chat)
+
+    @staticmethod
+    async def _close_chat_session(chat: Any) -> None:
+        """Close one cached ChatSession; best-effort, never raises.
+
+        ChatSession.close() releases scratchpad subprocesses and other
+        runtime resources. Shutdown must not abort because one session
+        failed to close cleanly, so failures are logged and swallowed.
+        """
+        close = getattr(chat, "close", None)
+        if close is None:
+            return
+        try:
+            await close()
+        except Exception:
+            logger.exception("failed to close dispatch ChatSession")
 
     # -----------------------------------------------------------------
     # Internal: build / cache the Anton ChatSession

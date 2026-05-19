@@ -116,6 +116,10 @@ class SqliteDispatchRepository(DispatchRepository):
         )
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        # Wait for a held write lock rather than failing instantly with
+        # `database is locked` — control-plane writes and lifecycle hooks
+        # can contend. Same rationale as SQLiteSessionStore.
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(_SCHEMA)
 
     # -----------------------------------------------------------------

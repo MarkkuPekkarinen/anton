@@ -115,6 +115,13 @@ class SQLiteSessionStore(SessionStoreProtocol):
             check_same_thread=False,
         )
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # This DB has concurrent writers from separate connections: the
+        # orchestrator appends replies to messages_out while the router's
+        # delivery loop marks those rows delivered, and on_inbound writes
+        # messages_in. WAL serializes writers; without a busy timeout the
+        # loser of a collision gets an immediate `database is locked`
+        # OperationalError. Wait up to 5s for the lock instead.
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(_SCHEMA)
 
     def append(self, direction: Direction, kind: str, content: Any) -> int:

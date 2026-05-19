@@ -126,6 +126,25 @@ async def shutdown_channel_adapters() -> None:
     _active.clear()
 
 
+async def shutdown_channel_adapter(channel_type: str) -> bool:
+    """Stop and deregister a single active adapter.
+
+    Used by hosts that expose a per-channel "disconnect" action, so one
+    channel can be torn down without restarting the whole dispatcher.
+    Returns ``True`` if an adapter was running, ``False`` if none was.
+    The factory stays registered — a future ``init_channel_adapters`` (or
+    server restart) can bring the channel back once credentials return.
+    """
+    adapter = _active.pop(channel_type, None)
+    if adapter is None:
+        return False
+    try:
+        await adapter.shutdown()
+    except Exception as e:
+        _log_warn(f"adapter shutdown error: {channel_type}: {e!r}")
+    return True
+
+
 def _reset_for_tests() -> None:
     """Clear the registry. Test-only helper."""
     _registry.clear()

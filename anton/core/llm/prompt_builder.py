@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .prompts import (
+    ARTIFACTS_PROMPT,
     BASE_VISUALIZATIONS_PROMPT,
     BACKEND_GENERATION_PROMPT,
     CHAT_SYSTEM_PROMPT,
@@ -147,6 +148,7 @@ class ChatSystemPromptBuilder:
 
         prompt += CHAT_SYSTEM_PROMPT.format(
             runtime_context=system_prompt_context.runtime_context,
+            artifacts_section=ARTIFACTS_PROMPT,
             visualizations_section=visualizations_section,
             current_datetime=current_datetime,
         )

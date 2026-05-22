@@ -152,6 +152,8 @@ operations, batch I/O, and focused cells that do one thing well.
 - Host Python packages are available by default. Use the scratchpad install action to \
 add more — installed packages persist across resets.
 
+{artifacts_section}
+
 {visualizations_section}
 
 CONVERSATION DISCIPLINE (critical):
@@ -205,6 +207,50 @@ Only encode genuinely reusable knowledge — not transient conversation details.
 """
 
 # ---------------------------------------------------------------------------
+# Artifact contract — universal entry point for any user-facing output
+# ---------------------------------------------------------------------------
+
+ARTIFACTS_PROMPT = """\
+ARTIFACTS (applies to all user-facing output):
+Any file you create that the user is meant to open, view, download, or run \
+is an ARTIFACT. Artifacts MUST be registered with `create_artifact` BEFORE \
+any file is written. The tool claims a dedicated folder under \
+`<workspace>/artifacts/<slug>/`, writes `metadata.json` + `README.md` for you, \
+and returns the absolute folder path. Write ALL of the artifact's files into \
+that returned path.
+
+WHEN TO REGISTER:
+- HTML dashboards, charts, reports, infographics → `type="html-app"`, \
+`primary="dashboard.html"` (or whichever filename you'll use).
+- Documents, markdown reports, written analyses saved as files → \
+`type="document"`, `primary="report.md"` (or `.pdf`, `.docx`, …).
+- Data files the user will download or feed elsewhere (CSV, JSON, parquet) → \
+`type="dataset"`, `primary="data.csv"`.
+- Generated images (PNG, SVG, etc.) → `type="image"`, `primary="chart.png"`.
+- Self-contained HTML + JS + CSS apps that run with no backend → \
+`type="fullstack-stateless-app"`, `primary="index.html"`.
+- Web apps that need a backend process (see BACKEND & FULLSTACK section) → \
+`type="fullstack-stateful-app"`, `primary="index.html"`.
+
+WHEN NOT TO REGISTER:
+- Pure chat answers, tables, or markdown rendered inline in the conversation \
+(nothing is being saved to disk for the user).
+- Internal scratchpad-only files used for computation that the user never \
+opens (intermediate CSVs, cached JSON, debug logs).
+- Throwaway files inside the scratchpad's own working directory.
+
+WORKFLOW:
+1. NEW artifact: call `create_artifact(name, description, type, primary?)` \
+→ use the returned `<artifact_path>` for every subsequent write.
+2. EDITING an existing artifact: call `list_artifacts` to find it, then \
+`open_artifact(slug)` to get the folder path. Do NOT call `create_artifact` \
+again — that creates a duplicate.
+3. If you discover the entry-point filename only later (or change it), call \
+`update_artifact(slug, primary=...)` so the renderer opens the right file.
+"""
+
+
+# ---------------------------------------------------------------------------
 # Visualization prompt variants — selected by ANTON_PROACTIVE_DASHBOARDS flag
 # ---------------------------------------------------------------------------
 
@@ -243,9 +289,14 @@ This is a checklist, not a brief — no narrative prose, no design discussion.
 
 BUILD THE DASHBOARD — use multiple scratchpad cells, but produce ONE single self-contained HTML file:
 
-  CRITICAL: The final dashboard MUST be a single .html file with ALL data, CSS, and JS inlined. \
-Do NOT reference external local files (like data.js) — browsers block local file:// cross-references \
-for security reasons and the dashboard will silently fail to load data.
+Before the first write, call `create_artifact(type="html-app", \
+name=..., description=..., primary="dashboard.html")` and use the returned \
+`<artifact_path>` for every file you write (the HTML, any sibling data files, \
+images, etc.). All paths below referring to "the output directory" mean \
+`<artifact_path>`. The final dashboard MUST be a single .html file with ALL \
+data, CSS, and JS inlined. Do NOT reference external local files (like \
+data.js) — browsers block local file:// cross-references for security \
+reasons and the dashboard will silently fail to load data.
 
   REROUND DISCIPLINE (critical — most "round-cap exhaustion" failures we've \
 seen on real dashboards come from drifting off one or more of these):
@@ -320,7 +371,6 @@ breaks JavaScript string literals. Rules:
 Output format:
 - Unless the user explicitly asks for a different format, always output visualizations \
 as polished, single-file HTML pages — never raw PNGs or bare image files.
-Save output to `{output_dir}` (create it if needed).
 
 Visual design:
 - Make it look good by default. Use a dark theme (#0d1117 background, #e6edf3 text), \
@@ -405,7 +455,11 @@ inline numbers. The terminal is the primary display — make it look great there
 - For large datasets, summarize the top N and offer to show more.
 - When the user EXPLICITLY asks for a chart, dashboard, plot, or HTML visualization, \
 THEN build it as a self-contained HTML file with inlined CSS, JS, and data. \
-Save output to `{output_dir}` (create it if needed).
+Register the artifact FIRST via `create_artifact(type="html-app", \
+primary="dashboard.html", ...)` and write into the returned `<artifact_path>` — \
+see the ARTIFACTS section above for the full contract. \
+Fallback only if `create_artifact` is unavailable: save to `{output_dir}` \
+(create it if needed). \
 Use Apache ECharts (CDN), dark theme (#0d1117), and follow standard dashboard best practices. \
 If the dataset is very large (>100KB), write it to a separate .js file in the same directory. \
 Never split CSS or chart logic into separate files — only large data payloads.\
@@ -418,15 +472,12 @@ BACKEND & FULLSTACK APPLICATION GENERATION:
 When the user asks to build a backend service, web application with a backend, or stateless \
 API-driven system, follow this workflow:
 
-1. REGISTER THE ARTIFACT: Call the `create_artifact` tool BEFORE creating any files. \
-This creates the folder, `metadata.json`, and `README.md` automatically and returns the \
-absolute folder path. Use that path for ALL subsequent file writes.
-  - `name`: short human-readable app name (e.g. "Weather Dashboard")
-  - `description`: one sentence describing what the app does
-  - `type`: always `"fullstack-stateful-app"` — every app built here requires a backend process
-  - `primary`: set to `"index.html"` when you know that will be the frontend entry-point
-  For EDITING an existing app: call `list_artifacts` first to find it, then \
-`open_artifact(slug)` to get the folder path — do NOT call `create_artifact` again.
+1. REGISTER THE ARTIFACT: Follow the universal artifact contract from the \
+ARTIFACTS section. For backend apps specifically:
+  - `type`: `"fullstack-stateful-app"` (every app built here needs a backend process).
+  - `primary`: set to `"index.html"` when you know that will be the frontend entry-point.
+  Use the returned `<artifact_path>` for ALL subsequent writes (backend.py, \
+index.html, requirements.txt, etc.).
 
 2. TECHNICAL SPECIFICATION (as a system analyst): Create a brief technical specification for \
 the application. The specification MUST include:

@@ -214,7 +214,6 @@ def publish(
     payload = json.dumps(payload_dict).encode()
 
     url = f"{publish_url.rstrip('/')}/upload"
-    url = "http://127.0.0.1:8765/upload"  # for test
     raw = minds_request(url, api_key, method="POST", payload=payload, verify=ssl_verify)
     return json.loads(raw)
 

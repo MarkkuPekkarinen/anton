@@ -566,6 +566,13 @@ present at launch.
 `backend.handler`). Do NOT rename either.
   - Keep `Mangum(app, lifespan="off")`. Without `lifespan="off"` Mangum \
 warns and may fail cold start.
+  - ALL API endpoints MUST live under the `/api/*` path prefix (e.g. \
+`/api/items`, `/api/users/{{user_id}}`, `/api/search`). This is a hard \
+contract between backend and frontend: it separates API traffic from the \
+static mount at `/`, and lets edge routing (CloudFront behaviors, API \
+Gateway path-based routing) split frontend vs backend traffic by prefix \
+in production. NEVER expose routes at the root (e.g. `/items`, `/login`) — \
+they will collide with the static mount and break in deployment.
   - API routes MUST be registered BEFORE `app.mount("/", StaticFiles(...))`. \
 FastAPI matches in registration order — a mount at `/` swallows everything \
 after it.
@@ -613,10 +620,31 @@ backend uses no `DS_*` vars at all.
 JS, images, fonts, large data .js payloads) MUST also live under \
 `<artifact_path>/static/` — never at the artifact root, since the backend only \
 serves files from `static/`.
-  - API calls MUST use RELATIVE paths only (e.g. `fetch('/api/items')`, NOT \
-`fetch('http://localhost:PORT/api/items')` and NOT any hardcoded base URL). \
-The frontend is served by the same backend at `/`, so relative paths resolve to the \
-correct origin automatically — this keeps the app portable across ports and hosts.
+  - All backend endpoints MUST be called under the `/api/*` prefix (matches \
+the backend route convention from step 4). The frontend never calls bare \
+paths like `/items` — always `/api/items`.
+  - API base URL is supplied via a `<meta>` tag so the same HTML works \
+locally AND when deployed with frontend and backend on different origins \
+(e.g. CloudFront/S3 + API Gateway/Lambda). Include this line in `<head>`:
+    ```html
+    <meta name="api-base" content="">
+    ```
+    Empty `content` is the local default — fetch falls back to a relative \
+path and hits the same FastAPI process that serves the page. At deploy \
+time the publisher rewrites `content=""` to the real API root \
+(e.g. `content="https://abc123.execute-api.us-east-1.amazonaws.com"`).
+  - Read the meta tag once at startup and prepend it to every API call. \
+Use this exact pattern (or an equivalent helper) — do NOT scatter \
+`document.querySelector` calls across the codebase:
+    ```js
+    const API_BASE = document.querySelector('meta[name="api-base"]')?.content || "";
+    const api = (path) => `${{API_BASE}}${{path}}`;
+    // usage: fetch(api('/api/items'))
+    ```
+  - NEVER hardcode an absolute URL in the source — no \
+`fetch('http://localhost:PORT/...')`, no `fetch('https://api.example.com/...')`, \
+no `const API_BASE = 'http://...'`. The meta tag is the ONLY place the \
+base URL is configured.
 
 6. LAUNCH THE BACKEND: Call the `launch_backend` tool with the artifact's slug:
   - `launch_backend(slug=<slug>)` — the tool picks a free port, spawns \

@@ -19,9 +19,9 @@ Anton can be installed as a desktop application or as a command-line tool.
 
 ### Desktop App:
 
-- **macOS**: Click [here to download](https://mindsdb-anton.s3.us-east-2.amazonaws.com/mac/anton-latest.pkg) the Anton Desktop App for MacOS.
+- **macOS**: Click [here to download](https://downloads.mindsdb.com/anton/mac/anton-latest.pkg) the Anton Desktop App for MacOS.
 
-- **Windows**: Click [here to download](https://downloads.mindsdb.com/anton/windows/anton-2.0.2.exe)  the Anton Desktop App for Windows.
+- **Windows**: Click [here to download](https://downloads.mindsdb.com/anton/windows/anton-latest.exe) the Anton Desktop App for Windows.
  
 ### or - Command-Line App:
 
@@ -199,6 +199,21 @@ Or add it to your workspace config (`.anton/.env`):
 
 ```
 ANTON_ANALYTICS_ENABLED=false
+```
+
+---
+
+## Trace headers
+When the planning provider is openai-compatible Anton can attach `Langfuse-Session-Id`, `Langfuse-Tags`, and `Langfuse-Metadata` headers so the router can attribute traces. To enable the same headers against any other openai-compatible endpoint (e.g. a self-hosted Langfuse proxy in front of ollama or vLLM), set:
+
+```bash
+export ANTON_LANGFUSE_HEADERS=1
+```
+
+Or add it to your workspace config (`.anton/.env`):
+
+```
+ANTON_LANGFUSE_HEADERS=1
 ```
 
 ---

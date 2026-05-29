@@ -519,6 +519,7 @@ present at launch.
 
   ```python
   import argparse
+  import os
   from pathlib import Path
   from fastapi import FastAPI
   from fastapi.middleware.cors import CORSMiddleware
@@ -536,9 +537,23 @@ present at launch.
       allow_headers=["*"],
   )
 
+  # === Secrets ===
+  # Keys are the canonical DS_<ENGINE>_<NAME>__<FIELD> env-var names. Locally
+  # each value comes from os.environ (the data vault injected it into Anton's
+  # env, which `launch_backend` inherits). In the cloud, the shared runner
+  # overlays the decrypted values onto this dict before each request. Leave
+  # SECRETS empty if the backend uses none. READ a secret by key AT ITS POINT
+  # OF USE (inside the route) — never copy a SECRETS value into a module-level
+  # variable at import time.
+  SECRETS = {{
+      # "DS_POSTGRES_PROD_DB__PASSWORD": os.environ.get("DS_POSTGRES_PROD_DB__PASSWORD"),
+  }}
+
   # === API routes ===
   @app.get("/api/hello")
   async def hello():
+      # Example secret use (read at point of use, not at import):
+      #   pw = SECRETS["DS_POSTGRES_PROD_DB__PASSWORD"]
       return {{"hello": "world"}}
 
   # Static mount MUST come AFTER all API routes (mount at "/" catches every
@@ -548,8 +563,9 @@ present at launch.
   if STATIC_DIR.exists():
       app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
 
-  # AWS Lambda entry-point. lifespan="off" is REQUIRED — Lambda has no
-  # long-lived process to run FastAPI's startup/shutdown events on.
+  # CLOUD entry-point. lifespan="off" is REQUIRED — there is no 
+  # long-lived process for FastAPI startup/shutdown.
+  # (Locally, `uvicorn.run(app, ...)` below serves the app directly.)
   handler = Mangum(app, lifespan="off")
 
   if __name__ == "__main__":
@@ -561,11 +577,21 @@ present at launch.
   ```
 
   RULES (critical):
-  - Save the file as `<artifact_path>/backend.py` — the filename and the \
-`handler` attribute name are load-bearing (Lambda config points to \
-`backend.handler`). Do NOT rename either.
+  - Save the file as `<artifact_path>/backend.py` — the filename, the \
+`handler` attribute, and the `SECRETS` dict are load-bearing (the cloud \
+runner overlays secrets onto `backend.SECRETS` and invokes `backend.handler`). \
+Do NOT rename any of them.
   - Keep `Mangum(app, lifespan="off")`. Without `lifespan="off"` Mangum \
 warns and may fail cold start.
+  - SECRETS: expose `SECRETS` as a module-level dict, keyed by the canonical \
+`DS_<ENGINE>_<NAME>__<FIELD>` name, with each entry initialized from \
+`os.environ.get(...)` (the local default). The cloud runner overlays the \
+decrypted values onto this same dict before each request. Read a secret AT \
+ITS POINT OF USE — `SECRETS["DS_..."]` inside the route — and NEVER hoist it \
+into a module-level variable at import time: the import runs before the \
+overlay, so the cloud value would be missed. If a credential-backed resource \
+(DB pool, API client) is needed, build it LAZILY on first request, never at \
+module level.
   - ALL API endpoints MUST live under the `/api/*` path prefix (e.g. \
 `/api/items`, `/api/users/{{user_id}}`, `/api/search`). This is a hard \
 contract between backend and frontend: it separates API traffic from the \
@@ -675,17 +701,19 @@ to browser CORS/file:// restrictions.
 DEPLOYMENT NOTES:
 - Same `backend.py` runs in two modes:
   - LOCAL: `python backend.py --port=NNN` (used by `launch_backend`). \
-uvicorn serves the FastAPI app and the `static/` mount, frontend reachable at `/`.
-  - AWS LAMBDA: Lambda invokes `backend.handler` (Mangum-wrapped ASGI app) \
-per request. Statics are served by an external service (CloudFront/S3), so \
-the `StaticFiles` mount sits unused in Lambda — Lambda only sees `/api/*` \
-traffic via API Gateway / Function URL routing.
+uvicorn serves the FastAPI app and the `static/` mount, frontend reachable at `/`. \
+Secrets come from the `DS_*` env vars in `SECRETS`' defaults.
+  - CLOUD: a shared runner overlays the decrypted secrets onto `backend.SECRETS` \
+and invokes `backend.handler` (the Mangum ASGI app) per request. Statics are \
+served separately (the gateway reads `static/` from object storage), so the \
+`StaticFiles` mount sits unused there — the runner only sees `/api/*` traffic.
+- Secrets ride in the backend module's `SECRETS` dict, not `os.environ` — the \
+shared cloud runner injects them per request without polluting the process env.
 - The local backend process shuts down when the Anton CLI session ends (per MVP constraints).
-- For production deployment to Lambda, the user packages `backend.py` + \
-`requirements.txt` (and any data files) as a zip or container image, \
-configures `Handler = backend.handler`, and exposes it via API Gateway or \
-Function URL. `DS_*` env vars from `datasources` in `metadata.json` must be \
-set on the Lambda function.
+- `DS_*` credentials are resolved from the `datasources` declared in \
+`metadata.json`: locally the data vault injects them into the env; on publish \
+they are envelope-encrypted (Mind-Castle) and decrypted by the runner. Declare \
+every datasource the backend reads, or its secret will be missing in the cloud.
 
 PUBLISH OR SHARE:
 - Publishing is disabled for this MVP (per constraints), but preview is fully supported

@@ -122,7 +122,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
 
     Only fields present in the input are modified. Supports:
     - `primary`: entry-point file path (empty string to clear)
-    - `port`: backend port number (fullstack-stateful-app only)
+    - `port`: backend port number (fullstack apps only)
     - `datasources`: list of vault-connection slugs the backend reads from.
       `engine`, `name`, and `env_prefix` are derived from the vault.
     """

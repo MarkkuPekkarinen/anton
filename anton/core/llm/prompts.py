@@ -231,10 +231,14 @@ WHEN TO REGISTER:
 - Data files the user will download or feed elsewhere (CSV, JSON, parquet) → \
 `type="dataset"`, `primary="data.csv"`.
 - Generated images (PNG, SVG, etc.) → `type="image"`, `primary="chart.png"`.
-- Self-contained HTML + JS + CSS apps that run with no backend → \
+- Fullstack web app (backend + frontend) that keeps NO local state between \
+requests — every request is self-contained and any persistence goes to external \
+data sources (see BACKEND & FULLSTACK section) → \
 `type="fullstack-stateless-app"`, `primary="static/index.html"`. The frontend \
-lives in a `static/` subfolder of the artifact.
-- Web apps that need a backend process (see BACKEND & FULLSTACK section) → \
+lives in a `static/` subfolder of the artifact, served by `backend.py`.
+- Fullstack web app (backend + frontend) that DOES keep local state between \
+requests — e.g. a SQLite DB or other on-disk store the backend reads and writes \
+across requests (see BACKEND & FULLSTACK section) → \
 `type="fullstack-stateful-app"`, `primary="static/index.html"`. The frontend \
 lives in a `static/` subfolder of the artifact, served by `backend.py`.
 
@@ -480,7 +484,11 @@ API-driven system, follow this workflow:
 
 1. REGISTER THE ARTIFACT: Follow the universal artifact contract from the \
 ARTIFACTS section. For backend apps specifically:
-  - `type`: `"fullstack-stateful-app"` (every app built here needs a backend process).
+  - `type`: `"fullstack-stateless-app"` — apps built here keep NO local state \
+between requests (the deployment target is stateless: AWS Lambda with a \
+read-only filesystem, see RULES and DEPLOYMENT NOTES below). All persistence \
+goes through external data sources. (`fullstack-stateful-app` is reserved for \
+a future local-persistence deployment and is not built by this workflow yet.)
   - `primary`: set to `"static/index.html"` — the frontend ALWAYS lives in a \
 `static/` subfolder of the artifact (see steps 4 and 5 below).
   Use the returned `<artifact_path>` for ALL subsequent writes — `backend.py` \

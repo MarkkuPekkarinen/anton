@@ -623,8 +623,13 @@ sync blocking I/O inside an async app stalls the event loop.
 (`USERS = {{}}`, `SESSIONS = []`). In Lambda these globals may or may not \
 survive between invocations — never rely on them. All persistence goes \
 through external data sources.
-  - FILESYSTEM: assume read-only. The only writable path in Lambda is \
-`/tmp` (ephemeral, 512 MB). Do NOT write to `<artifact_path>` at runtime.
+  - FILESYSTEM: do NOT persist files at runtime. Treat the filesystem as \
+read-only and non-persistent — anything written is lost between requests and \
+may fail outright depending on the host (Linux, Windows, or a read-only cloud \
+sandbox). NEVER write to `<artifact_path>` at runtime, and never rely on a \
+file surviving to a later request. All persistence goes through external data \
+sources. If a request genuinely needs scratch space, use the OS temp dir via \
+`tempfile` and treat it as ephemeral (gone the moment the request ends).
   - LOGGING: `print()` and `logging.getLogger(__name__).info(...)` both go \
 to CloudWatch in Lambda and to `backend.log` locally — no extra setup needed.
   - REQUIREMENTS: always save a `<artifact_path>/requirements.txt` with at \
@@ -652,7 +657,10 @@ backend uses no `DS_*` vars at all.
 5. BUILD FRONTEND (if needed): In a separate scratchpad:
   - Build a single-file HTML dashboard or web interface
   - Include all CSS and JS inlined (no external file references)
-  - Follow the VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT guidelines
+  - Apply the HTML build guidance from the `VISUALIZATIONS` section above \
+(single self-contained HTML file; Apache ECharts via CDN for charts; dark \
+theme #0d1117; responsive layout with a viewport meta tag). If that section \
+is not present in this prompt, follow these same defaults regardless.
   - Save the entry-point to `<artifact_path>/static/index.html` (create the \
 `static/` subfolder if needed). ANY additional frontend assets (separate CSS, \
 JS, images, fonts, large data .js payloads) MUST also live under \
@@ -722,13 +730,8 @@ served separately (the gateway reads `static/` from object storage), so the \
 - Secrets ride in the backend module's `SECRETS` dict, not `os.environ` — the \
 shared cloud runner injects them per request without polluting the process env.
 - The local backend process shuts down when the Anton CLI session ends (per MVP constraints).
-- `DS_*` credentials are resolved from the `datasources` declared in \
-`metadata.json`: locally the data vault injects them into the env; on publish \
-they are envelope-encrypted (Mind-Castle) and decrypted by the runner. Declare \
-every datasource the backend reads, or its secret will be missing in the cloud.
 
 PUBLISH OR SHARE:
-- Publishing is disabled for this MVP (per constraints), but preview is fully supported
 - After building, offer to preview the frontend by directing the user to the \
 URL returned by `launch_backend`
 - The backend must be running for the frontend to work

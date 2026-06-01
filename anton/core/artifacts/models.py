@@ -2,13 +2,18 @@
 
 Schema split:
   Server-managed (deterministic):
-    id, slug, createdAt, updatedAt, files[], provenance[]
-  Agent-supplied (validated at create_artifact time):
-    name, description, type
+    schemaVersion, id, slug, createdAt, updatedAt, files[], provenance[]
+  Agent-supplied (validated at create_artifact / update_artifact time):
+    name, description, type, primary, port, datasources[]
 
 The `Artifact` model is the on-disk source of truth — the README
 that sits alongside it is rendered FROM the metadata, not the other
 way around.
+
+`schemaVersion` tags the on-disk layout so future format changes can
+be migrated deterministically. Bump `METADATA_SCHEMA_VERSION` whenever
+the shape changes incompatibly; records written before this field
+existed load as version 1 (the field default).
 """
 
 from __future__ import annotations
@@ -16,6 +21,11 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, Field
+
+
+# On-disk metadata.json layout version. Bump on incompatible changes
+# and add a migration keyed off the loaded `schemaVersion`.
+METADATA_SCHEMA_VERSION = 1
 
 
 # Closed enum of artifact shapes. The renderer uses this to pick
@@ -107,6 +117,10 @@ class Artifact(BaseModel):
     """
 
     # ── Server-managed identity / timestamps ─────────────────────
+    # On-disk layout version. Records predating this field load as 1
+    # (the default); `create()` stamps the current
+    # `METADATA_SCHEMA_VERSION` on fresh artifacts.
+    schemaVersion: int = 1
     id: str  # short hex (uuid4().hex[:8]) — stable across folder renames
     slug: str  # matches folder name; sanitized from `name` with collision suffix
     createdAt: str

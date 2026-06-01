@@ -140,7 +140,10 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
     if "primary" in tc_input:
         kwargs["primary"] = tc_input["primary"]
     if "port" in tc_input:
-        kwargs["port"] = tc_input["port"]
+        try:
+            kwargs["port"] = int(tc_input["port"]) if tc_input["port"] is not None else None
+        except (TypeError, ValueError):
+            return "Error: `port` must be a number."
 
     if "datasources" in tc_input:
         from anton.core.artifacts.models import DatasourceRef

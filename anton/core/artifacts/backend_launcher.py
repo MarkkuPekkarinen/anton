@@ -181,7 +181,7 @@ async def launch_artifact_backend(
 
     # Readiness — try HTTP first, fall back to TCP-connect. HTTP 4xx
     # still counts as "process is alive and answering" → ready.
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     deadline = loop.time() + health_timeout
     ready = False
     last_err: str | None = None
@@ -212,9 +212,14 @@ async def launch_artifact_backend(
         except Exception as exc:
             last_err = str(exc)
             try:
-                with socket.create_connection(("127.0.0.1", port), timeout=0.5):
-                    ready = True
-                    break
+                await loop.run_in_executor(
+                    None,
+                    lambda: socket.create_connection(
+                        ("127.0.0.1", port), timeout=0.5
+                    ).close(),
+                )
+                ready = True
+                break
             except OSError:
                 await asyncio.sleep(0.2)
 

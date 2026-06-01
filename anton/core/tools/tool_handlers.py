@@ -182,10 +182,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         "slug": artifact.slug,
         "primary": artifact.primary,
         "port": artifact.port,
-        "datasources": [
-            {"slug": d.slug, "engine": d.engine, "name": d.name, "env_prefix": d.env_prefix}
-            for d in artifact.datasources
-        ],
+        "datasources": [d.slug for d in artifact.datasources],
     }, indent=2)
 
 

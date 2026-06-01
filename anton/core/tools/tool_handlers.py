@@ -144,7 +144,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
 
     if "datasources" in tc_input:
         from anton.core.artifacts.models import DatasourceRef
-        from anton.core.datasources.data_vault import LocalDataVault, _slug_env_prefix
+        from anton.core.datasources.data_vault import LocalDataVault
 
         raw_list = tc_input.get("datasources") or []
         if not isinstance(raw_list, list):
@@ -166,12 +166,7 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
                 unknown.append(ref_slug)
                 continue
             engine, name = known[ref_slug]
-            refs.append(DatasourceRef(
-                slug=ref_slug,
-                engine=engine,
-                name=name,
-                env_prefix=_slug_env_prefix(engine, name),
-            ))
+            refs.append(DatasourceRef(engine=engine, name=name))
         if unknown:
             return (
                 f"Error: unknown datasource slug(s): {', '.join(unknown)}. "
@@ -187,7 +182,10 @@ async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict
         "slug": artifact.slug,
         "primary": artifact.primary,
         "port": artifact.port,
-        "datasources": [d.model_dump() for d in artifact.datasources],
+        "datasources": [
+            {"slug": d.slug, "engine": d.engine, "name": d.name, "env_prefix": d.env_prefix}
+            for d in artifact.datasources
+        ],
     }, indent=2)
 
 

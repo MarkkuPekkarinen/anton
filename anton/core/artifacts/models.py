@@ -84,16 +84,27 @@ class DatasourceRef(BaseModel):
 
     Declared by the agent at backend-build time so the metadata can
     record which vault connections a fullstack artifact depends on.
-    Values are derived from the connection slug — `engine` and `name`
-    match a `~/.anton/data_vault/<engine>-<name>` record; `env_prefix`
-    is the `DS_<ENGINE>_<NAME>` token used to namespace the field-level
-    env vars handed to the backend subprocess.
+    `engine` and `name` match a `~/.anton/data_vault/<engine>-<name>`
+    record and are the only stored fields. `slug` and `env_prefix`
+    are derived on access (not persisted): `slug` is `<engine>-<name>`;
+    `env_prefix` is the `DS_<ENGINE>_<NAME>` token used to namespace the
+    field-level env vars handed to the backend subprocess.
     """
 
-    slug: str  # e.g. "postgres-prod_db"
     engine: str  # e.g. "postgres"
     name: str  # e.g. "prod_db"
-    env_prefix: str  # e.g. "DS_POSTGRES_PROD_DB"
+
+    @property
+    def slug(self) -> str:
+        """`<engine>-<name>` — the vault connection identifier."""
+        return f"{self.engine}-{self.name}"
+
+    @property
+    def env_prefix(self) -> str:
+        """`DS_<ENGINE>_<NAME>` env-var namespace (special chars sanitized)."""
+        from anton.core.datasources.data_vault import _slug_env_prefix
+
+        return _slug_env_prefix(self.engine, self.name)
 
 
 class ProvenanceEntry(BaseModel):

@@ -667,7 +667,10 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            if (
+            if exc.status_code == 401:
+                msg = "Invalid API key — check your OpenAI API key configuration."
+                raise ConnectionError(msg) from exc
+            elif (
                 exc.status_code == 429
                 and isinstance(exc.body, dict)
                 and exc.body.get("detail")
@@ -944,7 +947,10 @@ class OpenAIProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except openai.APIStatusError as exc:
-            if (
+            if exc.status_code == 401:
+                msg = "Invalid API key — check your OpenAI API key configuration."
+                raise ConnectionError(msg) from exc
+            elif (
                 exc.status_code == 429
                 and isinstance(exc.body, dict)
                 and exc.body.get("detail")

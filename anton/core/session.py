@@ -1484,8 +1484,8 @@ class ChatSession:
                                 if isinstance(event, StreamTextDelta):
                                     assistant_text_parts.append(event.text)
                                 yield event
-                        except Exception:
-                            fallback = f"An unexpected error occurred: {_agent_exc}. Please try again or rephrase your request."
+                        except Exception as e:
+                            fallback = f"An unexpected error occurred: {e}. Please try again or rephrase your request."
                             assistant_text_parts.append(fallback)
                             yield StreamTextDelta(text=fallback)
                         break

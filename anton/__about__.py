@@ -1,6 +1,6 @@
 __title__ = "anton-agent"
 __package_name__ = "anton"
-__version__ = "0.1.1"
+__version__ = "2.26.5.29.3"
 __description__ = "Autonomous coding copilot"
 __email__ = "hello@mindsdb.com"
 __author__ = "MindsDB Inc"

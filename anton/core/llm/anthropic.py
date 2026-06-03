@@ -107,7 +107,10 @@ class AnthropicProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except anthropic.APIStatusError as exc:
-            if (
+            if exc.status_code == 401:
+                msg = "Invalid API key — check your ANTHROPIC_API_KEY environment variable."
+                raise ConnectionError(msg) from exc
+            elif (
                 exc.status_code == 429
                 and isinstance(exc.body, dict)
                 and exc.body.get("detail")
@@ -249,7 +252,10 @@ class AnthropicProvider(LLMProvider):
                 raise ContextOverflowError(str(exc)) from exc
             raise
         except anthropic.APIStatusError as exc:
-            if (
+            if exc.status_code == 401:
+                msg = "Invalid API key — check your ANTHROPIC_API_KEY environment variable."
+                raise ConnectionError(msg) from exc
+            elif (
                 exc.status_code == 429
                 and isinstance(exc.body, dict)
                 and exc.body.get("detail")

@@ -7,9 +7,9 @@ const config: Config = {
   tagline: 'The open-source AI coworker',
   favicon: 'img/logo.svg',
 
-  // Localhost only for v1 — no production URL committed yet.
-  url: 'http://localhost:3000',
-  baseUrl: '/',
+  // GitHub Pages project site: https://mindsdb.github.io/anton/
+  url: 'https://mindsdb.github.io',
+  baseUrl: '/anton/',
 
   organizationName: 'mindsdb',
   projectName: 'anton',

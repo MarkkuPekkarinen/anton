@@ -5,6 +5,8 @@ slug: /
 hide_table_of_contents: true
 ---
 
+import Link from '@docusaurus/Link';
+
 <div className="anton-hero">
 
 # Meet Anton
@@ -15,12 +17,12 @@ and data, remember lessons, and improve its workflows over time.
 </p>
 
 <div className="anton-hero-buttons">
-  <a className="button button--primary button--lg" href="/start/quickstart">
+  <Link className="button button--primary button--lg" to="/start/quickstart">
     Quickstart — 5 minutes
-  </a>
-  <a className="button button--secondary button--lg" href="/use/desktop">
+  </Link>
+  <Link className="button button--secondary button--lg" to="/use/desktop">
     Download Desktop
-  </a>
+  </Link>
   <a className="button button--secondary button--lg" href="https://github.com/mindsdb/anton">
     View on GitHub
   </a>
@@ -59,7 +61,7 @@ remembers what it learned, and improves.
 - [Reference](/reference/cli-commands) — every CLI and slash command.
 
 <p className="anton-contributor-note">
-Curious how Anton thinks? Read the <a href="/developer/architecture">architecture
-overview</a> — the contributor guide covers the brain-inspired memory systems,
+Curious how Anton thinks? Read the <Link to="/developer/architecture">architecture
+overview</Link> — the contributor guide covers the brain-inspired memory systems,
 the scratchpad runtime, and how to add tools and data sources.
 </p>

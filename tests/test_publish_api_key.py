@@ -16,7 +16,8 @@ import pytest
 def _make_settings(tmp_path: Path, api_key: str | None = None) -> MagicMock:
     settings = MagicMock()
     settings.minds_api_key = api_key
-    settings.workspace_path = tmp_path
+    settings.workspace_path = str(tmp_path)
+    settings.artifacts_dir = str(tmp_path / "artifacts")
     settings.publish_url = "https://4nton.ai"
     settings.minds_ssl_verify = True
     return settings
@@ -35,9 +36,9 @@ def _make_console() -> MagicMock:
 
 
 def _make_html_file(tmp_path: Path) -> Path:
-    output_dir = tmp_path / ".anton" / "output"
-    output_dir.mkdir(parents=True)
-    html = output_dir / "report.html"
+    artifacts_dir = tmp_path / "artifacts"
+    artifacts_dir.mkdir(parents=True)
+    html = artifacts_dir / "report.html"
     html.write_text("<html><title>Test</title></html>")
     return html
 

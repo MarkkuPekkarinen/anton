@@ -117,13 +117,14 @@ async def handle_create_artifact(session: "ChatSession", tc_input: dict) -> str:
     }, indent=2)
 
 
-async def handle_set_artifact_primary(session: "ChatSession", tc_input: dict) -> str:
-    """Update or clear the primary-file pointer on an existing artifact.
+async def handle_update_artifact_metadata(session: "ChatSession", tc_input: dict) -> str:
+    """Update mutable metadata fields on an existing artifact.
 
-    The agent calls this when it created an artifact without a
-    primary and now knows what it should be, or when the primary
-    file's name changed. Pass `primary: null` to clear and revert
-    the renderer to its heuristic.
+    Only fields present in the input are modified. Supports:
+    - `primary`: entry-point file path (empty string to clear)
+    - `port`: backend port number (fullstack apps only)
+    - `datasources`: list of vault-connection slugs the backend reads from.
+      `engine`, `name`, and `env_prefix` are derived from the vault.
     """
     import json
 
@@ -134,15 +135,119 @@ async def handle_set_artifact_primary(session: "ChatSession", tc_input: dict) ->
     slug = (tc_input.get("slug") or "").strip()
     if not slug:
         return "Error: `slug` is required."
-    raw = tc_input.get("primary")
-    primary = raw if isinstance(raw, str) else None
-    artifact = store.set_primary(slug, primary)
+
+    kwargs: dict = {}
+    if "primary" in tc_input:
+        kwargs["primary"] = tc_input["primary"]
+    if "port" in tc_input:
+        try:
+            kwargs["port"] = int(tc_input["port"]) if tc_input["port"] is not None else None
+        except (TypeError, ValueError):
+            return "Error: `port` must be a number."
+
+    if "datasources" in tc_input:
+        from anton.core.artifacts.models import DatasourceRef
+        from anton.core.datasources.data_vault import LocalDataVault
+
+        raw_list = tc_input.get("datasources") or []
+        if not isinstance(raw_list, list):
+            return "Error: `datasources` must be a list of slug strings."
+
+        vault = session._data_vault or LocalDataVault()
+        known = {f"{c['engine']}-{c['name']}": (c["engine"], c["name"])
+                 for c in vault.list_connections()}
+
+        refs: list[DatasourceRef] = []
+        unknown: list[str] = []
+        for item in raw_list:
+            if not isinstance(item, str):
+                return "Error: each entry in `datasources` must be a slug string."
+            ref_slug = item.strip()
+            if not ref_slug:
+                continue
+            if ref_slug not in known:
+                unknown.append(ref_slug)
+                continue
+            engine, name = known[ref_slug]
+            refs.append(DatasourceRef(engine=engine, name=name))
+        if unknown:
+            return (
+                f"Error: unknown datasource slug(s): {', '.join(unknown)}. "
+                f"Each slug must match an existing vault connection "
+                f"(format: `<engine>-<name>`)."
+            )
+        kwargs["datasources"] = refs
+
+    artifact = store.update(slug, **kwargs)
     if artifact is None:
         return f"Error: no artifact found for slug `{slug}`."
     return json.dumps({
         "slug": artifact.slug,
         "primary": artifact.primary,
+        "port": artifact.port,
+        "datasources": [d.slug for d in artifact.datasources],
     }, indent=2)
+
+
+async def handle_launch_backend(session: "ChatSession", tc_input: dict) -> str:
+    """Launch the artifact's backend script as a standalone subprocess.
+
+    Thin wrapper over `launch_artifact_backend`: validates tool-call shape,
+    resolves the artifact folder via the session's ArtifactStore, hands
+    the session's scratchpad pool + tracked-backends dict to the helper,
+    then persists the discovered port into metadata.json.
+
+    The actual subprocess lifecycle (free-port discovery, dependency
+    install, health probe, idempotent reap) lives in
+    `anton.core.artifacts.backend_launcher.launch_artifact_backend` so
+    other entry points (e.g. cowork's auto-relaunch) can reuse it.
+    """
+    import json
+
+    from anton.core.artifacts.backend_launcher import launch_artifact_backend
+
+    store = _artifact_store(session)
+    if store is None:
+        return "Artifact store unavailable (no workspace bound to this session)."
+
+    slug = (tc_input.get("slug") or "").strip()
+    if not slug:
+        return "Error: `slug` is required."
+    artifact = store.open(slug)
+    if artifact is None:
+        return f"Error: no artifact found for slug `{slug}`."
+
+    rel_path = (tc_input.get("path") or "backend.py").strip()
+    extra_args = tc_input.get("extra_args") or []
+    health_path = tc_input.get("health_path") or "/"
+    try:
+        health_timeout = float(tc_input.get("health_timeout", 10))
+    except (TypeError, ValueError):
+        return "Error: `health_timeout` must be a number."
+
+    tracked = getattr(session, "_tracked_backends", None)
+    if tracked is None:
+        tracked = {}
+        session._tracked_backends = tracked
+
+    result = await launch_artifact_backend(
+        slug=slug,
+        artifact_folder=store.folder_for(slug),
+        scratchpad_pool=session._scratchpads,
+        tracked_backends=tracked,
+        path=rel_path,
+        extra_args=extra_args,
+        health_path=health_path,
+        health_timeout=health_timeout,
+    )
+    if isinstance(result, str):
+        return result
+
+    store.update(slug, port=result["port"])
+    return json.dumps(
+        {k: v for k, v in result.items() if k != "proc"},
+        indent=2,
+    )
 
 
 async def handle_list_artifacts(session: "ChatSession", tc_input: dict) -> str:

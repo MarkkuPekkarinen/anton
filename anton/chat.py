@@ -327,6 +327,22 @@ async def _handle_connect(
     )
 
 
+def _is_publishable_html(html_path: Path, output_dir: Path) -> bool:
+    """Check if an HTML file is publishable.
+
+    Returns False if:
+    - HTML is in a subdirectory that contains .py files (fullstack app)
+
+    Returns True if:
+    - HTML is in the root of output/
+    - HTML is in a subdirectory without any .py files
+    """
+    if html_path.parent == output_dir:
+        return True
+
+    parent_dir = html_path.parent
+    has_py_files = any(parent_dir.glob("*.py"))
+    return not has_py_files
 
 
 def _extract_html_title(path, re_module) -> str:
@@ -447,8 +463,11 @@ async def _handle_publish(
         _W(_P.home()).set_secret("ANTON_MINDS_API_KEY", api_key)
         console.print()
 
-    # 2. Find the HTML file to publish
+    # 2. Find the HTML file or fullstack artifact to publish
     import re
+
+    from anton.core.artifacts import ArtifactStore
+    from anton.publisher import FULLSTACK_ARTIFACT_TYPES
 
     # Search the new artifacts/<slug>/ tree (recursive — each artifact
     # owns its own subfolder). The legacy `.anton/output/` flat
@@ -456,18 +475,102 @@ async def _handle_publish(
     # proper artifact subfolder if they still want them publishable.
     artifacts_root = Path(settings.artifacts_dir)
     publish_index_dir = artifacts_root  # `.published.json` lives at the root
+    store = ArtifactStore(artifacts_root)
+
+    def _make_candidate(path: Path) -> tuple[str, Path, str, str] | None:
+        """Resolve a user-supplied path to (label, target, kind, file_key).
+
+        Returns None when the path isn't publishable. `kind` is "html" or
+        "fullstack"; `file_key` is the entry used in `.published.json`.
+        """
+        if path.is_dir():
+            slug = path.name
+            artifact = store.open(slug)
+            if artifact and artifact.type in FULLSTACK_ARTIFACT_TYPES:
+                return (artifact.name or slug, path, "fullstack", f"{slug}/")
+            return None
+        if path.is_file() and path.suffix.lower() in {".html", ".htm"}:
+            # If the file lives inside a fullstack artifact (e.g.
+            # `my-app/static/index.html`), publish the whole artifact folder
+            # rather than the orphaned frontend — the `.py`-based heuristic in
+            # `_is_publishable_html` can't see `backend.py` one level up.
+            try:
+                rel = path.relative_to(artifacts_root)
+                owner_slug = rel.parts[0] if len(rel.parts) > 1 else None
+            except ValueError:
+                owner_slug = None
+            if owner_slug:
+                owner = store.open(owner_slug)
+                if owner and owner.type in FULLSTACK_ARTIFACT_TYPES:
+                    folder = artifacts_root / owner_slug
+                    return (owner.name or owner_slug, folder, "fullstack", f"{owner_slug}/")
+            if not _is_publishable_html(path, artifacts_root):
+                return None
+            title = _extract_html_title(path, re)
+            try:
+                rel_key = path.relative_to(artifacts_root).as_posix()
+            except ValueError:
+                rel_key = path.name
+            return (title or path.name, path, "html", rel_key)
+        return None
 
     if file_arg:
-        target = Path(file_arg)
-        if not target.is_absolute():
-            target = Path(settings.workspace_path) / file_arg
+        target_path = Path(file_arg)
+        if not target_path.is_absolute():
+            # Resolve relative to artifacts_root first (so `/publish my-app` works
+            # when there's an artifact slug), then fall back to workspace_path.
+            candidate_root = artifacts_root / file_arg
+            if candidate_root.exists():
+                target_path = candidate_root
+            else:
+                target_path = Path(settings.workspace_path) / file_arg
+
+        candidate = _make_candidate(target_path)
+        if candidate is None:
+            console.print(f"  [anton.warning]Not publishable: {target_path}[/]")
+            console.print()
+            return
+        label, target, kind, file_key = candidate
     else:
-        # Recursively list HTML files under any artifact, sorted by mtime.
-        html_files = sorted(
-            artifacts_root.rglob("*.html"), key=lambda f: f.stat().st_mtime, reverse=True
-        ) if artifacts_root.is_dir() else []
-        if not html_files:
-            console.print(f"  [anton.warning]No HTML files found under {artifacts_root}/[/]")
+        candidates: list[tuple[str, Path, str, str]] = []
+
+        if artifacts_root.is_dir():
+            # Fullstack artifacts — one entry per artifact folder. Collect slugs
+            # first so the HTML scan below can skip files inside these directories.
+            fullstack_slugs: set[str] = set()
+            for child in artifacts_root.iterdir():
+                if not child.is_dir():
+                    continue
+                artifact = store.open(child.name)
+                if artifact and artifact.type in FULLSTACK_ARTIFACT_TYPES:
+                    fullstack_slugs.add(child.name)
+                    candidates.append(
+                        (artifact.name or child.name, child, "fullstack", f"{child.name}/")
+                    )
+
+            # HTML reports — recursive scan, mtime-sorted.
+            # Skip files that live inside a fullstack artifact directory (e.g.
+            # static/index.html) — those are already represented by the entry above.
+            for f in artifacts_root.rglob("*.html"):
+                try:
+                    rel = f.relative_to(artifacts_root)
+                    if rel.parts[0] in fullstack_slugs:
+                        continue
+                except ValueError:
+                    pass
+                if not _is_publishable_html(f, artifacts_root):
+                    continue
+                title = _extract_html_title(f, re)
+                rel_key = f.relative_to(artifacts_root).as_posix()
+                candidates.append((title or f.name, f, "html", rel_key))
+
+        candidates.sort(
+            key=lambda c: c[1].stat().st_mtime if c[1].exists() else 0,
+            reverse=True,
+        )
+
+        if not candidates:
+            console.print(f"  [anton.warning]Nothing publishable under {artifacts_root}/[/]")
             console.print()
             return
 
@@ -475,18 +578,21 @@ async def _handle_publish(
         offset = 0
 
         while True:
-            page = html_files[offset:offset + PAGE_SIZE]
-            has_more = offset + PAGE_SIZE < len(html_files)
+            page = candidates[offset:offset + PAGE_SIZE]
+            has_more = offset + PAGE_SIZE < len(candidates)
 
             console.print("  [anton.cyan]Available reports:[/]")
             console.print()
-            for i, f in enumerate(page, offset + 1):
-                title = _extract_html_title(f, re)
-                label = title or f.name
-                console.print(f"  [bold]{i}[/]  {label}  [anton.muted]{f.name}[/]")
+            for i, (lbl, path, kind, _key) in enumerate(page, offset + 1):
+                try:
+                    rel_path = path.relative_to(artifacts_root).as_posix()
+                except ValueError:
+                    rel_path = path.name
+                tag = "  [anton.muted][fullstack][/]" if kind == "fullstack" else ""
+                console.print(f"  [bold]{i}[/]  {lbl}{tag}  [anton.muted]{rel_path}[/]")
 
             if has_more:
-                console.print(f"\n  [anton.muted]m  Show more ({len(html_files) - offset - PAGE_SIZE} remaining)[/]")
+                console.print(f"\n  [anton.muted]m  Show more ({len(candidates) - offset - PAGE_SIZE} remaining)[/]")
 
             console.print()
             choice = await prompt_or_cancel("  Select", default="1")
@@ -501,9 +607,9 @@ async def _handle_publish(
 
             try:
                 idx = int(choice) - 1
-                if idx < 0 or idx >= len(html_files):
+                if idx < 0 or idx >= len(candidates):
                     raise ValueError
-                target = html_files[idx]
+                label, target, kind, file_key = candidates[idx]
                 break
             except (ValueError, IndexError):
                 console.print("  [anton.warning]Invalid choice.[/]")
@@ -511,11 +617,19 @@ async def _handle_publish(
                 return
 
     if not target.exists():
-        console.print(f"  [anton.warning]File not found: {target}[/]")
+        console.print(f"  [anton.warning]Path not found: {target}[/]")
         console.print()
         return
 
-    # 3. Check if this file was previously published
+    # HTML safety check — fullstack targets are pre-validated via metadata.
+    if kind == "html" and not _is_publishable_html(target, artifacts_root):
+        console.print("  [anton.error]Cannot publish this HTML file:[/]")
+        console.print("  It is in a directory with Python files (fullstack application).")
+        console.print("  Only standalone HTML reports can be published.")
+        console.print()
+        return
+
+    # 3. Check if this artifact was previously published
     published_json = publish_index_dir / ".published.json"
     published_map = {}
     try:
@@ -525,7 +639,6 @@ async def _handle_publish(
         pass
 
     report_id = None
-    file_key = target.name
     prev = published_map.get(file_key)
 
     if prev and prev.get("report_id"):
@@ -1141,7 +1254,6 @@ async def _chat_loop(
     # Build runtime context so the LLM knows what it's running on
     runtime_context = build_runtime_context(settings)
 
-    artifacts_path = f"{settings.artifacts_dir.rstrip('/')}/"
     from anton.chat_session import get_runtime_factory
 
     session = ChatSession(ChatSessionConfig(
@@ -1153,21 +1265,13 @@ async def _chat_loop(
         episodic=episodic,
         system_prompt_context=SystemPromptContext(
             runtime_context=runtime_context,
-            # See `chat_session.create_session` for the full version
-            # of this prompt fragment — both call sites use the same
-            # artifact-flow guidance.
-            output_context=(
-                f"User-facing artifacts live under `{artifacts_path}`. "
-                "Before producing one, call `create_artifact(name, description, type)`; "
-                "the tool returns the absolute folder path you should write into. "
-                "To modify an existing artifact, use `list_artifacts` then `open_artifact(slug)`."
-            ),
         ),
         workspace=workspace,
         console=console,
         history_store=history_store,
         session_id=current_session_id,
         proactive_dashboards=settings.proactive_dashboards,
+        output_dir=settings.artifacts_dir,
         tools=[CONNECT_DATASOURCE_TOOL, PUBLISH_TOOL],
         web_search_enabled=settings.web_search_enabled,
         web_fetch_enabled=settings.web_fetch_enabled,

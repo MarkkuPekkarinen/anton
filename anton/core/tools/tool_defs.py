@@ -1,12 +1,13 @@
 from anton.core.tools.tool_handlers import (
     handle_create_artifact,
+    handle_launch_backend,
     handle_list_artifacts,
     handle_memorize,
     handle_open_artifact,
     handle_read_image,
     handle_recall,
     handle_scratchpad,
-    handle_set_artifact_primary,
+    handle_update_artifact_metadata,
 )
 
 from dataclasses import dataclass
@@ -161,14 +162,18 @@ CREATE_ARTIFACT_TOOL = ToolDef(
         "- dataset: data files (CSV, JSON, parquet) the user downloads or feeds elsewhere\n"
         "- image: a generated image (PNG, SVG, etc.)\n"
         "- mixed: multi-modal output that doesn't fit the above\n"
-        "- fullstack-stateless-app: HTML + JS + CSS that runs without a server\n"
-        "- fullstack-stateful-app: needs a backend process to serve\n\n"
+        "- fullstack-stateless-app: fullstack web app (backend + frontend) that keeps "
+        "no local state between requests; all persistence goes to external data sources. "
+        "DEFAULT for fullstack apps\n"
+        "- fullstack-stateful-app: fullstack web app (backend + frontend) that keeps "
+        "local state between requests (e.g. an on-disk SQLite DB). Use ONLY when that "
+        "state truly cannot live in an external data source; prefer stateless when in doubt\n\n"
         "Pass `primary` (optional) when you already know the entry-point "
         "filename you'll write — e.g. `\"dashboard.html\"` for an html-app, "
-        "`\"index.html\"` for a fullstack app, `\"report.pdf\"` for a "
+        "`\"static/index.html\"` for a fullstack app, `\"report.pdf\"` for a "
         "document. The renderer uses it to decide what to open by default. "
         "Skip when you don't know yet — the renderer falls back to a "
-        "heuristic, and you can set it later via `set_artifact_primary`.\n\n"
+        "heuristic, and you can set it later via `update_artifact`.\n\n"
         "To MODIFY an existing artifact instead of creating a new one, call "
         "`list_artifacts` first to find it, then `open_artifact(slug)` to get "
         "the path."
@@ -207,15 +212,24 @@ CREATE_ARTIFACT_TOOL = ToolDef(
 )
 
 
-SET_ARTIFACT_PRIMARY_TOOL = ToolDef(
-    name="set_artifact_primary",
+UPDATE_ARTIFACT_METADATA_TOOL = ToolDef(
+    name="update_artifact",
     description=(
-        "Update the primary-file pointer on an existing artifact. Call this "
-        "when you created the artifact without a `primary` and now know what "
-        "it should be, or when the entry-point file's name changed. Pass an "
-        "empty string or omit `primary` to clear (the renderer reverts to "
-        "its heuristic — `index.html` → newest `.html` → newest non-"
-        "housekeeping file)."
+        "Update mutable fields on an existing artifact. Pass only the fields you want to change.\n\n"
+        "- `primary`: relative path of the entry-point file (e.g. \"index.html\"). "
+        "Pass empty string to clear (renderer reverts to heuristic: "
+        "`index.html` → newest `.html` → newest non-housekeeping file).\n"
+        "- `port`: port the backend process is listening on (fullstack apps only). "
+        "Normally written automatically by `launch_backend` — set manually only "
+        "if you started the server some other way.\n"
+        "- `datasources`: list of vault-connection slugs the artifact's backend "
+        "reads from (e.g. `[\"postgres-prod_db\", \"hubspot-main\"]`). REQUIRED "
+        "for fullstack apps whose `backend.py` references any "
+        "`DS_<ENGINE>_<NAME>__<FIELD>` env var — declare it right after writing "
+        "`backend.py` so metadata.json "
+        "captures which connections the deployable depends on. Slugs must match "
+        "existing vault connections (see `Connected Data Sources` in the system "
+        "prompt). Pass `[]` to clear."
     ),
     input_schema={
         "type": "object",
@@ -226,12 +240,28 @@ SET_ARTIFACT_PRIMARY_TOOL = ToolDef(
             },
             "primary": {
                 "type": "string",
-                "description": "Relative path of the new entry-point file. Empty string to clear.",
+                "description": "Relative path of the entry-point file. Empty string to clear.",
+            },
+            "port": {
+                "type": "integer",
+                "description": "Port number the backend process is listening on.",
+            },
+            "datasources": {
+                "type": "array",
+                "description": (
+                    "Vault-connection slugs the backend reads from. Replaces "
+                    "the existing list — pass the full set every time. Use "
+                    "`[]` to clear."
+                ),
+                "items": {
+                    "type": "string",
+                    "description": "Connection slug, e.g. \"postgres-prod_db\".",
+                },
             },
         },
         "required": ["slug"],
     },
-    handler=handle_set_artifact_primary,
+    handler=handle_update_artifact_metadata,
 )
 
 
@@ -273,6 +303,62 @@ OPEN_ARTIFACT_TOOL = ToolDef(
         "required": ["slug"],
     },
     handler=handle_open_artifact,
+)
+
+
+LAUNCH_BACKEND_TOOL = ToolDef(
+    name="launch_backend",
+    description=(
+        "Start an artifact's backend script as a standalone subprocess. "
+        "Picks a free TCP port, runs the script with `--port <port>` "
+        "(plus any `extra_args`), waits until the server is reachable, "
+        "records the port in the artifact's `metadata.json`, and returns "
+        "`{slug, port, pid, url, log_path}` as JSON.\n\n"
+        "The spawned process inherits Anton's environment, including the "
+        "`DS_<ENGINE>_<NAME>__<FIELD>` variables of connected data sources.\n\n"
+        "Runs in a scratchpad named exactly `<slug>` (created on first call). "
+        "If `<artifact_folder>/requirements.txt` exists, its package lines are "
+        "installed into that scratchpad's venv before spawn — install output "
+        "appended to `backend.log`, install failures abort the launch and are "
+        "returned as an error string. Only simple lines are supported "
+        "(`pkg` / `pkg==1.2`); blank lines, `#` comments, and `-`-prefixed "
+        "flags (`-r`, `-e`, `--index-url`) are ignored.\n\n"
+        "Idempotent: a second call with the same slug terminates the "
+        "previously-launched backend before starting a new one.\n\n"
+        "Requirements on the backend script:\n"
+        "- MUST accept `--port` via argparse (or equivalent) and bind to it.\n"
+        "- MUST be reachable at `health_path` (default `/`) within "
+        "`health_timeout` seconds.\n"
+        "- stdout/stderr stream to `<artifact>/backend.log`."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "slug": {
+                "type": "string",
+                "description": "Folder slug of the artifact whose backend to launch.",
+            },
+            "path": {
+                "type": "string",
+                "description": "Backend script path relative to the artifact folder. Default: \"backend.py\".",
+            },
+            "extra_args": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Additional CLI arguments appended after `--port <port>`.",
+            },
+            "health_path": {
+                "type": "string",
+                "description": "URL path for the readiness probe. Default: \"/\". Any HTTP response (including 4xx) counts as ready.",
+            },
+            "health_timeout": {
+                "type": "number",
+                "description": "Seconds to wait for readiness before failing. Default: 10.",
+            },
+        },
+        "required": ["slug"],
+    },
+    handler=handle_launch_backend,
 )
 
 

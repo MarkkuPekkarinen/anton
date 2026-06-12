@@ -23,8 +23,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from anton.core.artifacts.models import (
+    METADATA_SCHEMA_VERSION,
     Artifact,
     ArtifactType,
+    DatasourceRef,
     FileEntry,
     ProvenanceEntry,
     TurnEntry,
@@ -56,6 +58,9 @@ def _utc_now() -> str:
 
 def _new_id() -> str:
     return uuid.uuid4().hex[:8]
+
+
+_UNSET = object()
 
 
 def _sanitize_slug(value: str) -> str:
@@ -156,6 +161,7 @@ class ArtifactStore:
         slug = self._unique_slug(slug_base)
         now = _utc_now()
         artifact = Artifact(
+            schemaVersion=METADATA_SCHEMA_VERSION,
             id=_new_id(),
             slug=slug,
             createdAt=now,
@@ -172,20 +178,33 @@ class ArtifactStore:
         self._save(artifact)
         return artifact
 
-    def set_primary(self, slug: str, primary: str | None) -> Artifact | None:
-        """Update the primary-file pointer on an existing artifact.
+    def update(
+        self,
+        slug: str,
+        *,
+        primary: str | None = _UNSET,  # type: ignore[assignment]
+        port: int | None = _UNSET,  # type: ignore[assignment]
+        datasources: list[DatasourceRef] | None = _UNSET,  # type: ignore[assignment]
+    ) -> Artifact | None:
+        """Update mutable agent-supplied fields on an existing artifact.
 
-        Used when the agent created with no `primary` and decided
-        later, or when the primary file got renamed. Pass `None` to
-        clear (the renderer reverts to the heuristic). Returns the
-        updated artifact, or None when the slug is missing.
+        Only fields explicitly passed are modified; omitted fields are
+        left unchanged. Pass `primary=None` or `primary=""` to clear
+        the entry-point pointer. Pass `port=None` to clear the port.
+        Pass `datasources=[]` to clear the datasource list.
+        Returns the updated artifact, or None when the slug is missing.
         """
         artifact = self._load_silent(slug)
         if artifact is None:
             return None
-        artifact.primary = (
-            primary.strip() if isinstance(primary, str) and primary.strip() else None
-        )
+        if primary is not _UNSET:
+            artifact.primary = (
+                primary.strip() if isinstance(primary, str) and primary.strip() else None
+            )
+        if port is not _UNSET:
+            artifact.port = int(port) if port is not None else None
+        if datasources is not _UNSET:
+            artifact.datasources = list(datasources or [])
         artifact.updatedAt = _utc_now()
         self._save(artifact)
         return artifact
@@ -355,6 +374,11 @@ class ArtifactStore:
             for f in artifact.files:
                 size_kb = max(1, round(f.bytes / 1024))
                 lines.append(f"- `{f.path}` ({size_kb} KB)")
+            lines.append("")
+        if artifact.datasources:
+            lines.append("## Data sources")
+            for d in artifact.datasources:
+                lines.append(f"- `{d.slug}` ({d.engine}) — env prefix `{d.env_prefix}`")
             lines.append("")
         if artifact.provenance:
             lines.append("## Provenance")

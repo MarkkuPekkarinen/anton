@@ -373,9 +373,9 @@ def test_create_strips_blank_primary(store: ArtifactStore):
     assert artifact.primary is None
 
 
-def test_set_primary_updates(store: ArtifactStore):
+def test_update_primary(store: ArtifactStore):
     artifact = store.create(name="X", description="x", type="html-app")
-    updated = store.set_primary(artifact.slug, "main.html")
+    updated = store.update(artifact.slug, primary="main.html")
     assert updated is not None
     assert updated.primary == "main.html"
     # Persisted: re-loading the same slug returns the new value.
@@ -383,22 +383,48 @@ def test_set_primary_updates(store: ArtifactStore):
     assert reloaded.primary == "main.html"
 
 
-def test_set_primary_clears_with_none(store: ArtifactStore):
+def test_update_primary_clears_with_none(store: ArtifactStore):
     artifact = store.create(
         name="X", description="x", type="html-app",
         primary="dashboard.html",
     )
-    cleared = store.set_primary(artifact.slug, None)
+    cleared = store.update(artifact.slug, primary=None)
     assert cleared.primary is None
-    # Empty string is also treated as "clear" — same intent the
-    # tool's input schema documents.
+    # Empty string is also treated as "clear".
     artifact2 = store.create(
         name="Y", description="x", type="html-app",
         primary="dashboard.html",
     )
-    cleared2 = store.set_primary(artifact2.slug, "   ")
+    cleared2 = store.update(artifact2.slug, primary="   ")
     assert cleared2.primary is None
 
 
-def test_set_primary_returns_none_for_missing_slug(store: ArtifactStore):
-    assert store.set_primary("does-not-exist", "main.html") is None
+def test_update_port(store: ArtifactStore):
+    artifact = store.create(name="App", description="x", type="fullstack-stateful-app")
+    updated = store.update(artifact.slug, port=8080)
+    assert updated is not None
+    assert updated.port == 8080
+    reloaded = store.open(artifact.slug)
+    assert reloaded.port == 8080
+
+
+def test_update_primary_and_port_together(store: ArtifactStore):
+    artifact = store.create(name="App", description="x", type="fullstack-stateful-app")
+    updated = store.update(artifact.slug, primary="index.html", port=5000)
+    assert updated.primary == "index.html"
+    assert updated.port == 5000
+
+
+def test_update_omitted_field_unchanged(store: ArtifactStore):
+    artifact = store.create(
+        name="App", description="x", type="fullstack-stateful-app",
+        primary="index.html",
+    )
+    # Updating only port must not touch primary.
+    updated = store.update(artifact.slug, port=3000)
+    assert updated.primary == "index.html"
+    assert updated.port == 3000
+
+
+def test_update_returns_none_for_missing_slug(store: ArtifactStore):
+    assert store.update("does-not-exist", primary="main.html") is None

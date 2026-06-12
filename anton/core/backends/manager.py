@@ -84,3 +84,14 @@ class ScratchpadManager:
         for pad in self._pads.values():
             await pad.close()
         self._pads.clear()
+
+    async def venv_python(self, name: str = "main") -> str | None:
+        """Return the Python interpreter path of the named scratchpad.
+
+        Provisions the scratchpad on demand so callers don't have to
+        synchronize with whatever cell the LLM happens to be running.
+        Returns None when the runtime can't expose a local interpreter
+        (e.g. remote backends).
+        """
+        pad = await self.get_or_create(name)
+        return pad.venv_python()

@@ -38,13 +38,14 @@ from anton.core.backends.manager import ScratchpadManager
 from anton.core.tools.registry import ToolRegistry
 from anton.core.tools.tool_defs import (
     CREATE_ARTIFACT_TOOL,
+    LAUNCH_BACKEND_TOOL,
     LIST_ARTIFACTS_TOOL,
     MEMORIZE_TOOL,
     OPEN_ARTIFACT_TOOL,
     READ_IMAGE_TOOL,
     RECALL_TOOL,
     SCRATCHPAD_TOOL,
-    SET_ARTIFACT_PRIMARY_TOOL,
+    UPDATE_ARTIFACT_METADATA_TOOL,
     ToolDef,
 )
 from anton.core.utils.scratchpad import prepare_scratchpad_exec, format_cell_result
@@ -112,6 +113,7 @@ class ChatSessionConfig:
     harness: str | None = None
     proactive_dashboards: bool = False
     tools: list[ToolDef] = field(default_factory=list)
+    output_dir: str = ".anton/output"
     # Web tools — on by default. Each is independently resolved at session
     # construction into either a native provider capability (passed to the LLM
     # via ``native_web_tools``) or a handler-dispatched fallback ToolDef
@@ -141,6 +143,7 @@ class ChatSession:
         self._cortex = config.cortex
         self._episodic = config.episodic
         self._system_prompt_context = config.system_prompt_context
+        self._output_dir = config.output_dir
         self._proactive_dashboards = config.proactive_dashboards
         self._extra_tools = config.tools
         self._workspace = config.workspace
@@ -250,6 +253,11 @@ class ChatSession:
         # at the start of each turn. Prevents double-summarization when
         # the post-recovery response still reports high pressure.
         self._compacted_this_turn = False
+        # Backends launched via the launch_backend tool. Keyed by
+        # artifact slug; each entry holds the asyncio.subprocess.Process
+        # plus its port. Reaped in close() so backend processes don't
+        # outlive the chat session.
+        self._tracked_backends: dict[str, dict] = {}
 
         # Resolve web tool routing once per session. ``_native_web_tools`` is
         # the set the planning provider will execute server-side (passed
@@ -557,6 +565,7 @@ class ChatSession:
             current_datetime=_current_datetime,
             system_prompt_context=self._system_prompt_context,
             proactive_dashboards=self._proactive_dashboards,
+            output_dir=self._output_dir,
             tool_defs=self.tool_registry.get_tool_defs(),
             memory_context=memory_section,
             project_context=md_context,
@@ -679,11 +688,34 @@ class ChatSession:
             self.tool_registry.register_tool(CREATE_ARTIFACT_TOOL)
             self.tool_registry.register_tool(LIST_ARTIFACTS_TOOL)
             self.tool_registry.register_tool(OPEN_ARTIFACT_TOOL)
-            self.tool_registry.register_tool(SET_ARTIFACT_PRIMARY_TOOL)
+            self.tool_registry.register_tool(UPDATE_ARTIFACT_METADATA_TOOL)
+            self.tool_registry.register_tool(LAUNCH_BACKEND_TOOL)
 
     async def close(self) -> None:
         """Clean up scratchpads and other resources."""
+        await self._reap_tracked_backends()
         await self._scratchpads.close_all()
+
+    async def _reap_tracked_backends(self) -> None:
+        """Terminate every backend launched via launch_backend.
+
+        SIGTERM first, then SIGKILL after a short grace period. Errors
+        are swallowed — close() must not raise on shutdown.
+        """
+        for slug, info in list(self._tracked_backends.items()):
+            proc = info.get("proc")
+            if proc is None or proc.returncode is not None:
+                continue
+            try:
+                proc.terminate()
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=3)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+            except (ProcessLookupError, OSError):
+                pass
+        self._tracked_backends.clear()
 
     async def _summarize_history(self) -> None:
         """Compress old conversation turns into a summary using the coding model.

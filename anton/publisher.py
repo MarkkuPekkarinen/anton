@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import io
-import json
 import os
 import re
+import sys
+import json
+import base64
+import hashlib
 import secrets
 import zipfile
 from pathlib import Path
 
+from anton.core.artifacts.models import Artifact
+from anton.core.datasources.data_vault import LocalDataVault
 from anton.minds_client import minds_request
 from anton.utils.datasources import scrub_credentials
 
@@ -23,7 +26,13 @@ _LLM_SECRET_VARS = (
 )
 
 # File extensions treated as text and subject to credential scrubbing.
-_TEXT_EXTENSIONS = {".html", ".htm", ".js", ".css"}
+_TEXT_EXTENSIONS = {".html", ".htm", ".js", ".css", ".py", ".txt"}
+
+# Artifact types that ship as a fullstack bundle (backend + static/ + secrets).
+FULLSTACK_ARTIFACT_TYPES = frozenset({"fullstack-stateful-app", "fullstack-stateless-app"})
+
+# Filenames inside an artifact folder that are housekeeping — never bundled.
+_FULLSTACK_EXCLUDED = {"metadata.json", "README.md", "backend.log", ".published.json"}
 
 
 DEFAULT_PUBLISH_URL = "https://4nton.ai"
@@ -122,6 +131,73 @@ def _zip_html(path: Path) -> bytes:
     return buf.getvalue()
 
 
+def _load_artifact_metadata(artifact_dir: Path) -> Artifact | None:
+    """Return the parsed Artifact for a directory, or None when no/invalid metadata."""
+    meta_path = artifact_dir / "metadata.json"
+    if not meta_path.is_file():
+        return None
+    try:
+        return Artifact.model_validate(json.loads(meta_path.read_text(encoding="utf-8")))
+    except Exception:
+        return None
+
+
+def _zip_fullstack(artifact_dir: Path) -> tuple[bytes, list[str]]:
+    """Bundle backend.py + static/ + requirements.txt into a zip.
+
+    Returns (zip_bytes, included_arcnames). Text files are scrubbed.
+    Housekeeping files (metadata.json, README.md, backend.log) are excluded.
+    """
+    buf = io.BytesIO()
+    included: list[str] = []
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        backend = artifact_dir / "backend.py"
+        if backend.is_file():
+            _write_scrubbed(zf, backend, "backend.py")
+            included.append("backend.py")
+
+        reqs = artifact_dir / "requirements.txt"
+        if reqs.is_file():
+            _write_scrubbed(zf, reqs, "requirements.txt")
+            included.append("requirements.txt")
+
+        static_dir = artifact_dir / "static"
+        if static_dir.is_dir():
+            for f in sorted(static_dir.rglob("*")):
+                if not f.is_file():
+                    continue
+                arc_name = f"static/{f.relative_to(static_dir).as_posix()}"
+                if Path(arc_name).name in _FULLSTACK_EXCLUDED:
+                    continue
+                _write_scrubbed(zf, f, arc_name)
+                included.append(arc_name)
+    return buf.getvalue(), included
+
+
+def _collect_datasource_secrets(
+    artifact: Artifact,
+) -> tuple[dict[str, str], list[str]]:
+    """Resolve DS_*__FIELD secrets for an artifact's declared datasources.
+
+    Returns (secrets, missing) where `missing` is the list of slugs whose
+    vault entry could not be loaded. Caller decides how to surface that.
+    """
+    vault = LocalDataVault()
+    secrets: dict[str, str] = {}
+    missing: list[str] = []
+    for ref in artifact.datasources:
+        fields = vault.load(ref.engine, ref.name)
+        if not fields:
+            missing.append(ref.slug)
+            continue
+        for key, value in fields.items():
+            if value is None:
+                continue
+            env_name = f"{ref.env_prefix}__{key.upper()}"
+            secrets[env_name] = str(value)
+    return secrets, missing
+
+
 def publish(
     file_path: Path,
     *,
@@ -132,7 +208,12 @@ def publish(
     password: str | None = None,
     pwd_version: int = 1,
 ) -> dict:
-    """Zip and upload an HTML file/directory. Returns the upload response dict.
+    """Zip and upload an HTML file/directory or a fullstack artifact directory.
+
+    For fullstack artifacts (metadata.json with type ∈ FULLSTACK_ARTIFACT_TYPES)
+    bundles backend.py + static/ + requirements.txt and resolves DS_*__FIELD
+    secrets from the local data vault for each declared datasource. Secrets
+    travel in the JSON body alongside the zip, not inside it.
 
     Args:
         report_id: If provided, updates an existing report (new version).
@@ -144,13 +225,27 @@ def publish(
         pwd_version: Monotonic version bumped whenever the password
                   changes, so previously issued access cookies invalidate.
 
-    Response keys: user_prefix, report_id, md5, view_url, version, files
+    Response keys (HTML path): user_prefix, report_id, md5, view_url, version, files
     """
     if not file_path.exists():
         raise FileNotFoundError(f"Path not found: {file_path}")
 
-    zipped = _zip_html(file_path)
-    payload_dict: dict = {"file_payload": base64.b64encode(zipped).decode()}
+    payload_dict: dict = {}
+
+    artifact = _load_artifact_metadata(file_path) if file_path.is_dir() else None
+    if artifact is not None and artifact.type in FULLSTACK_ARTIFACT_TYPES:
+        zipped, _included = _zip_fullstack(file_path)
+        secrets, missing = _collect_datasource_secrets(artifact)
+        payload_dict["artifact_type"] = artifact.type
+        payload_dict["artifact_id"] = artifact.id
+        payload_dict["secrets"] = secrets
+        payload_dict["python_version"] = f"{sys.version_info.major}.{sys.version_info.minor}"
+        if missing:
+            payload_dict["missing_datasources"] = missing
+    else:
+        zipped = _zip_html(file_path)
+
+    payload_dict["file_payload"] = base64.b64encode(zipped).decode()
     if report_id:
         payload_dict["report_id"] = report_id
     # Access control: send the hash (never the plaintext). Omitting the

@@ -213,7 +213,7 @@ class TestSkillSave:
         # Pre-existing skill with the label the LLM will return
         store.save(
             Skill(
-                label="csv_summary",
+                label="csv-summary",
                 name="Existing",
                 description="",
                 when_to_use="",
@@ -237,11 +237,11 @@ class TestSkillSave:
         await handle_skill_save(console, session, store=store)
 
         # Original is unchanged
-        original = store.load("csv_summary")
+        original = store.load("csv-summary")
         assert original is not None
         assert original.declarative_md == "prior"
         # New one was saved with a unique label
-        new = store.load("csv_summary_2")
+        new = store.load("csv-summary-2")
         assert new is not None
         assert new.declarative_md == "step 1"
 

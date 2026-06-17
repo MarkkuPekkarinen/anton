@@ -30,6 +30,13 @@ class AntonSettings(CoreSettings):
     coding_provider: str = "anthropic"
     coding_model: str = "claude-haiku-4-5-20251001"
 
+    # Opaque reasoning-effort level (e.g. "low" | "medium" | "high" | "xhigh" |
+    # "max"), forwarded to the provider in its native shape when set. None means
+    # the provider's own default. The value is validated by the upstream
+    # router/provider, not here.
+    planning_reasoning_effort: str | None = None
+    coding_reasoning_effort: str | None = None
+
     max_tokens: int = 8192  # max output tokens per LLM call
 
     anthropic_api_key: str | None = None

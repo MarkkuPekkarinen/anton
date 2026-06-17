@@ -281,8 +281,8 @@ class SkillStore:
             return None
 
         return Skill(
-            label=fm.metadata.get("display_name", fm.name),
-            name=fm.name,
+            label=fm.name,
+            name=fm.metadata.get("display_name", fm.name),
             description=fm.description,
             declarative_md=fm.instructions,
             created_at=fm.metadata.get("created_at", ""),
@@ -366,8 +366,8 @@ class SkillStore:
                 continue
 
             out.append({
-                "label": fm.metadata.get("display_name", fm.name),
-                "name": fm.name,
+                "label": fm.name,
+                "name": fm.metadata.get("display_name", fm.name),
                 "description": fm.description,
             })
         return out

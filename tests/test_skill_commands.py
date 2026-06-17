@@ -72,8 +72,7 @@ def _draft(
     *,
     label: str = "csv_summary",
     name: str = "CSV Summary",
-    description: str = "",
-    when_to_use: str = "When summarizing CSV files.",
+    description: str = "When summarizing CSV files.",
     declarative_md: str = "1. Load.\n2. Describe.",
 ) -> _SkillDraft:
     """Convenience constructor for test drafts."""
@@ -81,7 +80,6 @@ def _draft(
         label=label,
         name=name,
         description=description,
-        when_to_use=when_to_use,
         declarative_md=declarative_md,
     )
 
@@ -177,8 +175,7 @@ class TestSkillSave:
             draft=_draft(
                 label="csv_summary",
                 name="CSV Summary",
-                description="Load and summarize a CSV.",
-                when_to_use="User asks to summarize a CSV file.",
+                description="User asks to summarize a CSV file.",
                 declarative_md="1. Load.\n2. Describe.\n3. Plot.",
             ),
             cells=[_fake_cell("import pandas as pd; df = pd.read_csv('x.csv')")],
@@ -190,7 +187,6 @@ class TestSkillSave:
         loaded = store.load("csv_summary")
         assert loaded is not None
         assert loaded.name == "CSV Summary"
-        assert loaded.when_to_use == "User asks to summarize a CSV file."
         assert "Load." in loaded.declarative_md
         assert loaded.provenance == "manual"
         assert loaded.created_at  # ISO timestamp set
@@ -216,7 +212,6 @@ class TestSkillSave:
                 label="csv-summary",
                 name="Existing",
                 description="",
-                when_to_use="",
                 declarative_md="prior",
                 created_at="2026-04-09T00:00:00+00:00",
                 provenance="manual",
@@ -226,8 +221,7 @@ class TestSkillSave:
             draft=_draft(
                 label="csv_summary",
                 name="New CSV Summary",
-                description="",
-                when_to_use="User asks for CSV stats.",
+                description="User asks for CSV stats.",
                 declarative_md="step 1",
             ),
             cells=[_fake_cell("x")],
@@ -251,7 +245,7 @@ class TestSkillSave:
             draft=_draft(
                 label="data_loader",
                 name="Data Loader",
-                when_to_use="User asks to load data.",
+                description="User asks to load data.",
             ),
             cells=[_fake_cell("x")],
             history=[{"role": "user", "content": "go"}],
@@ -272,7 +266,7 @@ class TestSkillSave:
             draft=_draft(
                 label="empty",
                 name="Empty",
-                when_to_use="x",
+                description="x",
                 declarative_md="",  # blank — refuse
             ),
             cells=[_fake_cell("x")],
@@ -338,8 +332,7 @@ class TestListShowRemove:
             Skill(
                 label="csv_summary",
                 name="CSV Summary",
-                description="",
-                when_to_use="When the user asks about a CSV",
+                description="When the user asks about a CSV",
                 declarative_md="step",
                 created_at="2026-04-10T00:00:00+00:00",
                 provenance="manual",
@@ -348,7 +341,7 @@ class TestListShowRemove:
         handle_skills_list(console, store=store)
         # Sanity-check that the rendered output mentions the label
         out = console.export_text()
-        assert "csv_summary" in out
+        assert "CSV Summary" in out
 
     def test_show_existing(self, console, store):
         store.save(
@@ -356,7 +349,6 @@ class TestListShowRemove:
                 label="csv_summary",
                 name="CSV Summary",
                 description="A CSV utility.",
-                when_to_use="when needed",
                 declarative_md="1. Load\n2. Describe",
                 created_at="2026-04-10T00:00:00+00:00",
                 provenance="manual",
@@ -373,7 +365,6 @@ class TestListShowRemove:
                 label="csv_summary",
                 name="CSV",
                 description="",
-                when_to_use="",
                 declarative_md="x",
                 created_at="2026-04-10T00:00:00+00:00",
                 provenance="manual",
@@ -394,7 +385,6 @@ class TestListShowRemove:
                 label="zap",
                 name="Zap",
                 description="",
-                when_to_use="",
                 declarative_md="x",
                 created_at="2026-04-10T00:00:00+00:00",
                 provenance="manual",

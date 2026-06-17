@@ -9,7 +9,6 @@ SKILL.md layout:
     allowed-tools: read_file write_file # optional, space-separated
     metadata:
       display_name: My Cat
-      when_to_use: ...
       provenance: manual
       created_at: "2026-06-15T15:20:42+00:00"
     ---
@@ -37,6 +36,7 @@ logger = logging.getLogger(__name__)
 
 # ─── spec constraints (used by validators, not enforced on read) ──────────────
 
+SKILL_FILE = "SKILL.md"
 _NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 _NAME_MAX = 64
 _DESC_MAX = 1024
@@ -62,7 +62,7 @@ def validate_name(v: str) -> str:
 
 def normalize_name(value: str) -> str:
     slug = value.strip().lower()
-    slug = re.sub(_NAME_RE, "-", slug)  # non-alnum runs -> single hyphen
+    slug = re.sub(r"[^a-z0-9]+", "-", slug)  # non-alnum runs -> single hyphen
     slug = re.sub(r"-{2,}", "-", slug).strip("-")
 
     return slug[:_NAME_MAX].rstrip("-")
@@ -118,11 +118,10 @@ class AgentSkill(BaseModel):
 # ─── parse ────────────────────────────────────────────────────────────────────
 
 
-def parse_skill_dir(skill_dir: Path) -> AgentSkill:
+def parse_skill_dir(skill_dir: Path) -> AgentSkill | None:
     """Read ``<skill_dir>/SKILL.md`` into a ``Skill``"""
     folder_name = skill_dir.name
     md_path = skill_dir / "SKILL.md"
-
 
     try:
         text = md_path.read_text(encoding="utf-8")

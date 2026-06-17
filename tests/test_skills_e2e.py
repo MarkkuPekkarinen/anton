@@ -94,8 +94,7 @@ async def test_full_skills_loop(console, store_root):
     draft = _SkillDraft(
         label="csv_summary",
         name="CSV Summary",
-        description="Load a CSV with pandas, print shape/describe/dtypes, plot a histogram.",
-        when_to_use="User asks to explore, summarize, or describe a CSV file.",
+        description="User asks to explore, summarize, or describe a CSV file.",
         declarative_md=(
             "1. Use `pandas.read_csv()` to load the file.\n"
             "2. Print `df.shape` and `df.dtypes`.\n"

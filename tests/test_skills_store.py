@@ -35,7 +35,6 @@ def _make_skill(label: str = "csv-summary", **overrides) -> Skill:
         label=label,
         name="CSV Summary",
         description="Load a CSV, infer schema, compute summary stats.",
-        when_to_use="User asks to explore, summarize, or describe a CSV file.",
         declarative_md="1. Load the CSV.\n2. Infer types.\n3. Print summary.\n",
         created_at="2026-04-10T12:00:00+00:00",
         provenance="manual",
@@ -109,7 +108,6 @@ class TestSaveLoadRoundtrip:
         assert loaded.label == original.label
         assert loaded.name == original.name
         assert loaded.description == original.description
-        assert loaded.when_to_use == original.when_to_use
         assert loaded.declarative_md == original.declarative_md
         assert loaded.provenance == "manual"
 
@@ -174,7 +172,7 @@ class TestListing:
         assert summaries[0] == {
             "label": "csv-summary",
             "name": "CSV Summary",
-            "when_to_use": "User asks to explore, summarize, or describe a CSV file.",
+            "description": "Load a CSV, infer schema, compute summary stats.",
         }
 
     def test_delete_removes_directory(self, store: SkillStore, store_root: Path):
@@ -280,7 +278,6 @@ class TestDiskFormat:
         assert "name: csv-summary" in text
         assert "description:" in text
         assert "display_name:" in text
-        assert "when_to_use:" in text
 
     def test_stats_json_initial_shape(self, store: SkillStore, store_root: Path):
         store.save(_make_skill())

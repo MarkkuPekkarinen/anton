@@ -3,7 +3,25 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from anton.core.llm.anthropic import AnthropicProvider
-from anton.core.llm.provider import LLMResponse, ToolCall
+from anton.core.llm.provider import LLMResponse, ToolCall, compute_context_pressure
+
+
+class TestComputeContextPressure:
+    def test_none_input_tokens_is_zero_not_crash(self):
+        # The MindsHub passthrough returns usage.input_tokens=None on
+        # web-search responses; compute_context_pressure must not raise
+        # `unsupported operand type(s) for /: 'NoneType' and 'int'`.
+        assert compute_context_pressure("claude-sonnet-4-6", None) == 0.0
+
+    def test_zero_input_tokens_is_zero(self):
+        assert compute_context_pressure("claude-sonnet-4-6", 0) == 0.0
+
+    def test_normal_ratio(self):
+        # 100k tokens against a 200k window → 0.5.
+        assert compute_context_pressure("claude-sonnet-4-6", 100_000) == 0.5
+
+    def test_clamps_at_one(self):
+        assert compute_context_pressure("claude-3", 10_000_000) == 1.0
 
 
 class TestDataclasses:

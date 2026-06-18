@@ -18,6 +18,20 @@ Legacy format (meta.json + declarative.md) is migrated transparently on first
 read via check_migrate().
 
 Labels use hyphens (e.g. `my-cat`), not underscores.
+
+Relationship to Engram (anton/core/memory/hippocampus.py):
+    Engram is the unit of *declarative* memory — a single fact, rule, or
+    lesson stored as a flat bullet in rules.md / lessons.md / profile.md.
+    Engrams are loaded into every prompt unconditionally because they're cheap.
+
+    Skill is the unit of *procedural* memory — a multi-step workflow stored
+    as a directory of staged representations. Skills are NOT loaded into every
+    prompt; the LLM sees only a compact label + description line and explicitly
+    retrieves the full procedure via `recall_skill` when it recognizes a match.
+
+    Both systems coexist the way they do in the brain — declarative and
+    procedural memory are dissociable (H.M. lost the former but kept the
+    latter). Engrams hold facts; Skills hold procedures.
 """
 
 from __future__ import annotations

@@ -54,9 +54,9 @@ class _SkillDraft(BaseModel):
     label: str = Field(
         ...,
         description=(
-            "snake_case identifier for the skill. Short (2-4 words), "
-            "captures the essence. Examples: 'csv_summary', "
-            "'web_scraping', 'api_paginated_fetch'."
+            "kebab-case identifier for the skill. Short (2-4 words), "
+            "captures the essence. Examples: 'csv-summary', "
+            "'web-scraping', 'api-paginated-fetch'."
         ),
     )
     name: str = Field(
@@ -225,7 +225,7 @@ async def handle_skill_save(
     name_hint_section = (
         f"The user suggested the name: {name_hint!r}. "
         "Use it as the basis for `name` and `label`, but you may refine the label "
-        "to be snake_case and short.\n"
+        "to be kebab-case and short.\n"
         if name_hint.strip()
         else ""
     )

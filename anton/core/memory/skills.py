@@ -155,7 +155,7 @@ def check_migrate(skill_dir: Path, store_root: Path) -> Path | None:
     Old format: meta.json + declarative.md
     New format: SKILL.md (agentskills.io spec)
 
-    Also renames the directory from snake_case to hyphen-case and moves:
+    Also renames the directory from snake_case to kebab-case and moves:
       chunks.md  → references/chunks.md
       code/      → scripts/
 
@@ -382,6 +382,8 @@ class SkillStore:
         stats.json is only initialized if it doesn't already exist.
         """
         self._ensure_root()
+
+        skill.label = normalize_name(skill.label)
         d = self._skill_dir(skill.label)
         d.mkdir(parents=True, exist_ok=True)
 

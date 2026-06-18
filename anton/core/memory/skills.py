@@ -170,7 +170,6 @@ def check_migrate(skill_dir: Path, store_root: Path) -> Path | None:
     New format: SKILL.md (agentskills.io spec)
 
     Also renames the directory from snake_case to kebab-case and moves:
-      chunks.md  → references/chunks.md
       code/      → scripts/
 
     Returns the (possibly renamed) directory path, or None if the directory
@@ -435,10 +434,10 @@ class SkillStore:
 
     def increment_recommended(self, label: str, *, stage: int = 1) -> None:
         """Bump the per-stage `recommended` counter. Best-effort, no-ops on error."""
-        d = self._skill_dir(label)
-        if not d.is_dir():
+        d = self._find_dir(label)
+        if d is None:
             return
-        stats = self._load_stats(label)
+        stats = self._load_stats(d.name)
         stats.total_recalls += 1
         target = self._stage_for(stats, stage)
         target.recommended += 1

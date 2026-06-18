@@ -68,7 +68,6 @@ def normalize_name(value: str) -> str:
     return slug[:_NAME_MAX].rstrip("-")
 
 
-
 class AgentSkill(BaseModel):
     """In-memory representation of a SKILL.md file (frontmatter + body).
 
@@ -125,7 +124,7 @@ def parse_skill_dir(skill_dir: Path) -> AgentSkill | None:
 
     try:
         text = md_path.read_text(encoding="utf-8")
-    except OSError as e:
+    except OSError:
         return None
 
     lines = text.split("\n")
@@ -185,7 +184,7 @@ def parse_skill_dir(skill_dir: Path) -> AgentSkill | None:
 
 
 def dump_skill(skill: AgentSkill) -> str:
-    """Serialise an AgentSkill back to SKILL.md text."""
+    """Serialize an AgentSkill back to SKILL.md text."""
     data: dict[str, Any] = {
         "name": skill.name,
         "description": skill.description,

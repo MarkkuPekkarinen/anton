@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 import json
 import re
 from typing import TYPE_CHECKING, List
@@ -124,6 +125,12 @@ class ChatSessionConfig:
     # (registered on the tool registry). See ChatSession.__init__.
     web_search_enabled: bool = True
     web_fetch_enabled: bool = True
+    # Stable "as of" timestamp for the system prompt. The host passes the
+    # task's anchor (e.g. the conversation's created_at) so the date is
+    # byte-identical across every turn of a task — keeping the system-prompt
+    # prefix cacheable (a per-turn wall clock would bust the cache each turn).
+    # None → fall back to today's date.
+    clock: datetime | None = None
 
 
 class ChatSession:
@@ -150,6 +157,7 @@ class ChatSession:
         self._output_dir = config.output_dir
         self._proactive_dashboards = config.proactive_dashboards
         self._act_first = config.act_first
+        self._clock = config.clock
         self._extra_tools = config.tools
         self._workspace = config.workspace
         self._data_vault = config.data_vault
@@ -541,8 +549,13 @@ class ChatSession:
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
 
-        _now = _dt.datetime.now()
-        _current_datetime = _now.strftime("%A, %B %d, %Y at %I:%M %p")
+        # Task-anchored, date-only stamp. Using the task's anchor (self._clock,
+        # e.g. the conversation's created_at) keeps this byte-identical across
+        # every turn so the system-prompt prefix stays cache-stable; a per-turn
+        # wall clock with minute precision would invalidate the cache each turn.
+        # The agent fetches precise time via a tool when it actually needs it.
+        _now = self._clock or _dt.datetime.now()
+        _current_datetime = _now.strftime("%A, %B %d, %Y")
 
         # Inject memory context (replaces old self_awareness)
         memory_section = ""

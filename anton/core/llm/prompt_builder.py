@@ -168,8 +168,8 @@ class ChatSystemPromptBuilder:
         if tool_prompts:
             prompt += tool_prompts
 
-        if memory_context:
-            prompt += memory_context
+        # Stable, per-session content goes before the volatile tail so the
+        # prefix stays cache-stable across turns.
         if project_context:
             prompt += project_context
         if self_awareness_context:
@@ -184,6 +184,13 @@ class ChatSystemPromptBuilder:
         suffix = system_prompt_context.suffix.strip()
         if suffix:
             prompt += f"\n\n{suffix}"
+
+        # Volatile tail — LAST so everything above can be cached. The memory
+        # snapshot is relevance-filtered per user message, so it changes every
+        # turn; keeping it at the very end means it never invalidates the
+        # cacheable prefix above it.
+        if memory_context:
+            prompt += memory_context
 
         return prompt
 

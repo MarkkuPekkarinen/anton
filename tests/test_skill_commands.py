@@ -362,7 +362,7 @@ class TestListShowRemove:
     def test_show_unknown_suggests_closest(self, console, store):
         store.save(
             Skill(
-                label="csv_summary",
+                label="csv-summary",
                 name="CSV",
                 description="",
                 declarative_md="x",
@@ -372,7 +372,7 @@ class TestListShowRemove:
         )
         handle_skill_show(console, "csv_sumary", store=store)  # typo
         out = console.export_text()
-        assert "csv_summary" in out
+        assert "csv-summary" in out
 
     def test_show_no_args(self, console, store):
         handle_skill_show(console, "", store=store)

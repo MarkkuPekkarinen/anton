@@ -136,7 +136,7 @@ class TestTypoFallback:
         session = _session_with(store)
         result = await handle_recall_skill(session, {"label": "csv_sumary"})
         assert "⚠" in result
-        assert "csv_summary" in result
+        assert "csv-summary" in result
         # The full procedure is still included after the warning
         assert "Load the CSV" in result
 
@@ -151,7 +151,7 @@ class TestTypoFallback:
     @pytest.mark.asyncio
     async def test_dash_to_underscore_recovered(self, store: SkillStore):
         session = _session_with(store)
-        result = await handle_recall_skill(session, {"label": "web-scraping"})
+        result = await handle_recall_skill(session, {"label": "web__scraping"})
         assert "web-scraping" in result
         # Could match exactly via slugify, in which case there's no warning,
         # or via fuzzy match. Either way the procedure should be returned.

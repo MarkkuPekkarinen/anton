@@ -63,9 +63,9 @@ class TestProceduralMemorySection:
         prompt = _build_prompt(builder, skill_store=populated_store)
         assert "## Procedural memory" in prompt
         # All labels are listed
-        assert "`csv_summary`" in prompt
-        assert "`web_scraping`" in prompt
-        assert "`api_fetcher`" in prompt
+        assert "`csv-summary`" in prompt
+        assert "`web-scraping`" in prompt
+        assert "`api-fetcher`" in prompt
         # And their description
         assert "explore or summarize a CSV" in prompt
         assert "scrape data from a website" in prompt

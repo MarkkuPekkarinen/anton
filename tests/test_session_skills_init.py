@@ -72,7 +72,7 @@ class TestPromptBuilderReceivesStore:
             skill_store=store_with_one_skill,
         )
         assert "## Procedural memory" in prompt
-        assert "csv_summary" in prompt
+        assert "csv-summary" in prompt
 
     def test_section_omitted_when_no_store(self):
         builder = ChatSystemPromptBuilder()

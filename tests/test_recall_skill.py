@@ -172,9 +172,9 @@ class TestUnknownSlug:
         result = await handle_recall_skill(session, {"label": "xyzzy_quark"})
         assert "NO MATCH" in result
         # Should mention all available labels
-        assert "csv_summary" in result
-        assert "web_scraping" in result
-        assert "api_fetcher" in result
+        assert "csv-summary" in result
+        assert "web-scraping" in result
+        assert "api-fetcher" in result
 
     @pytest.mark.asyncio
     async def test_unrelated_does_not_increment_counters(
@@ -182,7 +182,7 @@ class TestUnknownSlug:
     ):
         session = _session_with(store)
         await handle_recall_skill(session, {"label": "xyzzy_quark"})
-        for label in ("csv_summary", "web_scraping", "api_fetcher"):
+        for label in ("csv-summary", "web-scraping", "api-fetcher"):
             loaded = store.load(label)
             assert loaded is not None
             assert loaded.stats.stage_1.recommended == 0

@@ -8,6 +8,8 @@ from .prompts import (
     BASE_VISUALIZATIONS_PROMPT,
     BACKEND_GENERATION_PROMPT,
     CHAT_SYSTEM_PROMPT,
+    CONVERSATION_DISCIPLINE_ACT_FIRST,
+    CONVERSATION_DISCIPLINE_ASK_FIRST,
     VISUALIZATIONS_MARKDOWN_OUTPUT_FORMAT_PROMPT,
     VISUALIZATIONS_HTML_OUTPUT_FORMAT_PROMPT,
 )
@@ -128,6 +130,7 @@ class ChatSystemPromptBuilder:
         system_prompt_context: SystemPromptContext,
         proactive_dashboards: bool,
         output_dir: str,
+        act_first: bool = True,
         tool_defs: list["ToolDef"] | None = None,
         memory_context: str = "",
         project_context: str = "",
@@ -146,10 +149,16 @@ class ChatSystemPromptBuilder:
         if prefix:
             prompt += f"{prefix}\n\n"
 
+        conversation_discipline = (
+            CONVERSATION_DISCIPLINE_ACT_FIRST if act_first
+            else CONVERSATION_DISCIPLINE_ASK_FIRST
+        )
+
         prompt += CHAT_SYSTEM_PROMPT.format(
             runtime_context=system_prompt_context.runtime_context,
             artifacts_section=ARTIFACTS_PROMPT,
             visualizations_section=visualizations_section,
+            conversation_discipline=conversation_discipline,
             current_datetime=current_datetime,
         )
 

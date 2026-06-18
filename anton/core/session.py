@@ -112,6 +112,10 @@ class ChatSessionConfig:
     # host didn't identify itself.
     harness: str | None = None
     proactive_dashboards: bool = False
+    # When True (default), Anton acts on reasonable defaults and surfaces its
+    # assumptions inline instead of stopping to ask ("do first, ask later").
+    # When False, it falls back to the cautious ask-first discipline.
+    act_first: bool = True
     tools: list[ToolDef] = field(default_factory=list)
     output_dir: str = ".anton/output"
     # Web tools — on by default. Each is independently resolved at session
@@ -145,6 +149,7 @@ class ChatSession:
         self._system_prompt_context = config.system_prompt_context
         self._output_dir = config.output_dir
         self._proactive_dashboards = config.proactive_dashboards
+        self._act_first = config.act_first
         self._extra_tools = config.tools
         self._workspace = config.workspace
         self._data_vault = config.data_vault
@@ -565,6 +570,7 @@ class ChatSession:
             current_datetime=_current_datetime,
             system_prompt_context=self._system_prompt_context,
             proactive_dashboards=self._proactive_dashboards,
+            act_first=self._act_first,
             output_dir=self._output_dir,
             tool_defs=self.tool_registry.get_tool_defs(),
             memory_context=memory_section,

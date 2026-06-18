@@ -4,7 +4,11 @@ import logging
 from typing import TYPE_CHECKING
 
 from anton.core.backends.base import Cell
-from anton.core.utils.scratchpad import prepare_scratchpad_exec, format_cell_result
+from anton.core.utils.scratchpad import (
+    prepare_scratchpad_exec,
+    format_cell_result,
+    observe_scratchpad_cell,
+)
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
@@ -408,24 +412,16 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
             fn(kind, detail, severity=severity)
 
     if action == "exec":
+        # The single-scratchpad guard and the pre-execute ACC events
+        # (scratchpad_empty_code / scratchpad_call) live in
+        # prepare_scratchpad_exec — the SHARED entry point that the streaming
+        # path (ChatSession.turn_stream) also calls — so they fire on both
+        # paths. A str return is a message the call should not run past
+        # (empty code, single-scratchpad challenge, or install failure).
         result = await prepare_scratchpad_exec(session, tc_input)
         if isinstance(result, str):
-            # Empty / malformed code parameter — the dispatcher rejected
-            # it before reaching the runtime. This is exactly the
-            # "silent code-clip" failure mode the ACC's
-            # detect_oversized_cell watches for.
-            _acc_observe("scratchpad_empty_code", {"name": name}, severity=7)
             return result
         pad, code, description, estimated_time, estimated_seconds = result
-
-        _acc_observe(
-            "scratchpad_call",
-            {
-                "name": name,
-                "code_len": len(code or ""),
-                "one_line_description": description or "",
-            },
-        )
 
         # Notify pre-execute observers (e.g. cerebellum). The runtime
         # never sees these — observation is an orchestration concern,
@@ -452,31 +448,9 @@ async def handle_scratchpad(session: ChatSession, tc_input: dict) -> str:
                 pad_name=name, description=description, cell=cell,
             )
             await _fire_post_execute(session, cell)
-            # ACC: distinguish "killed" (timeout/cancel/OOM) from a
-            # plain runtime error. The local backend sets cell.error
-            # to a string starting with "Cancelled" or matching the
-            # "Cell timed out"/"Cell killed" prefixes from the
-            # asyncio.TimeoutError path. Everything else (NameError,
-            # ImportError, …) is a regular result with success=False.
-            err = (cell.error or "").strip()
-            if err.startswith(("Cancelled", "Cell timed out", "Cell killed")):
-                _acc_observe(
-                    "scratchpad_killed",
-                    {"name": name, "reason": err[:120]},
-                    severity=6,
-                )
-            else:
-                success = not err and not (cell.stderr or "").strip()
-                _acc_observe(
-                    "scratchpad_result",
-                    {
-                        "name": name,
-                        "success": success,
-                        "stdout_len": len(cell.stdout or ""),
-                        "error": err[:300] if err else "",
-                    },
-                    severity=5 if not success else 1,
-                )
+            # Post-execute ACC event (killed vs result) via the shared helper —
+            # the streaming path emits the same.
+            observe_scratchpad_cell(session, name, cell)
         return format_cell_result(cell)
 
     elif action == "view":

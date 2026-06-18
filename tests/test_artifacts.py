@@ -307,6 +307,19 @@ def test_reconcile_on_read_is_idempotent(store: ArtifactStore):
     assert second.updatedAt == first.updatedAt
 
 
+def test_reconcile_re_saves_and_persists_when_files_change(store: ArtifactStore):
+    """A changed on-disk file set must reconcile AND persist to metadata.json."""
+    artifact = store.create(name="Dash", description="x", type="html-app")
+    folder = store.folder_for(artifact.slug)
+    (folder / "a.html").write_text("<html></html>")
+    assert {f.path for f in store.open(artifact.slug).files} == {"a.html"}
+    # A second file lands on disk → next read reconciles and persists it.
+    (folder / "b.html").write_text("<html></html>")
+    assert {f.path for f in store.open(artifact.slug).files} == {"a.html", "b.html"}
+    on_disk = json.loads(store.metadata_path(artifact.slug).read_text())
+    assert {f["path"] for f in on_disk["files"]} == {"a.html", "b.html"}
+
+
 # ─── README rendering ───────────────────────────────────────────────────────
 
 

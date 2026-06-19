@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 import json
 import re
 from typing import TYPE_CHECKING, List
@@ -67,6 +68,11 @@ from anton.utils.datasources import (
 from anton.core.settings import CoreSettings
 
 
+# Sentinel prefixing a compacted-history summary so later compactions can
+# recognize and update it in place rather than summarize a summary.
+_COMPACTED_MARKER = "[COMPACTED CONTEXT — REFERENCE ONLY]"
+
+
 if TYPE_CHECKING:
     from rich.console import Console
     from anton.context.self_awareness import SelfAwarenessContext
@@ -120,6 +126,10 @@ class ChatSessionConfig:
     # host didn't identify itself.
     harness: str | None = None
     proactive_dashboards: bool = False
+    # When True (default), Anton acts on reasonable defaults and surfaces its
+    # assumptions inline instead of stopping to ask ("do first, ask later").
+    # When False, it falls back to the cautious ask-first discipline.
+    act_first: bool = True
     tools: list[ToolDef] = field(default_factory=list)
     output_dir: str = ".anton/output"
     # Web tools — on by default. Each is independently resolved at session
@@ -128,6 +138,13 @@ class ChatSessionConfig:
     # (registered on the tool registry). See ChatSession.__init__.
     web_search_enabled: bool = True
     web_fetch_enabled: bool = True
+    # When the task (conversation) was created. Rendered as a fixed
+    # "Conversation started: …" line in the cache-stable prompt prefix — it
+    # never changes across turns, so it doesn't bust the prefix cache. The
+    # LIVE current time goes in the volatile tail instead (see _build_system_prompt),
+    # so resuming a conversation days later still reports the real "now".
+    # None → fall back to today.
+    started_at: datetime | None = None
 
 
 class ChatSession:
@@ -153,6 +170,8 @@ class ChatSession:
         self._system_prompt_context = config.system_prompt_context
         self._output_dir = config.output_dir
         self._proactive_dashboards = config.proactive_dashboards
+        self._act_first = config.act_first
+        self._started_at = config.started_at
         self._extra_tools = config.tools
         self._workspace = config.workspace
         self._data_vault = config.data_vault
@@ -575,8 +594,16 @@ class ChatSession:
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
 
-        _now = _dt.datetime.now()
-        _current_datetime = _now.strftime("%A, %B %d, %Y at %I:%M %p")
+        # Two stamps, deliberately split for cache-stability AND correctness:
+        #  • conversation_started — the task's creation time (self._started_at),
+        #    a FIXED fact rendered in the cache-stable prefix; identical every
+        #    turn so it never busts the prefix cache.
+        #  • current_datetime — the real wall clock, rendered in the VOLATILE
+        #    tail (after the cached prefix) so it's always accurate even when a
+        #    conversation is resumed days/weeks later, without touching the cache.
+        _started = self._started_at or _dt.datetime.now()
+        _conversation_started = _started.strftime("%A, %B %d, %Y")
+        _current_datetime = _dt.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
         # Inject memory context (replaces old self_awareness)
         memory_section = ""
@@ -601,9 +628,11 @@ class ChatSession:
 
         prompt_builder = ChatSystemPromptBuilder()
         prompt = prompt_builder.build(
+            conversation_started=_conversation_started,
             current_datetime=_current_datetime,
             system_prompt_context=self._system_prompt_context,
             proactive_dashboards=self._proactive_dashboards,
+            act_first=self._act_first,
             output_dir=self._output_dir,
             tool_defs=self.tool_registry.get_tool_defs(),
             memory_context=memory_section,
@@ -802,12 +831,18 @@ class ChatSession:
         old_turns = self._history[:split]
         recent_turns = self._history[split:]
 
-        # Serialize old turns into text for summarization
+        # Serialize old turns. Pull out any prior compacted summary so we
+        # UPDATE it in place rather than summarize a summary (which compounds
+        # loss every compaction).
+        prior_summary = ""
         lines: list[str] = []
         for msg in old_turns:
             role = msg.get("role", "unknown")
             content = msg.get("content", "")
             if isinstance(content, str):
+                if content.lstrip().startswith(_COMPACTED_MARKER):
+                    prior_summary = content
+                    continue
                 lines.append(f"[{role}]: {content[:2000]}")
             elif isinstance(content, list):
                 for block in content:
@@ -828,17 +863,43 @@ class ChatSession:
         if len(old_text) > 8000:
             old_text = old_text[:8000] + "\n... (truncated)"
 
+        if prior_summary:
+            user_content = (
+                "PREVIOUS SUMMARY (update this in place — merge the new turns into it, "
+                "don't restate it verbatim):\n"
+                f"{prior_summary}\n\n"
+                "NEW TURNS TO FOLD IN:\n"
+                f"{old_text}"
+            )
+        else:
+            user_content = old_text
+
         try:
+            # 3b-full: a structured, in-place-updated STATE RECORD rather than a
+            # freeform blob — so "Remaining" work survives compaction instead of
+            # being flattened into prose.
             summary_response = await self._llm.code(
                 system=(
-                    "Summarize this conversation history concisely. Preserve:\n"
-                    "- Key decisions and conclusions\n"
-                    "- Important data/results discovered\n"
-                    "- Variable names and values that are still relevant\n"
-                    "- Errors encountered and how they were resolved\n"
-                    "Keep it under 2000 tokens. Use bullet points."
+                    "You compact an agent's earlier conversation into a terse, factual "
+                    "STATE RECORD (not prose). Output only these sections, omitting any "
+                    "that are empty:\n"
+                    "## Goal — what the user ultimately wants\n"
+                    "## Constraints — explicit requirements / preferences / do-nots\n"
+                    "## Completed — work already done, each as `action → outcome`\n"
+                    "## Active state — variables, data, files/artifacts in play and their "
+                    "current values or paths\n"
+                    "## Blocked — anything stuck and why\n"
+                    "## Decisions — choices made and the reason\n"
+                    "## Remaining — what is still left to do\n\n"
+                    "Preserve the date/time of key events when it matters (e.g. "
+                    "`Completed (2026-06-05): …`) — the raw per-message timestamps are "
+                    "gone after compaction, so keep the ones that anchor the timeline.\n"
+                    "If a PREVIOUS SUMMARY is provided, update it with the new turns "
+                    "instead of starting over. If the user changed direction, narrowed "
+                    "scope, or cancelled something, reflect that — drop superseded items "
+                    "from Remaining, don't keep them. Keep it under ~2000 tokens."
                 ),
-                messages=[{"role": "user", "content": old_text}],
+                messages=[{"role": "user", "content": user_content}],
                 max_tokens=2048,
             )
             summary = summary_response.content or "(summary unavailable)"
@@ -846,17 +907,26 @@ class ChatSession:
             # If summarization fails, just do a simple truncation
             summary = f"(Earlier conversation with {len(old_turns)} turns — summarization failed)"
 
-        summary_msg = {
-            "role": "user",
-            "content": f"[Context summary of earlier conversation]\n{summary}",
-        }
+        # 3b-light: reference-only framing so the model treats this as compacted
+        # history, not a fresh instruction, and never resumes superseded/cancelled
+        # work after a compaction (which Anton's auto-continue verifier would
+        # otherwise be nudged to do).
+        summary_body = (
+            f"{_COMPACTED_MARKER}\n"
+            "Compacted record of earlier conversation, for REFERENCE ONLY — not a new "
+            "request. The most recent user message takes priority; if the user changed "
+            "direction, narrowed scope, or cancelled something, follow that and do NOT "
+            "resume superseded work described below.\n\n"
+            f"{summary}"
+        )
+        summary_msg = {"role": "user", "content": summary_body}
 
         # If the recent portion starts with a user message, insert a minimal
         # assistant separator to avoid consecutive user messages (API error).
         if recent_turns and recent_turns[0].get("role") == "user":
             self._history = [
                 summary_msg,
-                {"role": "assistant", "content": "Understood."},
+                {"role": "assistant", "content": "Understood — using that as reference."},
                 *recent_turns,
             ]
         else:

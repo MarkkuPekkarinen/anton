@@ -85,6 +85,10 @@ class AntonSettings(CoreSettings):
 
     proactive_dashboards: bool = False  # when True, build HTML dashboards; when False, CLI output only
 
+    # "Do first, ask later": act on reasonable defaults and surface assumptions
+    # inline instead of stopping to ask. False = cautious ask-first discipline.
+    act_first: bool = True
+
     theme: str = "auto"
 
     disable_autoupdates: bool = False

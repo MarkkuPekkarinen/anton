@@ -130,12 +130,13 @@ class ChatSessionConfig:
     # (registered on the tool registry). See ChatSession.__init__.
     web_search_enabled: bool = True
     web_fetch_enabled: bool = True
-    # Stable "as of" timestamp for the system prompt. The host passes the
-    # task's anchor (e.g. the conversation's created_at) so the date is
-    # byte-identical across every turn of a task — keeping the system-prompt
-    # prefix cacheable (a per-turn wall clock would bust the cache each turn).
-    # None → fall back to today's date.
-    clock: datetime | None = None
+    # When the task (conversation) was created. Rendered as a fixed
+    # "Conversation started: …" line in the cache-stable prompt prefix — it
+    # never changes across turns, so it doesn't bust the prefix cache. The
+    # LIVE current time goes in the volatile tail instead (see _build_system_prompt),
+    # so resuming a conversation days later still reports the real "now".
+    # None → fall back to today.
+    started_at: datetime | None = None
 
 
 class ChatSession:
@@ -162,7 +163,7 @@ class ChatSession:
         self._output_dir = config.output_dir
         self._proactive_dashboards = config.proactive_dashboards
         self._act_first = config.act_first
-        self._clock = config.clock
+        self._started_at = config.started_at
         self._extra_tools = config.tools
         self._workspace = config.workspace
         self._data_vault = config.data_vault
@@ -554,13 +555,16 @@ class ChatSession:
     async def _build_system_prompt(self, user_message: str = "") -> str:
         import datetime as _dt
 
-        # Task-anchored, date-only stamp. Using the task's anchor (self._clock,
-        # e.g. the conversation's created_at) keeps this byte-identical across
-        # every turn so the system-prompt prefix stays cache-stable; a per-turn
-        # wall clock with minute precision would invalidate the cache each turn.
-        # The agent fetches precise time via a tool when it actually needs it.
-        _now = self._clock or _dt.datetime.now()
-        _current_datetime = _now.strftime("%A, %B %d, %Y")
+        # Two stamps, deliberately split for cache-stability AND correctness:
+        #  • conversation_started — the task's creation time (self._started_at),
+        #    a FIXED fact rendered in the cache-stable prefix; identical every
+        #    turn so it never busts the prefix cache.
+        #  • current_datetime — the real wall clock, rendered in the VOLATILE
+        #    tail (after the cached prefix) so it's always accurate even when a
+        #    conversation is resumed days/weeks later, without touching the cache.
+        _started = self._started_at or _dt.datetime.now()
+        _conversation_started = _started.strftime("%A, %B %d, %Y")
+        _current_datetime = _dt.datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
 
         # Inject memory context (replaces old self_awareness)
         memory_section = ""
@@ -585,6 +589,7 @@ class ChatSession:
 
         prompt_builder = ChatSystemPromptBuilder()
         prompt = prompt_builder.build(
+            conversation_started=_conversation_started,
             current_datetime=_current_datetime,
             system_prompt_context=self._system_prompt_context,
             proactive_dashboards=self._proactive_dashboards,
@@ -847,6 +852,9 @@ class ChatSession:
                     "## Blocked — anything stuck and why\n"
                     "## Decisions — choices made and the reason\n"
                     "## Remaining — what is still left to do\n\n"
+                    "Preserve the date/time of key events when it matters (e.g. "
+                    "`Completed (2026-06-05): …`) — the raw per-message timestamps are "
+                    "gone after compaction, so keep the ones that anchor the timeline.\n"
                     "If a PREVIOUS SUMMARY is provided, update it with the new turns "
                     "instead of starting over. If the user changed direction, narrowed "
                     "scope, or cancelled something, reflect that — drop superseded items "

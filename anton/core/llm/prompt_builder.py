@@ -126,6 +126,7 @@ class ChatSystemPromptBuilder:
     def build(
         self,
         *,
+        conversation_started: str,
         current_datetime: str,
         system_prompt_context: SystemPromptContext,
         proactive_dashboards: bool,
@@ -159,7 +160,7 @@ class ChatSystemPromptBuilder:
             artifacts_section=ARTIFACTS_PROMPT,
             visualizations_section=visualizations_section,
             conversation_discipline=conversation_discipline,
-            current_datetime=current_datetime,
+            conversation_started=conversation_started,
         )
 
         prompt += "\n\n" + BACKEND_GENERATION_PROMPT.format(output_dir=output_dir)
@@ -168,8 +169,8 @@ class ChatSystemPromptBuilder:
         if tool_prompts:
             prompt += tool_prompts
 
-        if memory_context:
-            prompt += memory_context
+        # Stable, per-session content goes before the volatile tail so the
+        # prefix stays cache-stable across turns.
         if project_context:
             prompt += project_context
         if self_awareness_context:
@@ -184,6 +185,18 @@ class ChatSystemPromptBuilder:
         suffix = system_prompt_context.suffix.strip()
         if suffix:
             prompt += f"\n\n{suffix}"
+
+        # Volatile tail — LAST so everything above can be cached. The live
+        # clock and the relevance-filtered memory snapshot both change every
+        # turn, so they sit after the cache-stable prefix and never invalidate
+        # it. (The prefix carries only the fixed "conversation started" stamp.)
+        prompt += (
+            f"\n\nCurrent date and time: {current_datetime}\n"
+            "(Earlier messages are prefixed with the time they were sent; that "
+            "bracketed timestamp is metadata, not part of the message text.)"
+        )
+        if memory_context:
+            prompt += memory_context
 
         return prompt
 

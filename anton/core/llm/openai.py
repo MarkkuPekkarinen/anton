@@ -683,7 +683,7 @@ class OpenAIProvider(LLMProvider):
                 and exc.body.get("detail")
             ):
                 msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://mdb.ai to upgrade or to top up your tokens."
+                msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
                 from .provider import TokenLimitExceeded
 
                 raise TokenLimitExceeded(msg) from exc
@@ -852,7 +852,7 @@ class OpenAIProvider(LLMProvider):
                 and exc.body.get("detail")
             ):
                 msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://mdb.ai to upgrade or top up your tokens."
+                msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
                 from .provider import TokenLimitExceeded
 
                 raise TokenLimitExceeded(msg) from exc
@@ -970,7 +970,7 @@ class OpenAIProvider(LLMProvider):
                 and exc.body.get("detail")
             ):
                 msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://mdb.ai to upgrade or to top up your tokens."
+                msg += " Visit https://console.mindshub.ai to upgrade or to top up your tokens."
                 from .provider import TokenLimitExceeded
 
                 raise TokenLimitExceeded(msg) from exc
@@ -1099,7 +1099,7 @@ class OpenAIProvider(LLMProvider):
                 and exc.body.get("detail")
             ):
                 msg = f"Server returned 429 — {exc.body['detail']}"
-                msg += " Visit https://mdb.ai to upgrade or top up your tokens."
+                msg += " Visit https://console.mindshub.ai to upgrade or top up your tokens."
                 from .provider import TokenLimitExceeded
 
                 raise TokenLimitExceeded(msg) from exc

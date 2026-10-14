@@ -61,6 +61,7 @@ from anton.core.llm.provider import (
     StreamTaskProgress,
     StreamTextDelta,
     StreamToolResult,
+    StreamTurnEnded,
     StructuredOutputError,
     TokenLimitExceeded,
     ToolCall,
@@ -5132,6 +5133,10 @@ class ChatSession:
         # immediately while supervised error learning runs in the background.
         self._schedule_cerebellum_flush()
         self._schedule_acc_flush()
+
+        # Only clean exits reach here; the books are closed, so ended_by is final.
+        if _turn_cost_books.ended_by != "completed":
+            yield StreamTurnEnded(ended_by=_turn_cost_books.ended_by)
 
     def _turn_max_tokens(self) -> int:
         """Output-token budget the turn's planning calls actually run with.

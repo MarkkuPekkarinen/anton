@@ -182,3 +182,12 @@ async def test_cancelled_turn_sends_no_reason(workspace):
         with pytest.raises(asyncio.CancelledError):
             await task
     assert not any(isinstance(e, StreamTurnEnded) for e in events)
+
+
+async def test_clean_exit_after_a_cancel_sends_no_reason(workspace):
+    # The CLI's cancel flag lets a turn exit without raising, booked "cancelled".
+    session = _completed(workspace)
+    session._cancel_event.set()
+    events, booked = await _drain(session)
+    assert booked == "cancelled"
+    assert not any(isinstance(e, StreamTurnEnded) for e in events)

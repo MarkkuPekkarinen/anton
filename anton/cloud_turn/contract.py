@@ -78,7 +78,9 @@ Events written back on stdout (JSONL):
 
 The tool/round step kinds the controller relays unchanged as `turn_step` are
 not spelled out above: `tool_start`, `tool_end`, `tool_result`, `compacted`,
-`round_end`. A `heartbeat` only resets the controller's stall timer.
+`round_end`, and `turn_ended` ({"ended_by": "..."}, sent before the terminal
+event when a turn handed back early). A `heartbeat` only resets the
+controller's stall timer.
 
 Answer lines on stdin (interactive turns only), one JSON object per line,
 at most 64 KB:

@@ -844,6 +844,13 @@ _VERIFIER_JUDGMENT_RUBRIC = (
 # models answered it with "I cannot assist" or by inventing the figure just reported missing.
 _CHECK_NOTE = "[Automatic completion check, not written by the user]"
 
+# Appended to the work-limit pauses: a turn stopped mid-search filled the gap with a guess.
+_NO_GUESS_AT_LIMIT = (
+    "Report only what your tool results actually showed. If you have not found the "
+    "answer, say plainly that you could not find it; do not estimate, extrapolate or "
+    "state a figure you did not retrieve."
+)
+
 
 def _safe_error_detail(exc: BaseException) -> str:
     """Describe an exception for logs without copying model or user content.
@@ -4239,6 +4246,7 @@ class ChatSession:
             "work, so the user can decide whether it is worth continuing. "
             "If you are on a good track and can finish, say so and ask if they'd "
             "like you to continue. "
+            f"{_NO_GUESS_AT_LIMIT} "
             "Do NOT retry automatically — wait for the user's response. "
             + _limit_handback_clause(self._limit_reached("spend_ceiling"))
             + _HANDBACK_NOT_USER_CLAUSE
@@ -5715,6 +5723,7 @@ class ChatSession:
                                 "Pause here. Summarize what you have accomplished so far and what remains. "
                                 "If you believe you are on a good track and can finish the task with more steps, "
                                 "tell the user and ask if they'd like you to continue. "
+                                f"{_NO_GUESS_AT_LIMIT} "
                                 "Do NOT retry automatically — wait for the user's response. "
                                 + _limit_handback_clause(self._limit_reached("round_cap"))
                                 + _HANDBACK_NOT_USER_CLAUSE

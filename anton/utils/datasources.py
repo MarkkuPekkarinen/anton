@@ -9,7 +9,7 @@ import uuid
 import yaml
 from collections.abc import Collection, Mapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -640,6 +640,9 @@ def collect_datasource_catalog(
 
     `slugs`, when given, leaves every other connection out before its record
     is read: a remote vault fetches each record over the network.
+
+    An unnamed connection's block shows its engine as the label, suffixed to
+    stay unique within the returned catalog; its `label` field stays "".
     """
     _reject_bare_string(slugs)
     try:
@@ -676,6 +679,7 @@ def collect_datasource_catalog(
     engine_names: dict[str, str] = {}
     notes: dict[str, str] = {}
     connections: list[CatalogConnection] = []
+    created_at: list[str] = []
     for c in conns:
         engine = c["engine"]
         slug = f"{engine}-{c['name']}"
@@ -710,8 +714,8 @@ def collect_datasource_catalog(
             fields.get("_label", "")
         ).strip()
 
-        lines = [f"\n### Slug: `{slug}` — Label: {user_label or '(none)'}"]
-        lines.append(f"Engine: {engine_name}")
+        # The slug/label header is prepended below, once every stored label is known.
+        lines = [f"Engine: {engine_name}"]
         # Same non-secret allowlist `_connection_identity()` encodes
         # (host/database/email, secure_keys-gated) — inlined here as
         # independent lines instead of one collapsed string.
@@ -735,6 +739,7 @@ def collect_datasource_catalog(
             fields.get("auth_type") == "oauth"
             or bool(_parse_picked_files(fields.get("_picked_files")))
         )
+        created_at.append(str(c.get("created_at") or ""))
         connections.append(
             CatalogConnection(
                 slug=slug,
@@ -745,6 +750,25 @@ def collect_datasource_catalog(
                 footer=_GOOGLE_DRIVE_PARAGRAPH if google_drive_access else "",
             )
         )
+    # An unnamed connection shows its engine, not "(none)", since "(none)" made
+    # the model estimate figures it lacked. The suffix rule matches
+    # ensure_unique_user_label, against rendered connections only, because
+    # `slugs` must not trigger reads of records it leaves out. Oldest first,
+    # so adding a connection never renames one the model already knows.
+    labels = [conn.label for conn in connections]
+    taken = {label for label in labels if label}
+    unnamed = [i for i, label in enumerate(labels) if not label]
+    for i in sorted(unnamed, key=lambda i: (created_at[i], connections[i].slug)):
+        base = connections[i].engine or connections[i].slug
+        label, n = base, 2
+        while label in taken:
+            label, n = f"{base} {n}", n + 1
+        taken.add(label)
+        labels[i] = label
+    connections = [
+        replace(conn, block=f"\n### Slug: `{conn.slug}` — Label: {label}\n{conn.block}")
+        for conn, label in zip(connections, labels)
+    ]
     return DatasourceCatalog(connections=tuple(connections), notes=notes)
 
 

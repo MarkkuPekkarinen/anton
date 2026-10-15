@@ -122,6 +122,7 @@ from anton.utils.datasources import (
     build_datasource_context,
     restore_namespaced_env,
     scrub_credentials,
+    scrub_output,
 )
 from anton.core.settings import CoreSettings
 
@@ -5928,7 +5929,7 @@ class ChatSession:
                                         break
                                     if isinstance(item, str):
                                         yield StreamTaskProgress(
-                                            phase="scratchpad", message=item, id=tc.id,
+                                            phase="scratchpad", message=scrub_output(item), id=tc.id,
                                         )
                                     elif isinstance(item, Cell):
                                         cell = item
@@ -6256,6 +6257,9 @@ class ChatSession:
                         )
                         continue
 
+                    # Process output gets scrub_output where it is read, such as scratchpad cells
+                    # and backend logs. Other tools return source the model may write back.
+                    result_text = scrub_credentials(result_text)
                     if self._episodic is not None:
                         self._episodic.log_turn(
                             self._turn_count + 1,
@@ -6263,7 +6267,6 @@ class ChatSession:
                             result_text,
                             tool=tc.name,
                         )
-                    result_text = scrub_credentials(result_text)
                     self._record_root_cause(tool_ok, tool_reason, result_text)
                     result_text = self._apply_error_tracking(
                         result_text, tc.name, error_streak, resilience_nudged,

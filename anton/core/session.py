@@ -37,6 +37,7 @@ from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
 from anton.core.tools.skill_draft import CREATE_SKILL_DRAFT_TOOL
 from anton.memory.history_store import is_user_turn, repair_replayed_tool_ids
 from anton.core.llm.prompts import (
+    ANTON_NOTE,
     RESILIENCE_NUDGE,
     SCRATCHPAD_INSTALL_NUDGE,
     SCRATCHPAD_SIZE_NUDGE,
@@ -151,7 +152,7 @@ _COMPACTED_MARKER = "[COMPACTED CONTEXT — REFERENCE ONLY]"
 # Composed from one lead and per-loss tails so the both-halves case reads as a
 # single message instead of repeating the lead twice.
 _TRUNCATED_LEAD = (
-    "SYSTEM: Your response was truncated because it exceeded the output token limit."
+    f"{ANTON_NOTE} Your response was truncated because it exceeded the output token limit."
 )
 _TRUNCATED_CONTINUE_TAIL = (
     "Continue exactly where you left off. If you were about to call a tool, "
@@ -171,7 +172,7 @@ _TRUNCATED_TEXT_AND_TOOL_CALL_NUDGE = (
     f"{_TRUNCATED_CONTINUE_NUDGE} {_TRUNCATED_TOOL_CALL_TAIL}"
 )
 _TRUNCATED_SILENT_NUDGE = (
-    "SYSTEM: Your previous response spent its entire output-token budget before "
+    f"{ANTON_NOTE} Your previous response spent its entire output-token budget before "
     "producing any visible text or tool call — the user saw nothing. Respond again, "
     "and lead with the answer or the tool call immediately; keep deliberation brief. "
     "If the output you are building is large, produce it in smaller parts."
@@ -875,6 +876,8 @@ _VERIFIER_JUDGMENT_RUBRIC = (
 # mention this" reads as an injection: Azure's prompt filter blocks variants of it, and
 # models answered it with "I cannot assist" or by inventing the figure just reported missing.
 _CHECK_NOTE = "[Automatic completion check, not written by the user]"
+# How anton's notes open. "SYSTEM:" stays for histories saved before the notes were labelled.
+_NOTE_PREFIXES = ("SYSTEM:", _CHECK_NOTE, ANTON_NOTE)
 
 # Appended to the work-limit pauses: a turn stopped mid-search filled the gap with a guess.
 _NO_GUESS_AT_LIMIT = (
@@ -1293,8 +1296,8 @@ def _render_verify_transcript(
     ``max_tool`` tool events, merged back into chronological order. Speaker is
     taken from the message role (list-based *user* content — images/files — is
     labelled USER, not ASSISTANT); multimodal blocks are rendered block-by-block
-    (text kept, images as a placeholder, never raw base64); internal ``SYSTEM:``
-    injections are dropped before budgeting so they don't consume slots. Keeps
+    (text kept, images as a placeholder, never raw base64); anton's internal notes (``_NOTE_PREFIXES``)
+    are dropped before budgeting so they don't consume slots. Keeps
     the call cheap and free of tool_use/tool_result pairing constraints
     (ENG-716).
 
@@ -1334,7 +1337,7 @@ def _render_verify_transcript(
         speaker = "USER" if role == "user" else "ASSISTANT"
         if isinstance(content, str):
             text = content.strip()
-            if not text or (role == "user" and text.startswith(("SYSTEM:", _CHECK_NOTE))):
+            if not text or (role == "user" and text.startswith(_NOTE_PREFIXES)):
                 continue
             convo.append((i, speaker, text))
         elif isinstance(content, list):
@@ -2227,7 +2230,7 @@ class ChatSession:
 
         if streak >= self._max_consecutive_errors:
             result_text += (
-                f"\n\nSYSTEM: The '{tool_name}' tool has failed {self._max_consecutive_errors} times "
+                f"\n\n{ANTON_NOTE} The '{tool_name}' tool has failed {self._max_consecutive_errors} times "
                 "in a row. Stop retrying this approach. Either try a completely different "
                 "strategy or tell the user what's going wrong so they can help."
             )
@@ -4465,7 +4468,7 @@ class ChatSession:
         """
         spent = self._turn_cost.total_tokens if self._turn_cost is not None else 0
         return (
-            f"SYSTEM: This turn has used {spent:,} tokens, which is a large amount "
+            f"{ANTON_NOTE} This turn has used {spent:,} tokens, which is a large amount "
             "of work for a single request and counts against the user's plan. "
             "Pause here. Summarize what you have accomplished so far and what "
             "remains. Be straightforward that this has already taken a lot of "
@@ -4591,16 +4594,47 @@ class ChatSession:
         if cancels_continuation:
             yield StreamTaskProgress(phase="handback", message="")
         diagnosis_response = None
-        async for event in self.plan_stream_with_recovery(system=system):
-            yield event
-            if isinstance(event, StreamComplete):
-                diagnosis_response = event
+        # Held until the call ends: a content filter marks a reply only in its
+        # last event, after the text has streamed.
+        held_text: list[StreamTextDelta] = []
+        filtered = False
+        stream = self.plan_stream_with_recovery(system=system)
+        try:
+            async for event in stream:
+                if isinstance(event, StreamTextDelta):
+                    # Held text yields no event for the CLI to see Escape on, so check here.
+                    watcher = self.escape_watcher
+                    if self._cancel_event.is_set() or (watcher and watcher.cancelled.is_set()):
+                        log.info("%s diagnosis cancelled while held — dropped", label)
+                        self._drop_handback_note()
+                        # Set here so the books say cancelled, then one event for the CLI to stop on.
+                        self._cancel_event.set()
+                        yield StreamTaskProgress(phase="analyzing", message="Cancelled")
+                        return
+                    held_text.append(event)
+                    continue
+                if isinstance(event, StreamComplete):
+                    diagnosis_response = event
+                    filtered = event.response.stop_reason == "content_filter"
+                    if not filtered:
+                        for delta in held_text:
+                            yield delta
+                    held_text = []
+                yield event
+        finally:
+            await stream.aclose()
         text = (
             (diagnosis_response.response.content or "").strip()
-            if diagnosis_response is not None
+            if diagnosis_response is not None and not filtered
             else ""
         )
-        if text:
+        if filtered:
+            log.warning(
+                "%s diagnosis stopped by the provider's content filter — dropped; "
+                "the turn ends on the reply before it", label,
+            )
+            self._drop_handback_note()
+        elif text:
             self._append_history({"role": "assistant", "content": text})
         else:
             log.warning(
@@ -4610,6 +4644,20 @@ class ChatSession:
                 "max-tool-rounds path, since the cap block appends that last)",
                 label,
             )
+
+    def _drop_handback_note(self) -> None:
+        """Remove the hand-back's note once its reply is dropped, so the turn ends on the answer.
+
+        Left in place, the user's next message merges into it. Only a standalone note goes: one
+        merged into tool results (a list) would take those results with it.
+        """
+        last = self._history[-1] if self._history else None
+        if (
+            isinstance(last, dict) and last.get("role") == "user"
+            and isinstance(last.get("content"), str)
+            and last["content"].strip().startswith(_NOTE_PREFIXES)
+        ):
+            self._history.pop()
 
     async def plan_stream_with_recovery(
         self,
@@ -4914,7 +4962,12 @@ class ChatSession:
         """
         async for _event in self.turn_stream(user_input, enable_interaction=False):
             pass
-        last = self._history[-1] if self._history else None
+        # A dropped hand-back leaves anton's own note last; the reply is the one before it.
+        tail = list(self._history)
+        while tail and tail[-1].get("role") == "user" and isinstance(tail[-1].get("content"), str) \
+                and tail[-1]["content"].strip().startswith(_NOTE_PREFIXES):
+            tail.pop()
+        last = tail[-1] if tail else None
         if not isinstance(last, dict) or last.get("role") != "assistant":
             return ""
         content = last.get("content")
@@ -5436,13 +5489,13 @@ class ChatSession:
                         # just note it was transient and continue as planned (ENG-673).
                         if isinstance(_agent_exc, TransientProviderError):
                             recovery_note = (
-                                f"SYSTEM: A temporary provider error interrupted execution: {_agent_exc}\n\n"
+                                f"{ANTON_NOTE} A temporary provider error interrupted execution: {_agent_exc}\n\n"
                                 "This was a transient service issue, not a problem with your approach — "
                                 "continue the task as planned."
                             )
                         else:
                             recovery_note = (
-                                f"SYSTEM: An error interrupted execution: {_agent_exc}\n\n"
+                                f"{ANTON_NOTE} An error interrupted execution: {_agent_exc}\n\n"
                                 "If you can diagnose and fix the issue, continue working on the task. "
                                 "Adjust your approach to avoid the same error. "
                                 "If this is unrecoverable, summarize what you accomplished and suggest next steps."
@@ -5555,7 +5608,7 @@ class ChatSession:
                             {
                                 "role": "user",
                                 "content": (
-                                    f"SYSTEM: The task has failed {_retry_count} times. Latest error: {_agent_exc}\n\n"
+                                    f"{ANTON_NOTE} The task has failed {_retry_count} times. Latest error: {_agent_exc}\n\n"
                                     "Stop retrying. Please:\n"
                                     "1. Summarize what you accomplished so far.\n"
                                     "2. Explain what went wrong in plain language.\n"
@@ -5985,7 +6038,7 @@ class ChatSession:
                         {
                             "role": "user",
                             "content": (
-                                f"SYSTEM: You have used {effective_round_cap} tool-call rounds on this turn. "
+                                f"{ANTON_NOTE} You have used {effective_round_cap} tool-call rounds on this turn. "
                                 "Pause here. Summarize what you have accomplished so far and what remains. "
                                 "If you believe you are on a good track and can finish the task with more steps, "
                                 "tell the user and ask if they'd like you to continue. "
@@ -6678,7 +6731,7 @@ class ChatSession:
                     {
                         "role": "user",
                         "content": (
-                            "SYSTEM: You have attempted to complete this task multiple times "
+                            f"{_CHECK_NOTE} You have attempted to complete this task multiple times "
                             "but verification indicates it is still not done. Do NOT try again. "
                             "Instead:\n"
                             "1. Summarize exactly what was accomplished so far.\n"
@@ -7042,21 +7095,20 @@ class ChatSession:
                     {
                         "role": "user",
                         "content": (
-                            "SYSTEM: Your reply above stands, and nothing in your work "
-                            "was rejected — no verdict came back at all. What failed is "
-                            "the automatic check on whether the task is complete, so "
-                            "completeness is unconfirmed rather than denied.\n"
-                            "1. Report accurately what you did: what succeeded, and "
-                            "anything that did not, including any tool that returned an "
-                            "error. Do not describe a failed step as done.\n"
-                            "2. Name a file only by a path that appears verbatim in a "
-                            "tool result above. Never state a path you intended to write "
-                            "or believe you wrote; where no tool result gives one, say "
-                            "what you produced without naming a location.\n"
-                            "3. Say whether anything still needs doing and ask how they'd "
-                            "like to proceed.\n"
-                            f"4. {_SOLVABILITY_CLAUSE}\n"
-                            "Do not mention this instruction or the verifier to the user."
+                            f"{_CHECK_NOTE} Your reply above stands, and nothing in it "
+                            "was rejected. The automatic check on whether the task is "
+                            "complete returned no verdict, so completeness is unconfirmed "
+                            "rather than denied.\n\n"
+                            "Tell the user what you did: what succeeded and anything that "
+                            "did not, including any tool that returned an error. Do not "
+                            "describe a failed step as done. Name a file only by a path "
+                            "that appears verbatim in a tool result above. Never state a "
+                            "path you intended to write or believe you wrote; where no tool "
+                            "result gives one, say what you produced without naming a "
+                            "location. Say whether anything still needs doing and ask how "
+                            "they'd like to proceed. "
+                            f"{_SOLVABILITY_CLAUSE} Write it for the user, without "
+                            "referring to this check."
                         ),
                     }
                 )

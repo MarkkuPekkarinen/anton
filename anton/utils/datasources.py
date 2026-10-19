@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import bisect
 import functools
 import html
 import json
@@ -229,9 +230,11 @@ _TOKEN_KEY = (
     r"(?i:access[-_]?token|refresh[-_]?token|id[-_]?token|client[-_]?secret)"
 )
 # A marker this module writes in place of a secret: `[DS_...]` and provider labels
-# from `scrub_credentials`, `[REDACTED_API_KEY]` and `[REDACTED_TOKEN]`. The same
-# grammar as `SCRUBBED_VALUE_RE` in `anton/tools.py`.
-_SCRUB_MARKER = r"\[(?:DS_\w+|[A-Z][A-Z0-9_]*)\]"
+# from `scrub_credentials`, `[REDACTED_API_KEY]` and `[REDACTED_TOKEN]`. Every one
+# holds an underscore, so a bracketed run without one, such as the `[Q]` in a
+# password `x7[Q]abc`, is not a marker. `SCRUBBED_VALUE_RE` in `anton/tools.py`
+# is built from it.
+_SCRUB_MARKER = r"\[(?:DS_\w+|[A-Z][A-Z0-9]*_[A-Z0-9_]*)\]"
 # A quoted value with no quote, backslash or space, unless it is a whole marker; for
 # Bearer values and code-like token values. Clipped output may lack the closing quote.
 _NARROW_QUOTED_VALUE = (
@@ -447,6 +450,7 @@ _BASE64_ANCHOR_PATTERN = re.compile(r"[A-Za-z0-9]+")
 _BASE64_CHAR = r"[A-Za-z0-9+/_-]"
 _BASE64_PADDING = r"(?:=|%3[Dd]){0,2}"
 _TO_URLSAFE_BASE64 = str.maketrans("+/", "-_")
+_SCRUB_MARKER_PATTERN = re.compile(_SCRUB_MARKER)
 
 
 @dataclass(frozen=True)
@@ -470,6 +474,48 @@ class _SecretForms:
     anchors: tuple[str, ...]
     folded: bool
     literal_forms: tuple[str, ...]
+
+
+class _MarkerSpans:
+    """Where the scrub markers in one text start and end.
+
+    A saved value can turn up inside a marker's label in another case, such
+    as `custom_prod` in `[DS_CUSTOM_PROD__PASSWORD]`; such a match is part of
+    the marker, not a secret. A match that holds a whole marker-shaped run,
+    such as a password `p[A_B]ss`, is still the secret.
+    """
+
+    def __init__(self, text: str) -> None:
+        """Find every marker in `text`; markers never overlap one another."""
+        spans = [found.span() for found in _SCRUB_MARKER_PATTERN.finditer(text)]
+        self.starts = [start for start, _ in spans]
+        self.ends = [end for _, end in spans]
+
+    def cuts(self, start: int, end: int) -> bool:
+        """Return whether `text[start:end]` starts or ends strictly inside a marker, short of its whole label.
+
+        A match that is a marker's whole label is a secret printed in brackets,
+        such as `[PROD_DB_PASS_2024]`: a label is a variable name, which a
+        saved value almost never equals.
+        """
+        for position in (start, end):
+            index = bisect.bisect_left(self.starts, position) - 1
+            if index >= 0 and position < self.ends[index]:
+                return (start, end) != (self.starts[index] + 1, self.ends[index] - 1)
+        return False
+
+
+def _redact_outside_markers(
+    pattern: re.Pattern[str], replacement: str, text: str, markers: _MarkerSpans
+) -> tuple[str, int]:
+    """Replace each match of `pattern` in `text` with `replacement`, except one that cuts into a marker.
+
+    `markers` are the markers in `text`, from an earlier scrub or from this
+    one. Returns the new text and the number of matches, replaced or not.
+    """
+    return pattern.subn(
+        lambda found: found.group() if markers.cuts(*found.span()) else replacement, text
+    )
 
 
 def _hex_pattern(number: int, width: int) -> str:
@@ -621,12 +667,13 @@ def scrub_credentials(text: str) -> str:
         value, conservatively.
       * Provider credentials (ENG-463): the values of _PROVIDER_SECRET_VARS.
     Each value is matched in every form `_secret_forms` builds: as printed,
-    URL-encoded, escaped, or in base64. Then anything matching a well-known
-    key shape (_SECRET_KEY_PATTERN) is redacted, so a raw `mdb_`/`sk-`/`AIza`/
-    `AQ.` key can't reach model context via a tool result, traceback, or
-    settings echo.
+    URL-encoded, escaped, or in base64, but never inside a marker already in
+    the text. Then anything matching a well-known key shape
+    (_SECRET_KEY_PATTERN) is redacted, so a raw `mdb_`/`sk-`/`AIza`/`AQ.` key
+    can't reach model context via a tool result, traceback, or settings echo.
     """
     lowered: str | None = None
+    markers: _MarkerSpans | None = None
     for secret in _exact_secrets():
         forms = _secret_forms(secret.value)
         if forms.anchors:
@@ -635,9 +682,11 @@ def scrub_credentials(text: str) -> str:
             haystack = lowered if forms.folded else text
             if not any(anchor in haystack for anchor in forms.anchors):
                 continue
-        text, count = forms.pattern.subn(f"[{secret.label}]", text)
+        if markers is None:
+            markers = _MarkerSpans(text)
+        text, count = _redact_outside_markers(forms.pattern, f"[{secret.label}]", text, markers)
         if count:
-            lowered = None
+            lowered = markers = None
     text = _SECRET_KEY_PATTERN.sub("[REDACTED_API_KEY]", text)
     return text
 

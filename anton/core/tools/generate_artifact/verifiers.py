@@ -757,6 +757,22 @@ def _validate_state_manifest(text: str) -> str | None:
 # Backend verification — async scratchpad-venv glue
 # ---------------------------------------------------------------------------
 
+# Compiles backend.py without writing anything: `python -m py_compile` always
+# leaves `__pycache__/backend.*.pyc` in the artifact folder. The output matches
+# py_compile's for a SyntaxError. Any exception is reported the same way, as
+# py_compile does: a MemoryError or RecursionError from the parser must not
+# show this script's own traceback.
+_SYNTAX_CHECK_SCRIPT = r'''
+import sys, traceback
+try:
+    with open("backend.py", "rb") as f:
+        compile(f.read(), "backend.py", "exec")
+except Exception as exc:
+    sys.stderr.write("".join(traceback.format_exception_only(type(exc), exc)))
+    sys.exit(1)
+'''
+
+
 # Runs inside the scratchpad venv. Imports the artifact backend, introspects
 # `app`, and prints one JSON line. Docs routes and the StaticFiles Mount are
 # excluded so only real API routes remain.
@@ -797,9 +813,8 @@ print(json.dumps(result))
 '''
 
 
-# The syntax gate runs agent code too (`-m` with the artifact folder as cwd
-# imports an agent-written py_compile.py), so under a sandbox policy it gets a
-# bound like the import. Without a policy it waits as long as it takes.
+# The syntax gate parses agent-written source, so under a sandbox policy it
+# gets a bound like the import. Without a policy it waits as long as it takes.
 _COMPILE_TIMEOUT = 30.0
 
 
@@ -879,6 +894,33 @@ def _sandboxed_check_env(ds_env: dict[str, str] | None) -> dict[str, str]:
     return env
 
 
+async def _check_backend_syntax(
+    venv_python: str, artifact_path: Path, *, policy: CellSandbox | None = None
+) -> str | None:
+    """Compile `backend.py` with the backend's own interpreter.
+
+    Returns None when it compiles, else the compiler's error text; raises
+    `asyncio.TimeoutError` when the sandbox bound kills it. `-I` keeps the
+    artifact folder off sys.path, so a user `traceback.py` cannot stand in for
+    the stdlib module; `-B` disables bytecode writes regardless of env. `-I`
+    also drops an inherited `PYTHONUTF8`, so `-X utf8` keeps stderr in UTF-8,
+    which is how it is decoded here.
+    """
+    check = await _spawn_check(
+        policy=policy,
+        argv=[venv_python, "-I", "-B", "-X", "utf8", "-c", _SYNTAX_CHECK_SCRIPT],
+        cwd=artifact_path,
+        env=None,
+    )
+    finished = await _finish_check(check, timeout=_COMPILE_TIMEOUT if policy is not None else None)
+    if finished is None:
+        raise asyncio.TimeoutError
+    _, err = finished
+    if check.proc.returncode == 0:
+        return None
+    return err.decode(errors="replace")
+
+
 async def verify_backend(
     *,
     scratchpad_pool,
@@ -928,31 +970,24 @@ async def verify_backend(
 
     policy = cell_sandbox_of(scratchpad_pool)
 
-    # py_compile first (fast syntax gate). -P under the sandbox keeps the
-    # artifact folder off sys.path, so an agent-written py_compile.py there
-    # does not stand in for the standard library's.
-    compile_argv = (
-        [venv_python, "-m", "py_compile", "backend.py"]
-        if policy is None
-        else [venv_python, "-P", "-m", "py_compile", "backend.py"]
-    )
-    check = await _spawn_check(policy=policy, argv=compile_argv, cwd=artifact_path, env=None)
-    finished = await _finish_check(check, timeout=_COMPILE_TIMEOUT if policy is not None else None)
-    if finished is None:
+    try:
+        compile_error = await _check_backend_syntax(venv_python, artifact_path, policy=policy)
+    except asyncio.TimeoutError:
         return VerifyResult(errors=[f"backend.py compile timed out after {_COMPILE_TIMEOUT:.0f}s."]), \
             _ds_keys(source)
-    _, cerr = finished
-    if check.proc.returncode != 0:
-        return VerifyResult(errors=[f"backend.py failed to compile:\n{cerr.decode(errors='replace')}"]), \
+    if compile_error is not None:
+        return VerifyResult(errors=[f"backend.py failed to compile:\n{compile_error}"]), \
             _ds_keys(source)
 
     # Import + introspect in a subprocess with a timeout. The env matters:
     # `build_backend_env` puts `anton_state` on PYTHONPATH exactly like the
     # launcher does for the real backend process — without it a correct
-    # stateful backend fails right here on its own SDK import.
+    # stateful backend fails right here on its own SDK import. `-B` because
+    # the sandbox's env allowlist drops `PYTHONDONTWRITEBYTECODE`, and the
+    # import would leave `__pycache__` in the artifact folder.
     check = await _spawn_check(
         policy=policy,
-        argv=[venv_python, "-c", _INTROSPECT_SCRIPT],
+        argv=[venv_python, "-B", "-c", _INTROSPECT_SCRIPT],
         cwd=artifact_path,
         env=build_backend_env(None) if policy is None else _sandboxed_check_env(ds_env),
     )

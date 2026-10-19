@@ -366,8 +366,10 @@ async def test_both_verifier_checks_run_through_the_launcher(tmp_path, project, 
     )
 
     (compile_args, compile_kwargs, compile_payload), (import_args, import_kwargs, import_payload) = calls
-    assert _launcher_argv(compile_args, compile_kwargs) == ["/venv/bin/python", "-P", "-m", "py_compile", "backend.py"]
-    assert _launcher_argv(import_args, import_kwargs) == ["/venv/bin/python", "-c", verifiers._INTROSPECT_SCRIPT]
+    assert _launcher_argv(compile_args, compile_kwargs) == [
+        "/venv/bin/python", "-I", "-B", "-X", "utf8", "-c", verifiers._SYNTAX_CHECK_SCRIPT,
+    ]
+    assert _launcher_argv(import_args, import_kwargs) == ["/venv/bin/python", "-B", "-c", verifiers._INTROSPECT_SCRIPT]
     for args, kwargs, payload in calls:
         assert kwargs["cwd"] == str(artifact)
         assert kwargs["env"] == _LAUNCHER_ENV

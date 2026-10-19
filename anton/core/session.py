@@ -105,6 +105,8 @@ from anton.core.tools.tool_defs import (
 from anton.core.interaction.elicit import Elicitor
 from anton.core.interaction.emitter import TurnEmitter
 from anton.core.utils.scratchpad import (
+    CELL_NOT_RUN_REASONS,
+    WriteGate,
     build_workspace_discovery_context,
     cell_failure_reason,
     prepare_scratchpad_exec,
@@ -767,11 +769,14 @@ class _TurnStep:
 
     `errored` is the call's final verdict: its handler said it failed, or it
     raised. It is kept here because history can't answer that later: a failed
-    call's tool_result carries no error flag.
+    call's tool_result carries no error flag. `not_run` is a scratchpad cell
+    that never ran (`CELL_NOT_RUN_REASONS`), such as a write the user didn't
+    approve: its call succeeded, but it did nothing.
     """
 
     description: str
     errored: bool
+    not_run: bool = False
 
 
 def _step_description(call: ToolCall) -> str:
@@ -874,10 +879,10 @@ def _handback_report(*, reached: str | None, steps: list[_TurnStep]) -> str:
     """The hand-back anton writes itself when the content filter stopped every try at it.
 
     Opens with the limit that stopped the turn when one did (`reached`, from
-    `ChatSession._limit_reached`), lists the steps the turn ran and which ones
-    failed, and ends the way `_limit_handback_clause` asks the model to end. It
-    quotes no tool output; each step line is the model's own description of
-    the step, written before it ran.
+    `ChatSession._limit_reached`), lists the steps the turn took, marking the
+    ones that failed or never ran, and ends the way `_limit_handback_clause`
+    asks the model to end. It quotes no tool output; each step line is the
+    model's own description of the step, written before it ran.
     """
     paragraphs: list[str] = []
     if reached:
@@ -892,7 +897,9 @@ def _handback_report(*, reached: str | None, steps: list[_TurnStep]) -> str:
         else:
             paragraphs.append(f"{stopped} These are the last things I did before I stopped:")
         paragraphs.append("\n".join(
-            f"- {step.description}" + (" (failed)" if step.errored else "") for step in shown
+            f"- {step.description}"
+            + (" (not run)" if step.not_run else " (failed)" if step.errored else "")
+            for step in shown
         ))
     else:
         paragraphs.append(stopped)
@@ -2001,6 +2008,12 @@ class ChatSession:
         # Seconds spent waiting on humans during the current tool dispatch,
         # subtracted from the tool's reported elapsed time.
         self.answer_wait_s = 0.0
+        # Holds a cell that changes a database or existing files until the
+        # user approves it (`hold_unapproved_write`). Only when the host turns
+        # `write_approval` on; `is True` so a MagicMock settings object reads off.
+        self._write_gate: WriteGate | None = (
+            WriteGate() if getattr(s, "write_approval", False) is True else None
+        )
 
         coding_provider = config.llm_client.coding_provider
         coding_conn = coding_provider.export_connection_info()
@@ -5273,6 +5286,10 @@ class ChatSession:
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
+        # What the project held when this turn began: a cell may delete or
+        # rename a file it wrote this turn without asking, not one from before.
+        if self._write_gate is not None:
+            await self._write_gate.begin_turn(manager=self._scratchpads)
         # Before the inner turn appends the user input, so `turn_messages`
         # starts where a slice of the seeded history would.
         self._start_turn_segments()
@@ -6395,11 +6412,35 @@ class ChatSession:
                     try:
                         if tc.name == "scratchpad" and tc.input.get("action") == "exec":
                             # Inline streaming exec — yields progress events
-                            prep = await prepare_scratchpad_exec(self, tc.input)
+                            if self._write_gate is not None and self.emitter is not None:
+                                # Drained: the approval card prepare may raise
+                                # reaches the host only through the emitter,
+                                # the way the limit question's does.
+                                prep = None
+                                agen = self._run_draining(prepare_scratchpad_exec(self, tc.input))
+                                try:
+                                    async for _kind, _payload in agen:
+                                        if _kind == "event":
+                                            yield _payload
+                                        else:
+                                            prep = _payload
+                                finally:
+                                    await agen.aclose()
+                            else:
+                                prep = await prepare_scratchpad_exec(self, tc.input)
                             if isinstance(prep, ToolOutcome):
                                 result_text = prep.content
                                 tool_ok = prep.ok
                                 tool_reason = prep.reason
+                                # The cell never ran. Its result still closes
+                                # the step the host drew from the call, with
+                                # the reason as its output. Plain text, not a
+                                # cell's JSON, so cowork-server's cell replay
+                                # (extract_scratchpad_cells) never reads it as
+                                # a cell that ran.
+                                yield StreamToolResult(
+                                    name=tc.name, action="exec", content=prep.content, id=tc.id,
+                                )
                             else:
                                 (
                                     pad,
@@ -6740,9 +6781,11 @@ class ChatSession:
                     )
                     # Every executed call passes here once with its final
                     # verdict, so the hand-back report lists each step once.
-                    self._turn_steps.append(
-                        _TurnStep(description=_step_description(tc), errored=tool_ok is False)
-                    )
+                    self._turn_steps.append(_TurnStep(
+                        description=_step_description(tc),
+                        errored=tool_ok is False,
+                        not_run=tool_reason in CELL_NOT_RUN_REASONS,
+                    ))
 
                     if isinstance(result_text, list):
                         # Multimodal tool result — scrub credentials from text

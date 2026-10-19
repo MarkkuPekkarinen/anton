@@ -31,7 +31,10 @@ import httpx2 as httpx
 
 from anton.core.artifacts.internal_files import API_SPEC_FILENAME, PRD_FILENAME
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
+from anton.core.backends.sandbox import cell_sandbox_of
+from anton.utils.datasources import scrub_credentials
 from anton.core.llm.structured import looks_truncated
+from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS
 
 from . import sub_tools
 from .debug_trace import NullTrace
@@ -534,13 +537,16 @@ async def generate(
         trace_log=trace,
         progress=progress,
         spend=SpendGuard(session=session),
+        act_first=bool(getattr(session, "act_first", False)),
     )
     # The fence in `resolve_attachments` needs the workspace the paths are
     # supposed to be inside of; a session without one (bench, some tests)
     # gets the strict reading, not a permissive one.
     ws_base = getattr(getattr(session, "_workspace", None), "base", None)
     kept, dropped = resolve_attachments(
-        attachments, workspace=ws_base if isinstance(ws_base, Path) else None
+        attachments,
+        workspace=ws_base if isinstance(ws_base, Path) else None,
+        policy=cell_sandbox_of(getattr(session, "_scratchpads", None)),
     )
     state.attachments = kept
     if kept or dropped:
@@ -660,6 +666,14 @@ async def _generate_api_spec(
     else:
         system, user = build_api_spec_prompt(context, stateless=stateless)
     declared = _declared_api_paths(context)
+    if declared:
+        # Naming the paths up front: told only to copy them from spec.md, the
+        # model renamed them on the first attempt in most live runs.
+        listed = ", ".join(f"`{p}`" for p in declared.values())
+        user += (
+            f"\n\n`paths` must be exactly these, character for character: {listed} "
+            "(plus optional `/api/health`)."
+        )
     extra = ""
     for attempt in range(2):
         if attempt and on_retry is not None:
@@ -695,7 +709,13 @@ async def _generate_api_spec(
 
 
 _API_SPEC_METHODS = ("get", "post", "put", "patch", "delete")
-_DECLARED_PATH_RE = re.compile(r"\b(?:GET|POST|PUT|PATCH|DELETE)\s+(/api/[^\s`:,;)]+)")
+# What a path IS (plain, `{name}`, `{name:conv}` or `:name` segments), not
+# which characters end it: anything after the last segment is left out.
+_DECLARED_PATH_RE = re.compile(
+    r"\b(?:GET|POST|PUT|PATCH|DELETE)\b[*`]*\s+[*`]*"
+    r"(/api(?:/(?:\{[^{}\s]+\}|:[A-Za-z_]\w*|[\w.~-]+))+)"
+)
+_COLON_PARAM_RE = re.compile(r"/:([A-Za-z_]\w*)")
 _HEALTH_PATH = "/api/health"
 
 
@@ -717,7 +737,9 @@ def _declared_api_paths(context: str) -> dict[str, str]:
     if not match:
         return {}
     found: dict[str, str] = {}
-    for path in _DECLARED_PATH_RE.findall(match.group(1)):
+    for raw in _DECLARED_PATH_RE.findall(match.group(1)):
+        # A sentence's full stop; dots inside a path segment stay.
+        path = _COLON_PARAM_RE.sub(r"/{\1}", raw.rstrip("."))
         if _normalise_api_path(path) != _HEALTH_PATH:
             found.setdefault(_normalise_api_path(path), path)
     return found
@@ -791,6 +813,31 @@ def _strip_code_fence(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+async def _read_for_generator(session, artifact_path: Path, inp: dict):
+    """`read_text_file` for the write loop.
+
+    A path means what it means to `write_file`: relative to the artifact
+    folder, "/index.html" included; only a path to a real place on this
+    machine, or under `~`, is read where it is. A file in the folder is named relative to
+    it, so the generator never sees the folder's absolute path to copy into
+    `write_file`. Line numbers are never returned. The input is copied: `inp`
+    already sits in the conversation history.
+    """
+    # Lazy import avoids a tool_handlers <-> generate_artifact cycle.
+    from anton.core.tools.tool_handlers import handle_read_text_file
+
+    raw = str(inp.get("path") or "").strip()
+    path = raw
+    # The handler expands `~` itself, and reports an unknown `~user`.
+    if raw and not raw.startswith("~") and not sub_tools.is_host_path(raw):
+        path = str(artifact_path / raw.lstrip("/"))
+    return await handle_read_text_file(
+        session,
+        {**inp, "path": path, "line_numbers": False},
+        display_root=artifact_path,
+    )
+
+
 async def _run_loop(
     *,
     session: "ChatSession",
@@ -814,9 +861,10 @@ async def _run_loop(
 
     Returns a result dict ``{files_written, rounds_used, summary,
     scratchpad_execs}`` on success, or a plain error string on failure.
-    ``scratchpad_execs`` records every scratchpad ``exec`` the loop made —
-    ``{name, code, output}`` per call — so callers can hand the exact
-    data-access code that ran to later FSM steps.
+    ``scratchpad_execs`` records every scratchpad ``exec`` the loop ran —
+    ``{name, code, output}`` per call, leaving out a cell that never ran
+    (``CELL_NOT_RUN_REASONS``) — so callers can hand the exact data-access
+    code that ran to later FSM steps.
 
     ``spend``, when given, is the run's `SpendGuard`. Once the turn's ceiling
     is reached the loop tells the model to close its file and stop, and gives
@@ -857,7 +905,7 @@ async def _run_loop(
                 messages.append({"role": "user", "content": _WIND_DOWN_MSG})
                 wind_down_announced = True
         # First round: use the planning model for highest-quality initial generation.
-        # Subsequent rounds (retries, read_file refinements) use the coding model.
+        # Subsequent rounds (retries, reads to keep writing) use the coding model.
         first_round = round_idx == 0
         llm_call = session._llm.plan_stream if first_round else session._llm.code_stream
         # Every round gets the raised budget, round 0 included.
@@ -940,7 +988,7 @@ async def _run_loop(
             pending_body = body
             advice = _BODY_WITHOUT_CALL_MSG if body is not None else body_error
             # The assistant turn above already holds this reply's `tool_use`
-            # blocks (`finish`, `read_file`, ...). Each needs a `tool_result`
+            # blocks (`finish`, `read_text_file`, ...). Each needs a `tool_result`
             # in the very next message or the provider rejects the following
             # request; without this the run died as "generator crashed" on
             # the normal "final chunk plus finish" ending whenever the model
@@ -1012,20 +1060,23 @@ async def _run_loop(
                             injected.add(inject_msg)
                             msg = f"{msg}\n\n{inject_msg}"
                 result_blocks.append(sub_tools.tool_result(tc.id, msg))
-            elif name == "read_file":
-                res = sub_tools.read_file(
-                    artifact_path, inp.get("path", ""),
-                    full=bool(inp.get("full", False)),
-                )
-                result_blocks.append(sub_tools.tool_result(tc.id, res["message"]))
+            elif name == "read_text_file":
+                outcome = await _read_for_generator(session, artifact_path, inp)
+                # The filter the main loop gives read_text_file results, so a
+                # saved secret in a read file reaches the builder as its marker.
+                result_blocks.append(sub_tools.tool_result(tc.id, scrub_credentials(outcome.content)))
             elif name == "scratchpad":
                 # Full scratchpad access: the sub-generator pulls or rebuilds
                 # the data described in the brief's `## Data` section. Lazy
                 # import avoids a tool_handlers <-> generate_artifact cycle.
                 from anton.core.tools.tool_handlers import handle_scratchpad
 
-                content = sub_tools.unwrap_outcome(await handle_scratchpad(session, inp))
-                if inp.get("action") == "exec":
+                outcome = await handle_scratchpad(session, inp)
+                content = sub_tools.unwrap_outcome(outcome)
+                # A cell that never ran, such as a write the user didn't
+                # approve, is no data-access code for later steps to reuse.
+                ran = getattr(outcome, "reason", "") not in CELL_NOT_RUN_REASONS
+                if inp.get("action") == "exec" and ran:
                     scratchpad_execs.append(
                         {
                             "name": str(inp.get("name") or ""),
@@ -1039,7 +1090,7 @@ async def _run_loop(
                 result_blocks.append(sub_tools.tool_result(
                     tc.id,
                     f"Error: unknown sub-tool `{name}`. "
-                    "Use write_file, read_file, or finish.",
+                    "Use write_file, read_text_file, or finish.",
                 ))
 
         # Round accounting rides on the same user message as the tool results.

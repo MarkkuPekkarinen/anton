@@ -368,13 +368,20 @@ RULES: tuple[Rule, ...] = (
          _both(_FRONT_BOTH, "explicit `<body>`")),
     Rule("errors", 'Missing <meta name="viewport" content="width=device-width, initial-scale=1.0">.',
          _both(_FRONT_BOTH, 'name="viewport"')),
-    # Only fetch(). `href`/`src` were dropped from the contract deliberately
-    # (I-17): the rule failed two correct artifacts in a row over a link back to
-    # a source article and its images, and the retry passed by moving the same
-    # URLs into JS strings. Do not restore it without a check that sees the
-    # rendered DOM rather than the HTML text.
+    # Only fetch(). ABSOLUTE URLs in `href`/`src` were dropped from the contract
+    # deliberately (I-17): the rule failed two correct artifacts in a row over a
+    # link back to a source article and its images, and the retry passed by
+    # moving the same URLs into JS strings. Do not restore it without a check
+    # that sees the rendered DOM rather than the HTML text.
     Rule("errors", "Absolute URL is not allowed in fetch(): ...",
          _both(_FRONT_BOTH, "absolute URL")),
+    # Root-relative paths. This does not reopen I-17 above: that decision is
+    # about ABSOLUTE URLs, which stay unchecked. A value that starts with a
+    # single `/` is a different defect — the page is served under a path
+    # prefix, in the app preview and once published, and such a path drops
+    # it — and the rule flags only that.
+    Rule("errors", "Root-relative path is not allowed: ",
+         _both(_FRONT_BOTH, "No root-relative path")),
     Rule("errors", "Frontend must not use the global name window.__antonCommentsLayer.",
          _both(_FRONT_BOTH, "__antonCommentsLayer")),
     Rule("errors", "Frontend opens a <script> block but never closes it with </script>.",
@@ -448,7 +455,7 @@ RULES: tuple[Rule, ...] = (
 )
 
 # Infrastructure failures: the generator cannot comply with them, so they have no
-# prompt marker. Six of the seven are emitted by the VerifyResult constructor
+# prompt marker. Seven of the eight are emitted by the VerifyResult constructor
 # rather than .append — which is why the walk must cover both forms.
 ALLOWLIST: tuple[str, ...] = (
     "backend.py failed to import in the venv: ",
@@ -456,6 +463,7 @@ ALLOWLIST: tuple[str, ...] = (
     "Dependency install failed:\n",
     "Scratchpad venv Python is unavailable (remote runtime?).",
     "backend.py failed to compile:\n",
+    "backend.py compile timed out after ",
     "backend.py import timed out after ",
     "backend introspection produced no JSON. stderr:\n",
 )

@@ -43,6 +43,11 @@ class CoreSettings(BaseSettings):
     verifier_jev_timeout_s: float = 2.0
     # Minimum probability of Jev's COMPLETE/WAITING for it to decide without the LLM.
     verifier_jev_min_p: float = 0.8
+    # Hold a scratchpad cell that changes a database, or deletes, renames or
+    # moves a file that existed when the turn began, until the user picks
+    # Approve; anything else refuses the cell. ANTON_WRITE_APPROVAL. Off by
+    # default: the host that needs it turns it on.
+    write_approval: bool = False
     # Per-turn spend ceiling in RAW tokens — input + output + cache_read +
     # cache_creation, i.e. `TurnCost.total_tokens` (ENG-1286). 0 disables it.
     #
@@ -55,9 +60,9 @@ class CoreSettings(BaseSettings):
     # opposite verdict, because they protect different things.
     #
     # 1.25M measured against 30 days of production (2026-08-12): trips ~15% of
-    # external turns at a median of 16 LLM calls in. Set above Kiranam's worst
-    # turn (1,480,766) and you stop catching the case this exists for — 1.5M
-    # misses it by 20k tokens.
+    # external turns at a median of 16 LLM calls in. Set above the worst turn
+    # of the runaway session this exists for (1,480,766) and you stop catching
+    # it — 1.5M misses it by 20k tokens.
     max_turn_tokens: int = 1_250_000
     context_pressure_threshold: float = 0.7
     max_consecutive_errors: int = 5

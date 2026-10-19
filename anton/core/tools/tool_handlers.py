@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from anton.core.backends.base import Cell
+from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.side_effect import SideEffectResult, now_iso
 from anton.core.utils.scratchpad import (
@@ -16,6 +17,7 @@ from anton.core.utils.scratchpad import (
     observe_scratchpad_cell,
     cell_failure_reason,
     install_call_installed_something,
+    refuse_pad_name,
     reject_invalid_packages,
     send_package_install_event,
 )
@@ -25,6 +27,28 @@ if TYPE_CHECKING:
 
 
 _log = logging.getLogger(__name__)
+
+
+def preliminary_cell(
+    *,
+    code: str,
+    description: str,
+    estimated_time: str,
+    estimated_seconds: int,
+) -> Cell:
+    """The cell pre-execute observers see: the code and its intent, no output yet.
+
+    Both exec paths (`handle_scratchpad` and `ChatSession`'s inline streaming
+    exec) build it here, so observers get the same shape from either one.
+    """
+    return Cell(
+        code=code,
+        stdout="",
+        stderr="",
+        error=None,
+        description=description,
+        estimated_time=estimated_time or str(estimated_seconds),
+    )
 
 
 async def _fire_pre_execute(session: "ChatSession", cell: Cell) -> None:
@@ -85,7 +109,7 @@ def resolve_artifact_store(session: "ChatSession"):
 
 
 def _track_artifact(session: "ChatSession", store, slug: str, *, summary: str = "") -> None:
-    """Record that THIS turn created or opened `slug`.
+    """Record that THIS turn created, generated or updated `slug`.
 
     Two records, for two different readers:
 
@@ -150,7 +174,13 @@ def snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
 _ARTIFACT_LINT_SIZE_CEILING = 10 * 1024 * 1024  # 10 MB
 
 
-def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
+# Said once per file when a check that would start a browser or LibreOffice
+# is skipped because agent code runs in a sandbox on this host.
+_SANDBOX_BROWSER_SKIP = "browser check skipped: agent code runs in a sandbox on this deployment"
+_SANDBOX_OFFICE_SKIP = "LibreOffice check skipped: agent code runs in a sandbox on this deployment"
+
+
+def _artifact_linters(*, cell_sandbox: CellSandbox | None = None) -> dict[str, Callable[[Path], list[str] | None]]:
     """suffix -> checker. `None` means it could not run at all (e.g. no
     headless browser); `[]` means it ran and found nothing; a non-empty
     list is real findings — only that last case is ever appended to the
@@ -159,12 +189,22 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     Add a format by adding one entry here. Only `.xlsx`/`.html`/`.pptx`/
     `.docx` are registered — every other extension is silently unchecked,
     which is honest as-is: nothing ever claimed to validate a `.csv`.
+
+    A `cell_sandbox` policy skips the checks that start a browser or
+    LibreOffice on the agent's file (each of them also refuses under it);
+    the in-process lints still run. Where the skipped tool is installed, the
+    result says the check was skipped.
     """
-    from anton.core.artifacts.html_lint import lint_html
+    from anton.core.artifacts.html_lint import discover_browser, lint_html
     from anton.core.artifacts.office_open_check import check_opens_via_office
     from anton.core.artifacts.ooxml_lint import lint_ooxml
     from anton.core.artifacts.xlsx_lint import lint_xlsx
-    from anton.core.artifacts.xlsx_office_check import check_xlsx_via_office
+    from anton.core.artifacts.xlsx_office_check import _discover_office, check_xlsx_via_office
+
+    sandboxed = cell_sandbox is not None
+
+    def _office_skip() -> list[str]:
+        return [_SANDBOX_OFFICE_SKIP] if _discover_office() is not None else []
 
     def _xlsx_linter(path: Path) -> list[str] | None:
         # Both always run — LibreOffice recalculates and catches any
@@ -173,7 +213,13 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
         # sheet prefix") where the oracle only names the symptom
         # ("#VALUE!"), and some cells only the oracle catches at all
         # (a genuine #REF!/#DIV/0! unrelated to same-sheet circularity).
-        office_findings = check_xlsx_via_office(path)
+        if sandboxed:
+            structural_findings = lint_xlsx(path)
+            skipped = _office_skip()
+            if structural_findings is None and not skipped:
+                return None
+            return [f.message() for f in (structural_findings or [])] + skipped
+        office_findings = check_xlsx_via_office(path, cell_sandbox=cell_sandbox)
         structural_findings = lint_xlsx(path)
 
         if office_findings is None and structural_findings is None:
@@ -193,7 +239,9 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
         return messages
 
     def _html_linter(path: Path) -> list[str] | None:
-        findings = lint_html(path)
+        if sandboxed:
+            return [_SANDBOX_BROWSER_SKIP] if discover_browser() is not None else None
+        findings = lint_html(path, cell_sandbox=cell_sandbox)
         if findings is not None:
             return [f.message() for f in findings]
         return None
@@ -207,7 +255,10 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
             structural_findings = lint_ooxml(path, kind)
             if structural_findings:
                 return [f.message() for f in structural_findings]
-            office_findings = check_opens_via_office(path)
+            if sandboxed:
+                skipped = _office_skip()
+                return skipped if structural_findings is not None or skipped else None
+            office_findings = check_opens_via_office(path, cell_sandbox=cell_sandbox)
             if structural_findings is None and office_findings is None:
                 return None
             return [f.message() for f in (office_findings or [])]
@@ -222,14 +273,19 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
     }
 
 
-def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
+def lint_changed_artifact_files(
+    store, before: dict[str, float], *, cell_sandbox: CellSandbox | None = None
+) -> list[str]:
     """Run the format-appropriate checker on artifact folders this cell
     edited (mtime moved since `before`), so findings reach the agent as
     tool-result text right away, not only via a later open()/list().
+
+    Under a sandbox policy the checks that start a browser or LibreOffice
+    are skipped: they would run the agent's file outside the sandbox.
     """
     from anton.core.artifacts.store import iter_content_files
 
-    linters = _artifact_linters()
+    linters = _artifact_linters(cell_sandbox=cell_sandbox)
     if not linters:
         return []
     after = snapshot_existing_artifact_mtimes(store)
@@ -256,23 +312,19 @@ def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
 
 
 def track_edits_since(session: "ChatSession", store, before: dict[str, float]) -> None:
-    """Catch an artifact edit the agent made without calling `open_artifact`.
+    """Attribute the artifact edits one scratchpad cell made.
 
-    `open_artifact` is how attribution is SUPPOSED to work (see
-    `_track_artifact` above), but nothing forces the agent to call it again
-    once it already has an artifact's path from earlier in the conversation —
-    it can (and in practice does) just write straight into a remembered
-    folder via the scratchpad, skipping the tool call entirely. Without this,
-    that edit's `_artifacts_touched` stays empty and the host can never card
-    it, even though the file genuinely changed this turn (ENG-1933 follow-up).
+    The agent edits artifact files from scratchpad cells, which the tool layer
+    never sees, so this is how such an edit reaches `_artifacts_touched` and the
+    artifact's provenance. Without it the host could never card the edit, even
+    though the file genuinely changed this turn.
 
     Scoped to THIS cell's own execution window — the snapshot taken right
     before `pad.execute` vs. right after — rather than the whole turn, to
-    keep the diff-based race this reintroduces (a concurrent sibling
-    conversation happening to bump some other artifact's mtime) as narrow as
-    possible: seconds, not minutes. Narrower than the pre-ENG-1933 exposure,
-    not zero — the same trade-off `index_turn_artifacts` already accepts for
-    Hermes's edits.
+    keep the diff-based race (a concurrent sibling conversation happening to
+    bump some other artifact's mtime) as narrow as possible: seconds, not
+    minutes. Not zero — the same trade-off `index_turn_artifacts` already
+    accepts for Hermes's edits.
     """
     already_touched = getattr(session, "_artifacts_touched", None) or ()
     after = snapshot_existing_artifact_mtimes(store)
@@ -569,6 +621,7 @@ async def _drain_progress(queue):
     describe steps that already finished.
     """
     from anton.core.tools.generate_artifact.progress import (
+        MESSAGE_PREFIX,
         PEEK_PREFIX,
         QUESTION_CLOSED,
         QUESTION_OPEN,
@@ -588,6 +641,9 @@ async def _drain_progress(queue):
             # describes text that has long since moved on.
             if not depth:
                 yield ToolProgress(line[len(PEEK_PREFIX):], kind="peek")
+            continue
+        if line.startswith(MESSAGE_PREFIX):
+            yield ToolProgress(line[len(MESSAGE_PREFIX):], kind="message")
             continue
         if line == QUESTION_OPEN:
             # A counter, not a flag: `show_and_confirm` wraps a call that
@@ -637,6 +693,9 @@ _STATUS_INSTRUCTIONS = {
         "and `warnings` what the verifier flagged without failing the step: "
         "when either is non-empty, tell the user in one sentence what was "
         "not checked or flagged — never present a skipped check as passed."
+        " When the result carries `brief_shown: true`, the user has already "
+        "seen the brief: do not repeat it. When it carries `brief_summary`, "
+        "the user has not seen it: sum up its assumptions in a sentence or two."
     ),
     "cancelled": (
         "The user declined the brief. Do NOT write prd.md yourself and do "
@@ -654,11 +713,13 @@ _STATUS_INSTRUCTIONS = {
     "stopped_over_budget": (
         "This turn reached its token budget and the pipeline stopped "
         "cleanly; what it had finished is on disk. Tell the user how far it "
-        "got and ask whether to continue. When the result carries a "
-        "non-empty `brief_summary`, show it to the user as part of that "
-        "question: the pipeline stopped before they could confirm it, and "
-        "the repeat call is taken as their agreement to that brief. If they "
-        "agree, call this tool again with the SAME `user_request` — it "
+        "got and ask whether to continue. When the result carries "
+        "`brief_shown: true`, the user already saw the brief and was not "
+        "asked to confirm it: do not show it again. Otherwise, when it "
+        "carries a non-empty `brief_summary`, show it to the user as part of "
+        "that question: the pipeline stopped before they could confirm it, "
+        "and the repeat call is taken as their agreement to that brief. If "
+        "they agree, call this tool again with the SAME `user_request` — it "
         "resumes rather than restarting. A requested change goes in "
         "`agent_understanding`, with `user_request` left as it was."
     ),
@@ -805,17 +866,34 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     )
 
 
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def _field_names(value) -> list:
+    """`fields` as a list; a string may name several, separated by commas."""
+    names: list = []
+    for item in _as_list(value):
+        if isinstance(item, str):
+            names += [part.strip() for part in item.split(",") if part.strip()]
+        else:
+            names.append(item)
+    return names
+
+
 async def handle_list_artifacts(
     session: "ChatSession", tc_input: dict
 ) -> "str | ToolOutcome":
-    """List every artifact in the workspace, newest first.
+    """List artifacts as text, grouped by artifacts root, newest first.
 
-    Output is a JSON array of summaries — slug, name, type,
-    description, file count, last-update timestamp. The agent uses
-    this to decide whether to create a new artifact or modify an
-    existing one.
+    Without `match` the default fields are a summary for finding an artifact;
+    with `match` they are the full record for editing it.
     """
-    import json
+    from anton.core.artifacts.listing import FIELDS, SUMMARY_FIELDS, render_listing
 
     store = resolve_artifact_store(session)
     if store is None:
@@ -827,100 +905,34 @@ async def handle_list_artifacts(
             ok=False, reason="store_unavailable",
         )
 
-    artifacts = store.list()
-    summaries = [
-        {
-            "slug": a.slug,
-            "name": a.name,
-            "type": a.type,
-            "description": a.description,
-            "file_count": len(a.files),
-            "updatedAt": a.updatedAt,
-        }
-        for a in artifacts
-    ]
-    # Tier 1: a listing was produced. An EMPTY list is still a success —
-    # "there are no artifacts" is the correct answer, not a failure.
-    return ToolOutcome(content=json.dumps(summaries, indent=2), ok=True)
+    keys = [str(key).strip() for key in _as_list(tc_input.get("match"))]
+    keys = [key for key in keys if key]
+    if tc_input.get("fields") is None:
+        fields = FIELDS if keys else SUMMARY_FIELDS
+    else:
+        requested = _field_names(tc_input.get("fields"))
+        valid = ", ".join(FIELDS)
+        if not requested:
+            return ToolOutcome(
+                content=f"Error: fields is empty. Valid fields: {valid}.",
+                ok=False, reason="invalid_fields",
+            )
+        for field in requested:
+            if field not in FIELDS:
+                return ToolOutcome(
+                    content=f'Error: unknown field "{field}". Valid fields: {valid}.',
+                    ok=False, reason="invalid_fields",
+                )
+        fields = requested
 
-
-async def handle_open_artifact(
-    session: "ChatSession", tc_input: dict
-) -> "str | ToolOutcome":
-    """Load an existing artifact's metadata + folder path.
-
-    Returns the same shape as `create_artifact` plus the file list
-    so the agent can decide what to edit. 404-shaped error when the
-    slug is unknown.
-    """
-    import json
-
-    store = resolve_artifact_store(session)
-    if store is None:
-        # Tier 2 (ENG-2248): the tool cannot operate at all, so a retry
-        # cannot help and repetition is thrash. Reuses the existing
-        # `store_unavailable` sentinel key (external_wall/service_unavailable).
-        return ToolOutcome(
-            content="Artifact store unavailable (no workspace bound to this session).",
-            ok=False, reason="store_unavailable",
-        )
-
-    slug = (tc_input.get("slug") or "").strip()
-    if not slug:
-        # Tier 2: a malformed call; retrying it unchanged cannot work.
-        return ToolOutcome(
-            content="Error: `slug` is required.",
-            ok=False, reason="missing_slug",
-        )
-    artifact = store.open(slug)
-    if artifact is None:
-        # Tier 3 (ENG-2248): deliberately left ok=None. Same shape as
-        # `recall_skill`'s NO MATCH — the store worked and the artifact simply
-        # does not exist. The model can list artifacts and pick a real slug, so
-        # this is arguably its own error; but it is also how a model discovers
-        # what exists, and ok=False would feed that exploration to the breaker.
-        # Needs its own decision, not a side effect of this pass.
-        return f"Error: no artifact found for slug `{slug}`."
-    folder = store.folder_for(artifact.slug)
-    # Opening is how the agent gets an artifact's path in order to write to
-    # it, so this is the turn's declaration of intent to modify. Tracked here
-    # rather than at write time because the writes themselves happen in
-    # scratchpad cells the tool layer never sees.
-    _track_artifact(session, store, artifact.slug, summary=f"Opened artifact: {artifact.name}")
-    # Tier 1: the artifact was opened and its descriptor returned.
-    return ToolOutcome(content=json.dumps({
-        "id": artifact.id,
-        "slug": artifact.slug,
-        "name": artifact.name,
-        "type": artifact.type,
-        "description": artifact.description,
-        "path": str(folder),
-        "files": [{"path": f.path, "bytes": f.bytes} for f in artifact.files],
-        **_primary_content(folder, artifact.primary),
-    }, indent=2), ok=True)
-
-
-# Opening an artifact is almost always followed by reading its entry file, so a
-# small text one comes back with the descriptor and saves a model round trip.
-OPEN_ARTIFACT_CONTENT_MAX_BYTES = 20_000
-
-
-def _primary_content(folder: Path, primary: str | None) -> dict:
-    """The primary file's text, or why it was left out; {} when there is none."""
-    if not primary:
-        return {}
-    root = Path(folder).resolve()
-    target = (root / primary).resolve()
-    if not target.is_relative_to(root) or not target.is_file():
-        return {}
-    size = target.stat().st_size
-    if size > OPEN_ARTIFACT_CONTENT_MAX_BYTES:
-        return {"primary_content_omitted": f"{primary} is {size} bytes; read it from the scratchpad"}
-    try:
-        text = target.read_text(encoding="utf-8")
-    except (UnicodeDecodeError, OSError):
-        return {"primary_content_omitted": f"{primary} is not a text file"}
-    return {"primary_content": text}
+    if keys:
+        artifacts, unmatched = store.find(keys)
+    else:
+        artifacts, unmatched = store.list(), []
+    root = Path(store.root).absolute()
+    # Tier 1: a listing was produced. No artifacts, or unmatched keys, is still
+    # a correct answer, not a failure.
+    return ToolOutcome(content=render_listing([(root, artifacts)], fields, unmatched), ok=True)
 
 
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:
@@ -1049,6 +1061,9 @@ async def handle_scratchpad(
             ok=False,
             reason="scratchpad_missing_name",
         )
+    refused_name = refuse_pad_name(name)
+    if refused_name is not None:
+        return refused_name
 
     # ACC emit helper: use the session's safe wrapper if it exists,
     # otherwise no-op. Defined as a local closure so each emit site
@@ -1074,19 +1089,17 @@ async def handle_scratchpad(
         # never sees these — observation is an orchestration concern,
         # so it lives at the dispatcher layer where the data is most
         # natural and where local/remote runtimes stay interchangeable.
-        prelim_cell = Cell(
+        prelim_cell = preliminary_cell(
             code=code,
-            stdout="",
-            stderr="",
-            error=None,
             description=description,
-            estimated_time=estimated_time or str(estimated_seconds),
+            estimated_time=estimated_time,
+            estimated_seconds=estimated_seconds,
         )
         await _fire_pre_execute(session, prelim_cell)
 
         # Snapshot existing artifacts' content mtimes before the cell runs, so
-        # an edit the cell makes without a prior `open_artifact` call this
-        # turn still gets attributed below (see `track_edits_since`).
+        # an artifact edit the cell makes is attributed below (see
+        # `track_edits_since`).
         artifact_store = resolve_artifact_store(session)
         before_artifact_mtimes = (
             snapshot_existing_artifact_mtimes(artifact_store)
@@ -1118,6 +1131,7 @@ async def handle_scratchpad(
                     lint_messages = await asyncio.to_thread(
                         lint_changed_artifact_files,
                         artifact_store, before_artifact_mtimes,
+                        cell_sandbox=cell_sandbox_of(getattr(session, "_scratchpads", None)),
                     )
                 except Exception:
                     # Best-effort: a lint crash must never fail
@@ -1135,7 +1149,8 @@ async def handle_scratchpad(
         if lint_messages:
             # [artifact lint] follows format_cell_result's own [output]/[error]
             # labeling convention so the agent can tell the finding apart from
-            # its own code's output.
+            # its own code's output. cowork-server's figure sources cut this
+            # block from a replayed cell's output.
             content += "\n\n[artifact lint]\n" + "\n".join(lint_messages)
         return ToolOutcome(
             content=content,
@@ -1222,8 +1237,11 @@ async def handle_read_image(
             ok=False, reason="missing_name",
         )
 
+    # Set only by a multi-person host (Cowork with the Landlock sandbox).
+    # The desktop, the CLI and the cloud pod carry none and read as before.
+    policy = cell_sandbox_of(getattr(session, "_scratchpads", None))
     try:
-        path = Path(file_path).expanduser()
+        path = _expand_home(file_path, policy)
         if not path.is_absolute():
             # Resolve relative paths against the project workspace (where
             # artifacts/decks live), not the process cwd. Under the desktop
@@ -1234,11 +1252,29 @@ async def handle_read_image(
             base = getattr(getattr(session, "_workspace", None), "base", None)
             root = Path(base) if base else Path.cwd()
             path = (root / path).resolve()
-    except OSError as exc:
+        if policy is not None:
+            path = path.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
         # Tier 2: the model supplied a path that will not parse.
         return ToolOutcome(
             content=f"Error: invalid path '{file_path}': {exc}",
             ok=False, reason="invalid_type",
+        )
+
+    if policy is not None and not policy.allows_read(path):
+        # This process runs outside the sandbox, so it admits only what the
+        # person's own cells may read. Checked before the file is looked at,
+        # and worded without the resolved path, so the reply is the same
+        # whether another person's file exists or not.
+        return ToolOutcome(
+            content=(
+                f"Error: access denied: {file_path} is outside the files this "
+                "conversation may read (the project, the scratchpad's home and "
+                "temp folders, the shared folder and the conversation's "
+                "attachments). If the user wants you to see this image, ask "
+                "them to attach it to the conversation."
+            ),
+            ok=False, reason="access_denied",
         )
 
     if not path.is_file():
@@ -1310,9 +1346,11 @@ async def handle_read_image(
 
     summary = f"Loaded {path.name} ({human_size(len(raw))})."
     try:
+        import io
         from PIL import Image as _PILImage
 
-        with _PILImage.open(path) as im:
+        # The bytes already read, not a second open of the path.
+        with _PILImage.open(io.BytesIO(raw)) as im:
             summary = f"Loaded {path.name} ({im.width}x{im.height}, {human_size(len(raw))})."
     except Exception:
         pass
@@ -1343,6 +1381,182 @@ async def handle_read_image(
         ],
         ok=True,
     )
+
+
+def _expand_home(file_path: str, policy: "CellSandbox | None") -> Path:
+    """`file_path` with `~` expanded to the HOME the person's cells run with.
+
+    Under a policy the process HOME is the server's, which holds every
+    person's space; the cell's HOME is the policy's. Without one, `~` is the
+    process HOME as before.
+    """
+    if policy is not None and (file_path == "~" or file_path.startswith("~/")):
+        return policy.home_dir / file_path[1:].lstrip("/")
+    return Path(file_path).expanduser()
+
+
+def _read_roots(session: "ChatSession") -> "tuple[Path, tuple[Path, ...]]":
+    """The base for relative paths, and the folders anton manages that may be read.
+
+    Hosts and tests pass partial sessions; anything that is not a real path is
+    ignored rather than trusted.
+    """
+    workspace = getattr(session, "_workspace", None)
+    base = getattr(workspace, "base", None)
+    base = Path(base) if isinstance(base, (str, Path)) else Path.cwd()
+    owned: list[Path] = []
+    artifacts_dir = getattr(workspace, "artifacts_dir", None)
+    if isinstance(artifacts_dir, (str, Path)):
+        owned.append(Path(artifacts_dir))
+    drafts_root = getattr(session, "_skill_drafts_root", None)
+    if isinstance(drafts_root, (str, Path)):
+        owned.append(Path(drafts_root))
+    # Both hosts stage skill drafts here; the desktop host keeps its own draft
+    # tool and does not pass `_skill_drafts_root`.
+    owned.append(base / ".anton" / "skill_drafts")
+    return base, tuple(owned)
+
+
+def _line_arg(value) -> "int | None":
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("a line number cannot be a boolean")
+    # `int(2.5)` is 2: a fractional line number would silently read another range.
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError("a line number must be a whole number")
+    return int(value)
+
+
+def _flag(value) -> bool:
+    # `bool("false")` is True, and a model or gateway may send the flag as a
+    # string or a number.
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    return isinstance(value, str) and value.strip().lower() in ("true", "1")
+
+
+def _shown_path(path: Path, display_root: "Path | None") -> str:
+    """`path` as the result names it: relative to `display_root` when inside it."""
+    if display_root is None:
+        return str(path)
+    roots = [display_root]
+    try:
+        roots.append(display_root.resolve())
+    except (OSError, RuntimeError):
+        pass
+    for root in roots:
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+    return str(path)
+
+
+async def handle_read_text_file(
+    session: "ChatSession", tc_input: dict, *, display_root: "Path | None" = None
+) -> ToolOutcome:
+    """Read a text file the access policy allows, as a range of lines.
+
+    Writes nothing: reading an artifact is not attributed to the turn.
+    `display_root`: name files inside it relative to it in the header and in
+    errors (the artifact generator passes its folder).
+    """
+    import asyncio
+
+    raw = tc_input.get("path")
+    if not isinstance(raw, str) or not raw.strip():
+        return ToolOutcome(content="Error: `path` is required.", ok=False, reason="missing_path")
+    # Resolving the path, the policy check and the read all touch the
+    # filesystem, which on a network mount is too slow for the event loop.
+    return await asyncio.to_thread(_read_text_file, session, raw.strip(), tc_input, display_root)
+
+
+def _read_text_file(
+    session: "ChatSession", raw: str, tc_input: dict, display_root: "Path | None"
+) -> ToolOutcome:
+    import stat
+
+    from anton.core.tools import file_access, text_file
+
+    base, owned_roots = _read_roots(session)
+    policy = cell_sandbox_of(getattr(session, "_scratchpads", None))
+    try:
+        path = _expand_home(raw, policy)
+        if not path.is_absolute():
+            path = base / path
+        resolved = path.resolve()
+    except (ValueError, RuntimeError, OSError) as exc:
+        return ToolOutcome(
+            content=f"Error: invalid path {raw!r}: {exc}", ok=False, reason="invalid_path"
+        )
+    shown = _shown_path(path, display_root)
+
+    refusal = file_access.under_policy(
+        file_access.read_refusal(resolved, workspace=base, owned_roots=owned_roots),
+        resolved, policy, outside=file_access.REFUSED_OUTSIDE,
+    )
+    if refusal is not None:
+        _log.debug("read_text_file refused %s: %s", resolved, refusal)
+        resolved_shown = _shown_path(resolved, display_root)
+        # Under a policy the target can be another person's file: name only
+        # the path as given.
+        same = resolved_shown == shown or policy is not None
+        where = shown if same else f"{shown} (it resolves to {resolved_shown})"
+        message = f"Error: access denied: {where} is {refusal}."
+        if refusal == file_access.REFUSED_OUTSIDE:
+            message += (
+                " If the user wants you to use this file, ask them to attach it"
+                " to the conversation."
+            )
+        return ToolOutcome(content=message, ok=False, reason="access_denied")
+
+    try:
+        mode = resolved.stat().st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return ToolOutcome(content=f"Error: file not found: {shown}", ok=False, reason="path_not_found")
+    except OSError as exc:
+        return ToolOutcome(content=f"Error: cannot read {shown}: {exc}", ok=False, reason="read_failed")
+    if not stat.S_ISREG(mode):
+        return ToolOutcome(content=f"Error: {shown} is not a file.", ok=False, reason="not_a_file")
+
+    try:
+        start_line = _line_arg(tc_input.get("start_line"))
+        end_line = _line_arg(tc_input.get("end_line"))
+    except (TypeError, ValueError, OverflowError):
+        return ToolOutcome(
+            content="Error: `start_line` and `end_line` must be integers.",
+            ok=False, reason="invalid_range",
+        )
+
+    try:
+        result = text_file.read_text_range(
+            resolved, shown, start_line, end_line,
+            line_numbers=_flag(tc_input.get("line_numbers")),
+        )
+    except text_file.FileTooLargeError:
+        limit_mb = text_file.MAX_FILE_BYTES // (1024 * 1024)
+        return ToolOutcome(
+            content=f"Error: {shown} is larger than {limit_mb} MB. Read the part you need in the scratchpad.",
+            ok=False, reason="file_too_large",
+        )
+    except text_file.NotTextError:
+        return ToolOutcome(
+            content=f"Error: {shown} is not a UTF-8 text file. Read it in the scratchpad.",
+            ok=False, reason="not_text",
+        )
+    except text_file.InvalidRangeError as exc:
+        return ToolOutcome(content=f"Error: {exc}.", ok=False, reason="invalid_range")
+    except OSError as exc:
+        return ToolOutcome(content=f"Error: cannot read {shown}: {exc}", ok=False, reason="read_failed")
+
+    _log.debug(
+        "read_text_file %s lines %d-%d of %d",
+        resolved, result.first, result.last, result.total_lines,
+    )
+    return ToolOutcome(content=result.render(), ok=True)
 
 
 # ---------------------------------------------------------------------------

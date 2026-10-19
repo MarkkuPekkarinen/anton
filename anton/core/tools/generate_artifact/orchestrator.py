@@ -21,6 +21,8 @@ from anton.core.artifacts.internal_files import (
     TECH_SPEC_FILENAME,
 )
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
+from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox, cell_sandbox_of
+from anton.utils.datasources import scrub_output
 
 from . import attachments, engine, prompts, verifiers
 from .discovery import checkpoint as cp
@@ -282,9 +284,9 @@ def _spec_context(state: GenState) -> str:
     """PRD (or the brief when there is none) + gathered data + tech spec —
     the shared context handed to api-spec and generation nodes.
 
-    The brief is NOT sent next to a PRD. Since phase B it is the confirmation
-    proposal shown to the user — "here is what I suggest, continue or say
-    what to change" — with questions the accepted PRD has already settled;
+    The brief is NOT sent next to a PRD. Since phase B it is the short
+    proposal shown to the user, with questions and assumptions the PRD has
+    already settled;
     the PRD supersedes it on every point. Measured 2026-09-16: 1 KB of every
     generation round, and a second voice the generator had to reconcile.
     """
@@ -336,6 +338,30 @@ async def _make_api_spec(state: GenState) -> str | None:
         state.internal_files.append(API_SPEC_FILENAME)
     state.record("make_api_spec", "done", "wrote openapi.json")
     return None
+
+
+def _cell_sandbox(state: GenState) -> CellSandbox | None:
+    """The sandbox policy the session's scratchpads run agent code under, or None."""
+    return cell_sandbox_of(getattr(state.session, "_scratchpads", None))
+
+
+def _verify_datasource_env(state: GenState) -> dict[str, str]:
+    """The `DS_*` the sandboxed import check gets: the connections backend.py reads.
+
+    The connections are declared into metadata only after this check passes,
+    so they are mapped from the source here, the way `_declare_datasources`
+    will map them, and resolved the way the launch resolves them.
+    """
+    from anton.core.artifacts.backend_launcher import build_datasource_env
+
+    try:
+        source = (state.artifact_path / "backend.py").read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    refs, _ = _map_datasources(state.session, verifiers._ds_keys(source))
+    return build_datasource_env(
+        getattr(state.session, "_data_vault", None), refs, slug=state.slug
+    )
 
 
 def _vault(session):
@@ -598,6 +624,11 @@ async def _gen_verify_backend(state: GenState, extra_context: str = "") -> str |
             slug=state.slug, artifact_path=state.artifact_path,
             artifact_type=state.artifact_type,
             api_operations=verifiers.contract_operations(state.api_spec),
+            **(
+                {"ds_env": _verify_datasource_env(state)}
+                if _cell_sandbox(state) is not None
+                else {}
+            ),
         )
         state.trace_log.verifier(
             node="verify_backend", ok=verdict.ok,
@@ -771,10 +802,14 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
                 # Second gate, only once the text checks pass and only for the
                 # single-file page — see `verify_frontend_live` for why not the
                 # fullstack frontend. In a thread: the browser subprocess
-                # blocks for up to its 8-second timeout.
-                live = await asyncio.to_thread(verifiers.verify_frontend_live, entry_file)
+                # blocks for up to its 8-second timeout. The sandbox starts
+                # no browser.
+                policy = _cell_sandbox(state)
+                live = await asyncio.to_thread(
+                    verifiers.verify_frontend_live, entry_file, cell_sandbox=policy
+                )
                 if live is None:
-                    reason = verifiers.browser_check_skip_reason()
+                    reason = verifiers.browser_check_skip_reason(sandboxed=policy is not None)
                     state.trace_log.node("verify_frontend", "browser_skipped", reason)
                     _note_skipped(state, f"browser load of the page: {reason}")
                 else:
@@ -887,8 +922,11 @@ async def _tail_log(state: GenState, limit: int = 2000) -> str:
     log = state.artifact_path / BACKEND_LOG_FILENAME
     if not log.is_file():
         return ""
-    text = log.read_text(encoding="utf-8", errors="replace")
-    return text[-limit:]
+    # Scrubbed before the cut, so a cut between a key and its token cannot strip the
+    # key; in a thread, since the whole log is read and it grows across relaunches.
+    return await asyncio.to_thread(
+        lambda: scrub_output(log.read_text(encoding="utf-8", errors="replace"))[-limit:]
+    )
 
 
 def _launch_datasource_env(state: GenState) -> dict[str, str]:
@@ -1028,10 +1066,11 @@ async def _verify_app_in_browser(state: GenState) -> "str | None | object":
     `OVER_BUDGET` propagated from the regeneration.
     """
     target = prompts.FULLSTACK_FRONTEND_TARGET
+    policy = _cell_sandbox(state)
     for attempt in range(RUNAPP_MAX_RETRIES + 1):
-        live = await asyncio.to_thread(verifiers.verify_app_live, state.app_url)
+        live = await asyncio.to_thread(verifiers.verify_app_live, state.app_url, cell_sandbox=policy)
         if live is None:
-            reason = verifiers.browser_check_skip_reason()
+            reason = verifiers.browser_check_skip_reason(sandboxed=policy is not None)
             state.trace_log.node("verify_fullstack", "browser_skipped", reason)
             _note_skipped(state, f"browser load of {target} via the running backend: {reason}")
             return None
@@ -1172,9 +1211,22 @@ def _invalidate_specs(state: GenState) -> None:
     state.api_spec = None
 
 
+def _brief_fields(state: GenState) -> dict:
+    """What the calling agent needs to know about the brief on success.
+
+    Acting first, the user either saw the brief (`brief_shown`) or its text
+    travels here for the agent to relay. Asking first, the user confirmed it.
+    """
+    if state.brief_shown:
+        return {"brief_shown": True}
+    if state.act_first and state.brief:
+        return {"brief_summary": state.brief}
+    return {}
+
+
 def _finish(state: GenState) -> dict:
     _save_checkpoint(state, cp.STAGE_GENERATED)
-    return {"status": "generated", **_result_shell(state)}
+    return {"status": "generated", **_result_shell(state), **_brief_fields(state)}
 
 
 def _cancelled(state: GenState) -> dict:
@@ -1201,13 +1253,13 @@ def _needs_confirmation(state: GenState) -> dict:
 
 
 def _stopped_over_budget(state: GenState, detail: str) -> dict:
-    # `brief_summary` travels with every budget stop: the run can end before
-    # the user has seen a brief at all, and then this is the only way to show
-    # them one.
+    # `brief_summary` travels with every budget stop the user has not seen
+    # the brief for: the run can end before any brief was shown, and then
+    # this is the only way to show them one.
     return {
         "status": "stopped_over_budget",
         "detail": detail,
-        "brief_summary": state.brief,
+        **({"brief_shown": True} if state.brief_shown else {"brief_summary": state.brief}),
         **_result_shell(state),
     }
 
@@ -1215,6 +1267,15 @@ def _stopped_over_budget(state: GenState, detail: str) -> dict:
 async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
     """Walk the whole pipeline from wherever this call is entitled to start."""
     state.entry = entry
+    if state.is_fullstack and _cell_sandbox(state) is not None:
+        # A fullstack artifact is done only once its backend runs, and the
+        # sandbox starts no backend: refuse before any question or brief.
+        state.error = BACKENDS_OFF_MESSAGE
+        return state.error
+    if state.act_first and entry not in (cp.ENTRY_FULL, cp.ENTRY_NEW_ITERATION):
+        # A repeat call past the brief: an earlier turn showed it (for
+        # `ENTRY_CONFIRM`, the budget stop that asked to continue).
+        state.brief_shown = True
     if entry in (cp.ENTRY_FULL, cp.ENTRY_CONFIRM, cp.ENTRY_NEW_ITERATION):
         stage = await run_discovery(state, entry=entry)
         if stage == CANCELLED:
@@ -1232,11 +1293,17 @@ async def run(state: GenState, *, entry: str = cp.ENTRY_FULL) -> dict | str:
             # the work stopped short.
             if state.winding_down():
                 return _stopped_over_budget(
-                    state, "budget reached while agreeing the brief"
+                    state, "budget reached at the brief"
                 )
             return _needs_confirmation(state)
         _invalidate_specs(state)
         _save_checkpoint(state, cp.STAGE_PRD_WRITTEN)
+
+    if state.is_fullstack and _cell_sandbox(state) is not None:
+        # The gathering step settled on a fullstack type: refuse before the
+        # spec and generation spend anything.
+        state.error = BACKENDS_OFF_MESSAGE
+        return state.error
 
     if entry != cp.ENTRY_GENERATE:
         # Before the spec phase, not only before generation: `make_tech_spec`

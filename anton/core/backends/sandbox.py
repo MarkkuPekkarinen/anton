@@ -14,6 +14,7 @@ self-test without importing the rest of anton.
 
 from __future__ import annotations
 
+import bisect
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ import subprocess
 import sys
 import sysconfig
 import tempfile
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import urlsplit, urlunsplit
@@ -204,19 +205,172 @@ def _norm(path: Path | str) -> str:
     return os.path.normpath(str(path))
 
 
+def _below(root: str) -> str:
+    """The start every path below ``root`` shares: ``root`` and one separator."""
+    return root if root.endswith(os.sep) else root + os.sep
+
+
 def _same_or_inside(path: str, root: str) -> bool:
     """Whether ``path`` equals ``root`` or sits below it."""
-    if path == root:
-        return True
-    prefix = root if root.endswith(os.sep) else root + os.sep
-    return path.startswith(prefix)
+    return path == root or path.startswith(_below(root))
 
 
-def _overlaps(grant: Path | str, root: Path | str) -> bool:
+def _holders(path: str) -> set[str]:
+    """Every ``root`` for which ``_same_or_inside(path, root)`` holds: ``path``
+    itself, and each start of it that ends just before or at a separator."""
+    holders = {path}
+    for i, char in enumerate(path):
+        if char == os.sep:
+            holders.add(path[:i])
+            holders.add(path[: i + 1])
+    return holders
+
+
+def _overlaps(
+    grant: Path | str, root: Path | str, *, resolve: Callable[[Path | str], str] = os.path.realpath
+) -> bool:
     """Whether ``grant`` equals or contains ``root``, as written or once resolved."""
     if _same_or_inside(_norm(root), _norm(grant)):
         return True
-    return _same_or_inside(os.path.realpath(root), os.path.realpath(grant))
+    return _same_or_inside(resolve(root), resolve(grant))
+
+
+class _PathResolver:
+    """``os.path.realpath`` for many paths that share folders, each folder resolved once.
+
+    realpath walks every folder above a path, each time it's called. A
+    policy's roots mostly share folders: every person's partition sits in
+    the one shared root. So this keeps each path it resolved, and resolves a
+    new name below a known folder with one lstat. A name that isn't a link
+    resolves to the resolved folder joined with it, the step realpath takes
+    there too. A link resolves through realpath itself, and so does a path
+    that isn't absolute and normalized.
+
+    That step holds only below a link realpath fully resolved. Where a link
+    loops or can't be followed, realpath stops resolving and keeps the rest
+    of the path as written, and abspath then folds a ``..`` in it. So a path
+    below such a link goes through realpath whole.
+    """
+
+    def __init__(self) -> None:
+        self._resolved: dict[str, str] = {}
+        # Paths at or below a link realpath couldn't follow (a loop, or a
+        # target it can't reach).
+        self._unfollowed: set[str] = set()
+
+    def __call__(self, path: Path | str) -> str:
+        text = str(path)
+        known = self._resolved.get(text)
+        if known is not None:
+            return known
+        if not os.path.isabs(text) or os.path.normpath(text) != text:
+            resolved = os.path.realpath(text)
+            self._resolved[text] = resolved
+            return resolved
+        return self._walk(text)
+
+    def _walk(self, path: str) -> str:
+        """``path``, absolute and normalized, resolved from the nearest folder
+        above it that is already resolved, one name at a time."""
+        below: list[str] = []
+        known = path
+        while known not in self._resolved:
+            parent, name = os.path.split(known)
+            if not name:
+                self._resolved[known] = os.path.realpath(known)
+                break
+            below.append(name)
+            known = parent
+        resolved = self._resolved[known]
+        for name in reversed(below):
+            parent, known = known, os.path.join(known, name)
+            if parent in self._unfollowed:
+                self._unfollowed.add(known)
+                resolved = os.path.realpath(known)
+            else:
+                resolved = self._resolve_name(known, os.path.join(resolved, name))
+            self._resolved[known] = resolved
+        return resolved
+
+    def _resolve_name(self, path: str, joined: str) -> str:
+        """``path`` resolved, where ``joined`` is its resolved parent joined
+        with its last name."""
+        try:
+            is_link = stat.S_ISLNK(os.lstat(joined).st_mode)
+        except OSError:
+            # realpath treats a name it cannot lstat as no link, too.
+            return joined
+        if not is_link:
+            return joined
+        try:
+            return os.path.realpath(joined, strict=True)
+        except OSError:
+            self._unfollowed.add(path)
+            return os.path.realpath(path)
+
+
+class _PathIndex:
+    """Many paths, each as written and as resolved, to ask about all at once.
+
+    ``_overlaps`` answers for one pair. This answers for every path together:
+    in a sorted list, every path that starts with a folder and a separator
+    sits in one run, so one bisect finds whether any path equals or sits
+    below a folder. A hit names the first path in the order given whose pair
+    overlaps, the one a pair-by-pair loop would name.
+
+    A path realpath can't resolve (a NUL byte, or a relative one under a
+    working folder that is gone) raises when it is resolved. The pairwise
+    loop raised only on reaching it, after the paths before it, so with one
+    such path the index answers pair by pair, in order, as that loop did.
+    """
+
+    def __init__(self, paths: Iterable[Path | str], *, resolve: _PathResolver) -> None:
+        self._resolve = resolve
+        self._paths = list(dict.fromkeys(str(path) for path in paths))
+        self._written = frozenset(_norm(path) for path in self._paths)
+        try:
+            self._real = frozenset(resolve(path) for path in self._paths)
+        except (OSError, ValueError):
+            self._pairwise = True
+            self._real = frozenset()
+        else:
+            self._pairwise = False
+        self._written_sorted = sorted(self._written)
+        self._real_sorted = sorted(self._real)
+
+    def first_inside(self, folder: Path | str) -> str | None:
+        """The first path that ``folder`` equals or contains, or None."""
+        if self._pairwise:
+            return next((path for path in self._paths if _overlaps(folder, path, resolve=self._resolve)), None)
+        written, real = _norm(folder), self._resolve(folder)
+        hit = _first_at_or_below(self._written_sorted, written) or _first_at_or_below(self._real_sorted, real)
+        if hit is None:
+            return None
+        return next((path for path in self._paths if _overlaps(folder, path, resolve=self._resolve)), hit)
+
+    def first_holding(self, path: Path | str) -> str | None:
+        """The first path that equals or contains ``path``, or None."""
+        if self._pairwise:
+            return next((held for held in self._paths if _overlaps(held, path, resolve=self._resolve)), None)
+        written, real = _norm(path), self._resolve(path)
+        hit = next((holder for holder in _holders(written) if holder in self._written), None)
+        if hit is None:
+            hit = next((holder for holder in _holders(real) if holder in self._real), None)
+        if hit is None:
+            return None
+        return next((held for held in self._paths if _overlaps(held, path, resolve=self._resolve)), hit)
+
+
+def _first_at_or_below(paths: list[str], root: str) -> str | None:
+    """A path in the sorted ``paths`` that equals ``root`` or sits below it, or None."""
+    i = bisect.bisect_left(paths, root)
+    if i < len(paths) and paths[i] == root:
+        return root
+    start = _below(root)
+    i = bisect.bisect_left(paths, start)
+    if i < len(paths) and paths[i].startswith(start):
+        return paths[i]
+    return None
 
 
 def _env_never(key: str) -> bool:
@@ -321,19 +475,23 @@ class CellSandbox(BaseModel):
             raise ValueError("user_name must be a non-empty name")
         for root in (*self.forbidden_roots, *self.other_partitions):
             _require_normal_absolute(root)
+        # One resolver for the whole check, so each path is resolved once.
+        resolve = _PathResolver()
+        denied = _PathIndex(self._denied_roots(), resolve=resolve)
         for grant in self._grants():
             _require_normal_absolute(grant)
-            for root in self._denied_roots():
-                if _overlaps(grant, root):
-                    raise ValueError(f"grant {grant} equals or contains {root}")
+            root = denied.first_inside(grant)
+            if root is not None:
+                raise ValueError(f"grant {grant} equals or contains {root}")
         private = self._writable_dirs()
+        partitions = _PathIndex(self.other_partitions, resolve=resolve)
         for grant in private:
-            for partition in self.other_partitions:
-                if _overlaps(partition, grant):
-                    raise ValueError(f"writable grant {grant} sits in another person's partition {partition}")
+            partition = partitions.first_holding(grant)
+            if partition is not None:
+                raise ValueError(f"writable grant {grant} sits in another person's partition {partition}")
         for i, first in enumerate(private):
             for second in private[i + 1:]:
-                if _overlaps(first, second) or _overlaps(second, first):
+                if _overlaps(first, second, resolve=resolve) or _overlaps(second, first, resolve=resolve):
                     raise ValueError(f"grants {first} and {second} overlap")
         return self
 
@@ -450,6 +608,7 @@ class CellSandbox(BaseModel):
         """
         rules: list[LandlockRule] = []
         seen: set[str] = set(_SYSTEM_READ_FILES)
+        denied: _PathIndex | None = None
         for name in (*_CA_FILE_VARS, *_CA_DIR_VARS):
             value = host_env.get(name, "")
             if not value:
@@ -458,7 +617,9 @@ class CellSandbox(BaseModel):
             if path in seen:
                 continue
             is_dir = name in _CA_DIR_VARS
-            problem = self._ca_path_problem(path, is_dir=is_dir)
+            if denied is None:
+                denied = _PathIndex(self._denied_roots(), resolve=_PathResolver())
+            problem = self._ca_path_problem(path, is_dir=is_dir, denied=denied)
             if problem is not None:
                 if (name, value) not in _LOGGED_CA_PROBLEMS:
                     _LOGGED_CA_PROBLEMS.add((name, value))
@@ -468,13 +629,16 @@ class CellSandbox(BaseModel):
             rules.append(LandlockRule(path, _READ if is_dir else ("read_file",)))
         return rules
 
-    def _ca_path_problem(self, path: str, *, is_dir: bool) -> str | None:
-        """Why the certificate path ``path`` gets no read rule, or None when it gets one."""
+    def _ca_path_problem(self, path: str, *, is_dir: bool, denied: _PathIndex) -> str | None:
+        """Why the certificate path ``path`` gets no read rule, or None when it gets one.
+
+        ``denied`` is this policy's denied roots (``_denied_roots``).
+        """
         if not os.path.isabs(path):
             return "it is not an absolute path"
-        for root in self._denied_roots():
-            if _overlaps(path, root):
-                return f"it equals or contains {root}"
+        root = denied.first_inside(path)
+        if root is not None:
+            return f"it equals or contains {root}"
         try:
             mode = os.stat(path).st_mode
         except OSError as exc:
@@ -506,16 +670,18 @@ class CellSandbox(BaseModel):
             "the launcher": str(launcher_path()),
             "the standard library": sysconfig.get_path("stdlib"),
         }
+        resolve = _PathResolver()
         for folder in self._writable_dirs():
             for label, path in before_the_lock.items():
-                if path and _overlaps(folder, path):
+                if path and _overlaps(folder, path, resolve=resolve):
                     raise SandboxUnavailable(f"{label} {path} sits under the writable grant {folder}")
         # The launcher grants these folders read and execute on every spawn,
         # so they are held to the same roots as a host's grants.
+        denied = _PathIndex(self._denied_roots(), resolve=resolve)
         for prefix in _interpreter_dirs():
-            for root in self._denied_roots():
-                if _overlaps(prefix, root):
-                    raise SandboxUnavailable(f"the interpreter folder {prefix} contains {root}")
+            root = denied.first_inside(prefix)
+            if root is not None:
+                raise SandboxUnavailable(f"the interpreter folder {prefix} contains {root}")
         rules = self.rules()
         optional = [*self.read_only_dirs, *self.read_only_files]
         if self.shared_dir is not None:

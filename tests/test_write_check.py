@@ -1440,6 +1440,44 @@ def test_the_refusal_says_a_run_time_method_in_words_too():
     assert "send {row" not in text
 
 
+def test_a_helper_that_reassigns_its_parameter_names_its_own_variable():
+    """`api(method, path)` that sets `method = 'DELETE'` for some paths: the
+    caller's `verb` does not decide the method alone, so the card must not
+    say it does. A person who knows `verbs` holds only GET would approve a
+    DELETE."""
+    helper = (
+        "import requests\nBASE = 'https://erp.example.com/api'\n"
+        "def api(method, path):\n    if path.endswith('/42'):\n        method = 'DELETE'\n"
+        "    return requests.request(method, BASE + path)",
+    )
+    writes = find_cell_writes(code="for verb in verbs:\n    api(verb, '/orders/42')",
+                              earlier_code=helper, snapshots=())
+    card = _card_prompt(writes)
+    assert "The code decides the request's method when it runs, from `method`." in card
+    assert "from `verb`" not in card
+
+
+def test_a_written_out_method_cannot_hide_a_held_request_from_the_card():
+    """A method is any text an HTTP library sends. Written into the prose as
+    is, `<!--` and `-->` made Cowork drop the DELETE between them from the
+    card the person approves."""
+    rules = parse_http_write_rules("* https://erp.example.com/api/**")
+    code = (
+        "import requests\nU = 'https://erp.example.com/api/ping'\n"
+        "requests.request('<!--', U)\n"
+        "requests.delete('https://erp.example.com/api/orders/1')\n"
+        "requests.request('-->', U)\n"
+    )
+    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(), http_rules=rules)
+    assert [w.method for w in writes.http] == ["<!--", "DELETE", "-->"]
+
+    card = _card_prompt(writes)
+    assert "<!--" not in card and "-->" not in card
+    assert "This step would send DELETE to:" in re.sub(r"<!--[\s\S]*?-->", "", card)
+    assert "This step would send `<\u200b!--` to:" in card
+    refusal = _refusal(writes, "cancelled").content
+    assert "<!--" not in refusal and "-->" not in refusal
+
 @pytest.mark.parametrize("code,earlier,held", [
     (f"import requests\nrequests.request(row['verb'], {URL!r})", (),
      [(2, f"requests.request(row['verb'], {URL!r})", URL)]),

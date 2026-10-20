@@ -203,7 +203,7 @@ def _run_time_from(code: str) -> str:
 
 def _request_summary(write: HttpWrite) -> str:
     """One request for the refusal, in words where the code decides a part."""
-    method = write.method if write.method_code is None else "a request"
+    method = _http_method(write.method) if write.method_code is None else "a request"
     if write.url_code is not None:
         text = f"send {method} to an address the code decides when it runs{_run_time_from(write.url_code)}"
     else:
@@ -256,11 +256,19 @@ def _file_lines(change: FileChange, *, lead: str) -> list[str]:
     return lines
 
 
+def _http_method(method: str) -> str:
+    """A written-out method as the card's prose names it: as it is when it is
+    a word, else as code. A method is any text an HTTP library sends, so one
+    such as `<!--` would otherwise open an HTML comment that Cowork drops
+    from the card, and with it the held requests that follow."""
+    return method if method.isalpha() else _code_span(_inert(method))
+
+
 def _request_lines(request: HttpWrite) -> list[str]:
     """One request on the card. A method or an address the code decides when
     it runs is said in words, with the code that decides it, never shown as a
     bare `{placeholder}` where the method or the address would stand."""
-    method = request.method if request.method_code is None else "a request"
+    method = _http_method(request.method) if request.method_code is None else "a request"
     if request.url_code is not None:
         lead = f"This step would send {method} to an address the code decides when it runs{_run_time_from(request.url_code)}:"
         lines = [lead, "", _fence(request.call), ""]

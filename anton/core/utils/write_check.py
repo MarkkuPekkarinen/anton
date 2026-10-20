@@ -5634,9 +5634,16 @@ def _http_findings(
 def _deciding_node(node: ast.AST, reader: _Reader) -> ast.AST:
     """The code that decides `node` as the checked call writes it: a
     parameter is followed to the argument the call passes for it, so the
-    card shows `verb` from `api(verb, ...)`, not the helper's `method`."""
+    card shows `verb` from `api(verb, ...)`, not the helper's `method`.
+
+    Only a parameter the helper never assigns again: one it may reassign
+    (`if ...: method = 'DELETE'`) is decided inside the helper too, so the
+    card names the helper's own `method`, not the caller's value alone."""
     for _ in range(8):
         if not isinstance(node, ast.Name):
+            break
+        bindings = reader.bindings_of(node.id, node=node)
+        if len(bindings) != 1 or bindings[0].how != "param":
             break
         arg = reader.argument_of(node)
         if arg is None:

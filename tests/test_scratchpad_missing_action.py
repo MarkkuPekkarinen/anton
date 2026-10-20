@@ -12,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 from anton.core.backends.base import Cell
-from anton.core.llm.provider import LLMResponse, StreamComplete, ToolCall, Usage
+from anton.core.llm.provider import LLMResponse, StreamComplete, StreamToolResult, ToolCall, Usage
 from anton.core.session import ChatSession, ChatSessionConfig, _VerifierVerdict
 from anton.core.tools import tool_handlers
 from anton.core.tools.registry import ToolOutcome
@@ -64,13 +64,17 @@ async def test_a_call_with_code_and_no_action_runs_the_code(tmp_path: Path):
     pad = _RecordingPad()
     session = ChatSession(ChatSessionConfig(llm_client=mock_llm, workspace=workspace))
     session._scratchpads.get_or_create = AsyncMock(return_value=pad)
+    streamed: list[StreamToolResult] = []
     try:
-        async for _ in session.turn_stream("run it"):
-            pass
+        async for event in session.turn_stream("run it"):
+            if isinstance(event, StreamToolResult):
+                streamed.append(event)
     finally:
         await session.close()
 
     assert pad.ran == ["print(1)"]
+    # cowork-server's cell replay takes this action for a call that named none.
+    assert [(e.name, e.action, e.id) for e in streamed] == [("scratchpad", "exec", "tc_1")]
     results = [
         block["content"]
         for message in session.history if message["role"] == "user" and isinstance(message["content"], list)

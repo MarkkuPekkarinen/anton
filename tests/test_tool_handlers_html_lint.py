@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from anton.core.tools.tool_handlers import lint_changed_artifact_files
+from anton.core.tools.tool_handlers import ArtifactFiles, lint_changed_artifact_files, snapshot_existing_artifacts
 
 requires_browser = pytest.mark.skipif(
     not os.environ.get("ANTON_HTML_LINT_BROWSER"),
@@ -53,7 +53,7 @@ def test_no_browser_configured_says_the_page_was_not_checked(monkeypatch, store:
     monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
     folder = _make_artifact(store, "dash-abc12345")
     (folder / "dash.html").write_text(_BROKEN_HTML)
-    before = {"dash-abc12345": 0.0}
+    before = {"dash-abc12345": ArtifactFiles()}
 
     lint = lint_changed_artifact_files(store, before)
 
@@ -77,7 +77,7 @@ def test_a_configured_browser_that_fails_to_produce_output_says_so(
     monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
     folder = _make_artifact(store, "dash-abc12345")
     (folder / "dash.html").write_text(_BROKEN_HTML)
-    before = {"dash-abc12345": 0.0}
+    before = {"dash-abc12345": ArtifactFiles()}
 
     assert lint_changed_artifact_files(store, before).messages == [
         "dash-abc12345/dash.html — not checked in a browser: the local browser check gave no answer"
@@ -94,7 +94,7 @@ def test_a_clean_load_in_the_local_browser_says_it_passed(monkeypatch, store: _F
     folder = _make_artifact(store, "dash-abc12345")
     (folder / "dash.html").write_text("<html><body>ok</body></html>")
 
-    lint = tool_handlers.lint_changed_artifact_files(store, {"dash-abc12345": 0.0})
+    lint = tool_handlers.lint_changed_artifact_files(store, {"dash-abc12345": ArtifactFiles()})
 
     assert lint.messages == ["dash-abc12345/dash.html — loaded in a local browser from disk: no problems found"]
     assert lint.page_checks == {("dash-abc12345", "dash.html"): "passed"}
@@ -114,7 +114,7 @@ def test_a_page_over_the_size_ceiling_says_it_was_not_checked(monkeypatch, store
     folder = _make_artifact(store, "dash-abc12345")
     (folder / "dash.html").write_text("<html><body>" + "x" * (1024 * 1024) + "</body></html>")
 
-    lint = tool_handlers.lint_changed_artifact_files(store, {"dash-abc12345": 0.0})
+    lint = tool_handlers.lint_changed_artifact_files(store, {"dash-abc12345": ArtifactFiles()})
 
     assert loaded == []
     assert lint.messages == ["dash-abc12345/dash.html — not checked in a browser: the page is over 1 MB"]
@@ -125,7 +125,7 @@ def test_a_page_over_the_size_ceiling_says_it_was_not_checked(monkeypatch, store
 def test_flags_a_changed_html_artifact(store: _FakeStore):
     folder = _make_artifact(store, "dash-abc12345")
     (folder / "dash.html").write_text(_BROKEN_HTML)
-    before = {"dash-abc12345": 0.0}
+    before = {"dash-abc12345": ArtifactFiles()}
 
     messages = lint_changed_artifact_files(store, before).messages
 
@@ -135,11 +135,10 @@ def test_flags_a_changed_html_artifact(store: _FakeStore):
 @requires_browser
 def test_skips_artifacts_the_cell_did_not_touch(store: _FakeStore):
     """A broken page already on disk before this cell ran must not be
-    re-flagged every unrelated turn — only an mtime bump counts."""
+    re-flagged every unrelated turn: only a change to its files counts."""
     folder = _make_artifact(store, "dash-abc12345")
     page = folder / "dash.html"
     page.write_text(_BROKEN_HTML)
-    current_mtime = page.stat().st_mtime
-    before = {"dash-abc12345": current_mtime}
+    before = snapshot_existing_artifacts(store)
 
     assert lint_changed_artifact_files(store, before).messages == []

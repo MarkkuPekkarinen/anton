@@ -58,7 +58,9 @@ def fill_in_scratchpad_action(tc_input: dict) -> None:
     `action` out, before the call is stored in history. A reader of the
     stored call then sees the action that ran: cowork-server rebuilds an
     earlier turn's cells from these rows and counts a step as a cell only
-    when its `action` is `exec`."""
+    when its `action` is `exec`. cowork-server's cell replay reads another
+    field, the action the turn names on the call's `StreamToolResult`,
+    which cowork-server stores as `tool_action`."""
     if not tc_input.get("action") and scratchpad_action(tc_input) == "exec":
         tc_input["action"] = "exec"
 

@@ -5623,8 +5623,8 @@ def _http_findings(
             HttpWrite(
                 method=reader.show_holes(method), url=_scrub(reader.show_holes(url)), call=call, line=line,
                 run_time_parts=url_code is None and _NUMBERED_HOLE.search(url) is not None,
-                method_code=_scrub_code(reader.hole_code(method)),
-                url_code=_scrub_code(url_code),
+                method_code=_scrub_code_or_none(reader.hole_code(method)),
+                url_code=_scrub_code_or_none(url_code),
             )
             for method in held
         ]
@@ -5652,7 +5652,11 @@ def _deciding_node(node: ast.AST, reader: _Reader) -> ast.AST:
     return node
 
 
-def _scrub_code(code: str | None) -> str | None:
+def _scrub_code_or_none(code: str | None) -> str | None:
+    """The run-time code the card quotes for a method or address, scrubbed
+    as one text: `ast.unparse` writes a space after a dict's colon, so a
+    token held in a dict is a word of its own, which `_scrub_code` would
+    pass as written."""
     return None if code is None else scrub_output(code)
 
 

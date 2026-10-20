@@ -31,7 +31,7 @@ from anton.core.artifacts.render_check import (
 from anton.core.backends.sandbox import CellSandbox
 from anton.core.tools import tool_handlers
 from anton.core.tools.generate_artifact import orchestrator, verifiers
-from anton.core.tools.generate_artifact.state import GenState
+from anton.core.tools.generate_artifact.state import GenState, VerifyResult
 
 _PAGE = (
     '<!doctype html><html><head><meta name="viewport" content="width=device-width">'
@@ -239,10 +239,235 @@ def test_unset_asks_nobody(monkeypatch):
 
 
 def test_a_page_over_the_size_limit_is_not_sent(service, monkeypatch):
-    monkeypatch.setattr(render_check, "MAX_BODY_BYTES", 100)
+    monkeypatch.setattr(render_check, "MAX_PAGE_BYTES", 100)
     result = check_html(_PAGE * 3)
-    assert result.status == "unverified" and "over the render check's" in result.unverified_reason
+    assert result.status == "unverified"
+    assert result.unverified_reason == (
+        f"the page is {len(_PAGE * 3) // 1024} KB, over the render check's 0 MB limit"
+    )
     assert service.requests == []
+
+
+def _inline_data_page(size: int) -> str:
+    """A dashboard with its records inline as `const D = [...]`, the way the
+    skill tells the agent to embed data, at least `size` bytes long."""
+    row = json.dumps({"name": "Lisbon", "region": "south", "value": 1234})
+    count = size // (len(row) + 2) + 1
+    return (
+        "<!doctype html><html><body><div id=\"chart\"></div><script>const D = ["
+        + ", ".join([row] * count) + "];</script></body></html>"
+    )
+
+
+def test_a_page_with_inline_data_under_the_limit_is_sent_whole(service):
+    """The cap counted the JSON-escaped request, which doubles every quote of
+    inline records, so a 7 MiB page the skill allows came back unverified as
+    "the page is 8495 KB, over the render check's 8 MB limit"."""
+    page = _inline_data_page(7 * 1024 * 1024)
+    escaped = len(RenderCheckRequest(html=page).model_dump_json().encode("utf-8"))
+    assert len(page.encode("utf-8")) < render_check.MAX_PAGE_BYTES < escaped
+
+    result = check_html(page)
+
+    assert result.status == "passed"
+    assert len(service.requests) == 1 and service.requests[0]["body"]["html"] == page
+
+
+def test_a_request_over_its_cap_once_escaped_says_so(service, monkeypatch):
+    """A page of control characters grows six times once JSON-escaped. Its
+    reason names the request, not a page size the file does not have."""
+    monkeypatch.setattr(render_check, "MAX_BODY_BYTES", 4096)
+    page = "\x01" * 1024
+
+    result = check_html(page)
+
+    assert result.status == "unverified"
+    assert result.unverified_reason == (
+        "the page's request is 6 KB once JSON-escaped, over the render check's 0 MB request limit"
+    )
+    assert service.requests == []
+
+
+def test_check_file_reads_no_more_than_the_page_limit(service, tmp_path, monkeypatch):
+    monkeypatch.setattr(render_check, "MAX_PAGE_BYTES", 100)
+    page = tmp_path / "index.html"
+    page.write_text(_PAGE * 3)
+
+    result = check_file(page, cell_sandbox=None)
+
+    assert result.status == "unverified"
+    assert result.unverified_reason == "the page is over the render check's 0 MB limit"
+    assert service.requests == []
+
+
+# The render-check service's 503 answer when one check runs and two wait.
+# The service owns the wording; anton keys its one retry on the "busy" start.
+_BUSY = {"detail": "busy: one check runs and two wait"}
+
+
+@pytest.fixture
+def quick_retry(monkeypatch):
+    monkeypatch.setattr(render_check, "BUSY_RETRY_SECONDS", 0.05)
+
+
+def _record_post_timeouts(monkeypatch) -> list[float]:
+    timeouts: list[float] = []
+    post = render_check._post
+
+    def recording(base, *, body, timeout):
+        timeouts.append(timeout)
+        return post(base, body=body, timeout=timeout)
+
+    monkeypatch.setattr(render_check, "_post", recording)
+    return timeouts
+
+
+def test_a_busy_service_is_asked_once_more_within_the_time_left(service, quick_retry, monkeypatch):
+    """With several conversations finishing pages at once, the fourth check
+    got 503 at once and its page read as not verified in a browser."""
+    service.answer((503, _BUSY, 0.0), (200, _answer(), 0.0))
+    timeouts = _record_post_timeouts(monkeypatch)
+
+    result = check_html(_PAGE, timeout=20.0)
+
+    assert result.status == "passed"
+    assert len(service.requests) == 2 and service.requests[0] == service.requests[1]
+    assert timeouts[0] == 20.0
+    assert timeouts[1] <= 20.0 - render_check.BUSY_RETRY_SECONDS
+
+
+def test_a_service_busy_twice_is_not_asked_a_third_time(service, quick_retry):
+    service.answer((503, _BUSY, 0.0))
+
+    result = check_html(_PAGE)
+
+    assert isinstance(result, RenderCheckUnavailable)
+    assert result.unverified_reason == "the render-check service is busy or not ready (HTTP 503)"
+    assert len(service.requests) == 2
+
+
+@pytest.mark.parametrize("body", [
+    pytest.param({"detail": "the render check isn't ready: starting"}, id="not-ready"),
+    pytest.param({"detail": "the browser couldn't run the check: gone"}, id="browser-failed"),
+    pytest.param({"error": "busy"}, id="no-detail"),
+    pytest.param(b"busy", id="not-json"),
+    pytest.param({"detail": "busy: " + "x" * render_check.MAX_ERROR_BODY_BYTES}, id="over-the-read-cap"),
+])
+def test_a_503_that_is_not_the_busy_answer_is_not_asked_again(service, quick_retry, body):
+    service.answer((503, body, 0.0), (200, _answer(), 0.0))
+
+    result = check_html(_PAGE)
+
+    assert result.status == "unverified"
+    assert len(service.requests) == 1
+
+
+def test_a_busy_service_is_not_asked_again_without_the_time_for_it(service, monkeypatch):
+    service.answer((503, _BUSY, 0.0), (200, _answer(), 0.0))
+    timeouts = _record_post_timeouts(monkeypatch)
+    too_short = render_check.BUSY_RETRY_SECONDS + render_check.BUSY_RETRY_MIN_SECONDS - 0.5
+
+    started = time.monotonic()
+    result = check_html(_PAGE, timeout=too_short)
+
+    assert result.status == "unverified"
+    assert timeouts == [too_short]
+    assert time.monotonic() - started < render_check.BUSY_RETRY_SECONDS, "no wait for an ask that never comes"
+
+
+def test_the_generators_check_is_asked_again_after_a_busy_answer(service, quick_retry, tmp_path):
+    page = tmp_path / "index.html"
+    page.write_text(_PAGE)
+    service.answer((503, _BUSY, 0.0), (200, _answer("failed", findings=[
+        {"kind": "uncaught_exception", "viewport": "desktop", "detail": "ReferenceError: L is not defined"},
+    ]), 0.0))
+
+    check = verifiers.verify_frontend_live(page, cell_sandbox=None)
+
+    assert check.status == "failed"
+    assert check.verdict.errors == [
+        "Loaded in a headless browser, the page threw an uncaught exception: "
+        "ReferenceError: L is not defined (desktop)",
+    ]
+    assert len(service.requests) == 2
+
+
+@pytest.mark.parametrize("url", ["http://[::1", "http://render-check:abc"])
+def test_a_malformed_service_url_is_unverified_not_raised(monkeypatch, tmp_path, url):
+    """`httpx.InvalidURL` is not an `httpx.HTTPError`: it escaped, so the
+    cell lost every artifact lint line and generate_artifact crashed."""
+    monkeypatch.setenv("ANTON_RENDER_CHECK_URL", url)
+    page = tmp_path / "index.html"
+    page.write_text(_PAGE)
+
+    result = check_html(_PAGE)
+
+    assert isinstance(result, RenderCheckUnavailable)
+    assert result.unverified_reason == "ANTON_RENDER_CHECK_URL is not a valid URL"
+    check = verifiers.verify_frontend_live(page, cell_sandbox=None)
+    assert check.status == "unverified"
+    assert check.reason == "unverified: ANTON_RENDER_CHECK_URL is not a valid URL"
+
+
+# The render-check service's deadline for one check (25 s) plus the most it
+# spends closing the page after that deadline (3 s). The service owns both
+# numbers; this copy moves with them.
+_SERVICE_ANSWERS_WITHIN = 25.0 + 3.0
+
+
+def test_anton_waits_longer_than_the_service_takes_to_answer():
+    """anton gave up at 30 s, about 2 s after the service's latest answer, so
+    a slow cleanup on a host short of CPU turned a failed page into an
+    unverified one and the agent lost the findings."""
+    assert render_check.TIMEOUT_SECONDS >= _SERVICE_ANSWERS_WITHIN + 5.0
+    # A check asked again after a busy answer still outlasts the service.
+    assert render_check.TIMEOUT_SECONDS - render_check.BUSY_RETRY_SECONDS >= _SERVICE_ANSWERS_WITHIN + 1.0
+    # The checks after one cell share a budget that still fits one whole check.
+    assert tool_handlers._RENDER_CHECK_CELL_BUDGET_SECONDS >= render_check.TIMEOUT_SECONDS
+
+
+_TIMEOUT = {"kind": "timeout", "viewport": "desktop", "detail": "the check's 25 s ran out while measuring the page"}
+_THROWN = {"kind": "uncaught_exception", "viewport": "desktop", "detail": "ReferenceError: renderChart is not defined"}
+_BLANK = {"kind": "blank_view", "viewport": "desktop", "detail": "#world-map has no drawn content"}
+_CSP = {"kind": "csp_violation", "viewport": "desktop", "detail": "script-src blocked https://unpkg.com/x.js"}
+_MISSING = {"url": "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js", "reason": "not in the check's mirror"}
+
+
+@pytest.mark.parametrize("status,findings,unreachable", [
+    pytest.param("failed", [_CSP, _TIMEOUT], [_MISSING], id="a-definite-finding-fails-whatever-else"),
+    pytest.param("unverified", [_THROWN], [_MISSING], id="a-library-the-check-could-not-load"),
+    pytest.param("failed", [_THROWN, _TIMEOUT], [], id="an-exception-fails-despite-the-deadline"),
+    pytest.param("unverified", [_BLANK, _TIMEOUT], [], id="a-blank-view-on-a-slow-host"),
+    pytest.param("failed", [_BLANK], [], id="a-blank-view"),
+    pytest.param("passed", [], [], id="nothing-found"),
+])
+def test_each_status_the_rule_gives_parses(status, findings, unreachable):
+    result = RenderCheckResult.model_validate(_answer(status, findings=findings, unreachable=unreachable))
+    assert result.status == status
+
+
+@pytest.mark.parametrize("answer", [
+    pytest.param({"status": "failed"}, id="failed-with-no-findings"),
+    pytest.param(_answer("failed", findings=[_TIMEOUT]), id="failed-with-only-a-timeout"),
+    pytest.param(_answer("passed", unreachable=[_MISSING]), id="passed-with-unreachable"),
+    pytest.param(_answer("passed", findings=[
+        {"kind": "console_error", "viewport": "desktop", "detail": "boom"},
+    ]), id="passed-with-a-console-error"),
+    pytest.param(_answer("unverified", findings=[_THROWN, _TIMEOUT]), id="unverified-beside-an-exception"),
+])
+def test_a_status_its_findings_contradict_is_unverified_never_a_pass(service, tmp_path, answer):
+    """The generator's check rebuilt the status from the findings, so a
+    `failed` answer with nothing it could name read as a pass."""
+    service.answer((200, answer, 0.0))
+    page = tmp_path / "index.html"
+    page.write_text(_PAGE)
+
+    result = check_html(_PAGE)
+
+    assert isinstance(result, RenderCheckUnavailable)
+    assert result.unverified_reason == "the render-check service answered a status its own findings contradict"
+    check = verifiers.verify_frontend_live(page, cell_sandbox=None)
+    assert check.status == "unverified" and check.verdict.errors == []
 
 
 def test_the_service_is_reached_directly_whatever_proxy_the_process_has(service, monkeypatch):
@@ -410,7 +635,7 @@ def test_a_page_with_thousands_of_findings_reaches_the_agent_bounded(service, tm
     service.answer((200, _flood(10_000), 0.0))
     store, slug = _artifact_with_pages(tmp_path, "index.html")
 
-    lint = tool_handlers.lint_changed_artifact_files(store, {slug: 0.0})
+    lint = tool_handlers.lint_changed_artifact_files(store, {slug: tool_handlers.ArtifactFiles()})
 
     shown = render_check.MAX_FINDINGS_SHOWN
     assert len(lint.messages) == shown + 1
@@ -486,7 +711,72 @@ def test_an_unverified_answer_is_a_skip_with_its_reason_not_an_error(service, tm
     check = verifiers.verify_frontend_live(page, cell_sandbox=None)
     assert check.status == "unverified"
     assert check.reason == "unverified: the render-check service is busy or not ready (HTTP 503)"
+    assert check.findings_listed is False
     assert check.verdict.errors == []
+
+
+@pytest.mark.parametrize("answer,reason", [
+    pytest.param(
+        _answer("unverified", findings=[_BLANK, {**_BLANK, "viewport": "phone"}, _TIMEOUT]),
+        "unverified: the check ran out of time (the check's 25 s ran out while measuring the page)\n"
+        "Before it ran out of time, the check found:\n"
+        "- blank_view (desktop and phone): #world-map has no drawn content (it may still have been drawing)",
+        id="a-blank-map-before-the-deadline",
+    ),
+    pytest.param(
+        _answer("unverified", findings=[_THROWN], unreachable=[_MISSING]),
+        "unverified: could not load https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js "
+        "(not in the check's mirror)\n"
+        "The check still found:\n"
+        "- uncaught_exception (desktop): ReferenceError: renderChart is not defined",
+        id="an-exception-beside-a-library-the-check-could-not-load",
+    ),
+])
+def test_an_unverified_check_still_lists_what_it_found(service, tmp_path, answer, reason):
+    """The reason named only the timeout or the unreachable URL, so the agent
+    never saw the blank map or the exception the check had found."""
+    page = tmp_path / "index.html"
+    page.write_text(_PAGE)
+    service.answer((200, answer, 0.0))
+
+    check = verifiers.verify_frontend_live(page, cell_sandbox=None)
+
+    assert check.status == "unverified"
+    assert check.reason == reason
+    assert check.findings_listed is True
+    assert check.verdict.errors == []
+
+
+def test_an_unverified_check_counts_the_findings_past_the_shown_ones(service, tmp_path):
+    page = tmp_path / "index.html"
+    page.write_text(_PAGE)
+    rows = render_check.MAX_FINDINGS_SHOWN + 3
+    service.answer((200, _answer("unverified", findings=[
+        {**_BLANK, "detail": f"#chart-{i} has no drawn content"} for i in range(rows)
+    ] + [_TIMEOUT]), 0.0))
+
+    check = verifiers.verify_frontend_live(page, cell_sandbox=None)
+
+    lines = check.reason.split("\n")
+    assert lines[2] == "- blank_view (desktop): #chart-0 has no drawn content (it may still have been drawing)"
+    assert len(lines) == 2 + render_check.MAX_FINDINGS_SHOWN + 1
+    assert lines[-1] == "- and 3 more distinct findings, not listed"
+
+
+def test_an_exception_before_the_deadline_fails_the_generators_check(service, tmp_path):
+    """A page that throws at load and then runs the check out of time. The
+    service fails it on the exception; the timeout beside it adds no error."""
+    page = tmp_path / "index.html"
+    page.write_text(_PAGE)
+    service.answer((200, _answer("failed", findings=[_THROWN, _TIMEOUT]), 0.0))
+
+    check = verifiers.verify_frontend_live(page, cell_sandbox=None)
+
+    assert check.status == "failed"
+    assert check.verdict.errors == [
+        "Loaded in a headless browser, the page threw an uncaught exception: "
+        "ReferenceError: renderChart is not defined (desktop)",
+    ]
 
 
 def test_the_generators_check_can_ask_for_no_screenshot(service, tmp_path):
@@ -530,13 +820,279 @@ async def test_the_generator_retries_on_what_the_service_found(service, project,
     assert await orchestrator._gen_verify_frontend(st) is None
 
     assert len(kickoffs) == 2
-    assert "blocked https://unpkg.com/leaflet.js" in kickoffs[1]
+    assert isinstance(kickoffs[0], str), "no check has run before the first attempt"
+    # The retry shows the failed page as the check saw it, beside its findings.
+    text, caption, image = kickoffs[1]
+    assert "blocked https://unpkg.com/leaflet.js" in text["text"]
+    assert caption == {
+        "type": "text",
+        "text": "[render check screenshot] dash/index.html as the app preview shows it, at desktop width.",
+    }
+    assert image == {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _SHOT}}
     assert st.browser_status == "passed"
     assert st.browser_screenshot is not None
     assert st.checks_skipped == []
     shell = orchestrator._result_shell(st)
     assert shell["verified_in_browser"] is True
     assert shell["screenshot"] is st.browser_screenshot
+    assert shell["screenshot_page"] == "index.html"
+
+
+async def test_the_retry_shows_no_screenshot_once_the_model_refused_one(service, project, policy, monkeypatch):
+    """A model that refused a render screenshot earlier in the session would
+    refuse the retry's screenshot too, so the retry gets the findings as text."""
+    st = _gen_state(project, policy)
+    st.session._render_screenshots_refused = True
+    kickoffs: list = []
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", _writes_page(project, kickoffs))
+    service.answer(
+        (200, _answer("failed", findings=[_CSP]), 0.0),
+        (200, _answer("passed"), 0.0),
+    )
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+
+    assert len(kickoffs) == 2 and isinstance(kickoffs[1], str)
+    assert "script-src blocked https://unpkg.com/x.js" in kickoffs[1]
+    assert [r["body"]["screenshot"] for r in service.requests] == [False, False]
+
+
+async def test_a_refused_read_image_leaves_the_retrys_screenshot_on(service, project, policy, monkeypatch):
+    """A refused `read_image` image says nothing about render screenshots:
+    one corrupt file draws a refusal from a model that takes images too. The
+    retry still shows the failed page."""
+    st = _gen_state(project, policy)
+    st.session._images_refused = True
+    kickoffs: list = []
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", _writes_page(project, kickoffs))
+    service.answer(
+        (200, _answer("failed", findings=[_CSP]), 0.0),
+        (200, _answer("passed"), 0.0),
+    )
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+
+    assert len(kickoffs) == 2
+    text, _, image = kickoffs[1]
+    assert "script-src blocked https://unpkg.com/x.js" in text["text"]
+    assert image["type"] == "image" and image["source"]["data"] == _SHOT
+    assert [r["body"]["screenshot"] for r in service.requests] == [True, True]
+
+
+async def test_a_retry_after_a_static_failure_shows_no_earlier_screenshot(service, project, policy, monkeypatch):
+    """The screenshot is of the page the attempt just before wrote. A
+    retry after a page the static checks failed, which no browser loaded,
+    gets no screenshot of an older page."""
+    monkeypatch.setattr(orchestrator, "GEN_VERIFY_MAX_RETRIES", 2)
+    st = _gen_state(project, policy)
+    pages = [_PAGE, "<html><body>no viewport, no doctype</body></html>", _PAGE]
+    kickoffs: list = []
+
+    async def fake_loop(**kw):
+        kickoffs.append(kw["kickoff"])
+        (project / "index.html").write_text(pages[len(kickoffs) - 1])
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend", lambda html, **kw: VerifyResult(
+        errors=[] if html == _PAGE else ["the page has no viewport meta"],
+    ))
+    service.answer((200, _answer("failed", findings=[_CSP]), 0.0), (200, _answer("passed"), 0.0))
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+
+    assert [type(k).__name__ for k in kickoffs] == ["str", "list", "str"]
+
+
+# The most requests a fake model in these tests serves. Past it, a resend
+# bound that broke fails the test at once instead of hanging it.
+_REQUEST_CAP = 20
+
+
+class _RequestCapExceeded(RuntimeError):
+    """Not an image refusal, so nothing in anton resends after it."""
+
+
+class _GeneratorModel:
+    """The generator's model behind `plan_stream` and `code_stream`: every
+    request it takes writes the page, and finishes unless `finishes(n,
+    images)` says otherwise. `refuses(n, images)` picks the requests it
+    refuses with an image 400. Both pick by the request's 1-based number and
+    the image parts it carries. Records each request's count, and raises
+    `_RequestCapExceeded` past `_REQUEST_CAP` requests."""
+
+    def __init__(self, *, refuses, finishes=lambda n, images: True) -> None:
+        self.refuses = refuses
+        self.finishes = finishes
+        self.images: list[int] = []
+
+    def stream(self, *, system, messages, tools=None, max_tokens=None):
+        images = sum(
+            1
+            for m in messages if isinstance(m.get("content"), list)
+            for b in m["content"] if isinstance(b, dict) and b.get("type") == "image"
+        )
+        self.images.append(images)
+        return self._reply(len(self.images), images=images)
+
+    async def _reply(self, n: int, *, images: int):
+        from anton.core.llm.provider import LLMResponse, StreamComplete, ToolCall, Usage
+        from anton.core.tools.generate_artifact.sub_tools import FILE_BEGIN_MARKER, FILE_END_MARKER
+
+        if n > _REQUEST_CAP:
+            raise _RequestCapExceeded(f"request {n}: more than {_REQUEST_CAP}")
+        if self.refuses(n, images):
+            raise _ImagePart400("Invalid content type. image_url is only supported by certain models.")
+        finish = [ToolCall(id=f"f{n}", name="finish", input={"summary": "wrote the page"})]
+        yield StreamComplete(response=LLMResponse(
+            content=f"{FILE_BEGIN_MARKER}\n{_PAGE}\n{FILE_END_MARKER}",
+            tool_calls=[
+                ToolCall(id=f"w{n}", name="write_file", input={"path": "index.html"}),
+                *(finish if self.finishes(n, images) else []),
+            ],
+            usage=Usage(input_tokens=1, output_tokens=1),
+            stop_reason="tool_use",
+        ))
+
+
+def _gen_state_on(project: Path, *, policy, model: _GeneratorModel) -> GenState:
+    st = _gen_state(project, policy)
+    st.session._render_screenshots_refused = False
+    st.session._llm = SimpleNamespace(plan_stream=model.stream, code_stream=model.stream, max_tokens=None)
+    return st
+
+
+async def test_a_refused_retry_screenshot_is_dropped_once_and_later_attempts_send_none(
+    service, project, policy, monkeypatch
+):
+    """A model that takes no image input refuses the retry that shows the
+    failed page. The generator sends that request once more without the
+    image, the session records the refusal, and the attempt after it carries
+    no screenshot: one refused request in the whole run."""
+    monkeypatch.setattr(orchestrator, "GEN_VERIFY_MAX_RETRIES", 2)
+    model = _GeneratorModel(refuses=lambda n, images: images > 0)
+    st = _gen_state_on(project, policy=policy, model=model)
+    service.answer(
+        (200, _answer("failed", findings=[_CSP]), 0.0),
+        (200, _answer("failed", findings=[_CSP]), 0.0),
+        (200, _answer("passed"), 0.0),
+    )
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+
+    # Attempt 1; attempt 2 with the screenshot, refused, then without it;
+    # attempt 3, which knows the model refuses images.
+    assert model.images == [0, 1, 0, 0]
+    assert st.session._render_screenshots_refused is True
+    # The checks after the refusal ask the service for no screenshot.
+    assert [r["body"]["screenshot"] for r in service.requests] == [True, False, False]
+    assert st.browser_status == "passed"
+
+
+async def test_the_coding_models_refusal_leaves_the_main_agents_screenshots_on(service, project, policy):
+    """Round 0 runs on the planning model, the main agent's own, and later
+    rounds on the coding model. Here only the coding model refuses images:
+    round 0 takes the retry's screenshot and writes without finishing, round
+    1 is refused over it and sent once more without it. That refusal says
+    nothing about the main agent's model, so its checks keep screenshots."""
+    planner = _GeneratorModel(refuses=lambda n, images: False, finishes=lambda n, images: images == 0)
+    coder = _GeneratorModel(refuses=lambda n, images: images > 0)
+    st = _gen_state(project, policy)
+    st.session._render_screenshots_refused = False
+    st.session._llm = SimpleNamespace(plan_stream=planner.stream, code_stream=coder.stream, max_tokens=None)
+    service.answer((200, _answer("failed", findings=[_CSP]), 0.0), (200, _answer("passed"), 0.0))
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+
+    # Attempt 1 on the planner; attempt 2's round 0 on the planner with the
+    # screenshot, then round 1 on the coder, refused once and sent without it.
+    assert planner.images == [0, 1]
+    assert coder.images == [1, 0]
+    assert st.session._render_screenshots_refused is False
+    assert [r["body"]["screenshot"] for r in service.requests] == [True, True]
+    assert st.browser_status == "passed"
+
+
+async def test_a_refusal_after_the_screenshot_drop_ends_the_attempt(service, project, policy, monkeypatch):
+    """The drop happens once: a request still refused without the image
+    raises, as any provider error in the generator does, after two requests
+    and no record of a refusal the screenshot did not cause."""
+    model = _GeneratorModel(refuses=lambda n, images: n > 1)
+    st = _gen_state_on(project, policy=policy, model=model)
+    service.answer((200, _answer("failed", findings=[_CSP]), 0.0))
+
+    with pytest.raises(_ImagePart400):
+        await orchestrator._gen_verify_frontend(st)
+
+    assert model.images == [0, 1, 0]
+    assert st.session._render_screenshots_refused is False
+
+
+async def test_a_text_kickoff_refused_over_an_image_is_not_resent(tmp_path):
+    """Only the kickoff's screenshot is the loop's to drop. A refusal of a
+    request with none in it raises after one request, as before."""
+    from anton.core.tools.generate_artifact import engine
+
+    model = _GeneratorModel(refuses=lambda n, images: True)
+    session = SimpleNamespace(
+        _render_screenshots_refused=False,
+        _llm=SimpleNamespace(plan_stream=model.stream, code_stream=model.stream, max_tokens=None),
+    )
+
+    with pytest.raises(_ImagePart400):
+        await engine._run_loop(
+            session=session, system="s", kickoff="write the page", artifact_path=tmp_path,
+            node_label="generate_frontend",
+        )
+
+    assert model.images == [0]
+    assert session._render_screenshots_refused is False
+
+
+def test_the_generators_trace_writes_no_image_data(tmp_path):
+    """The debug trace logs every round's messages, and a retry's kickoff
+    carries the screenshot on each of them. It logs its length instead."""
+    from anton.core.tools.generate_artifact.debug_trace import GenTrace
+
+    shot = render_check.RenderScreenshot(media_type="image/jpeg", data=_SHOT)
+    trace_file = tmp_path / "trace.jsonl"
+    kickoff = [{"type": "text", "text": "fix these"}, *render_check.screenshot_blocks(shot, page="dash/index.html")]
+
+    GenTrace(str(trace_file)).llm_call(
+        node="generate_frontend", method="plan", system="s", messages=[{"role": "user", "content": kickoff}],
+    )
+
+    line = trace_file.read_text()
+    assert _SHOT not in line
+    image = json.loads(line)["messages"][0]["content"][2]
+    assert image["source"]["data"] == f"<{len(_SHOT)} base64 characters>"
+
+
+async def test_generate_traces_its_result_without_the_screenshot(tmp_path, monkeypatch):
+    """`ANTON_DEBUG_ARTIFACT_GENERATE_TOOL` traces every run's result. The
+    screenshot in it is up to a megabyte of base64; the handler shows it to
+    the agent, the trace leaves it out."""
+    from anton.core.tools.generate_artifact import engine
+
+    trace_file = tmp_path / "trace.jsonl"
+    monkeypatch.setenv("ANTON_DEBUG_ARTIFACT_GENERATE_TOOL", str(trace_file))
+    shot = render_check.RenderScreenshot(media_type="image/jpeg", data=_SHOT)
+
+    async def fake_run(state, *, entry):
+        return {"status": "generated", "screenshot": shot, "screenshot_page": "index.html"}
+
+    monkeypatch.setattr(orchestrator, "run", fake_run)
+    session = SimpleNamespace(_page_checks={}, _workspace=None, _scratchpads=None)
+    result = await engine.generate(
+        session=session, slug="dash", artifact_path=tmp_path, artifact_type="html-app",
+        user_request="a map", agent_understanding="a map",
+    )
+
+    assert result["screenshot"] is shot, "the handler still gets it"
+    traced = [json.loads(line) for line in trace_file.read_text().splitlines()]
+    run_result = next(t for t in traced if t["event"] == "run_result")
+    assert run_result["result"] == {"status": "generated", "screenshot_page": "index.html"}
+    assert _SHOT not in trace_file.read_text()
 
 
 async def test_an_unverified_page_passes_the_step_and_says_why(service, project, policy, monkeypatch):
@@ -553,7 +1109,25 @@ async def test_an_unverified_page_passes_the_step_and_says_why(service, project,
         "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js (not in the check's mirror)"
     ]
     assert st.browser_status == "unverified"
+    assert st.browser_findings_listed is False
     assert orchestrator._result_shell(st)["verified_in_browser"] is False
+
+
+async def test_an_unverified_page_tells_the_agent_what_the_check_still_found(service, project, policy, monkeypatch):
+    st = _gen_state(project, policy)
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", _writes_page(project, []))
+    service.answer((200, _answer("unverified", findings=[_BLANK, _TIMEOUT], screenshot=False), 0.0))
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+
+    assert orchestrator._result_shell(st)["checks_skipped"] == [
+        "browser load of the page: unverified: the check ran out of time "
+        "(the check's 25 s ran out while measuring the page)\n"
+        "Before it ran out of time, the check found:\n"
+        "- blank_view (desktop): #world-map has no drawn content (it may still have been drawing)"
+    ]
+    assert st.browser_status == "unverified"
+    assert st.browser_findings_listed is True
 
 
 async def test_an_attached_image_is_embedded_so_the_page_passes(service, project, policy, monkeypatch):
@@ -595,6 +1169,32 @@ async def test_an_attached_image_is_embedded_so_the_page_passes(service, project
     sent = service.requests[0]["body"]["html"]
     assert 'src="data:image/png;base64,' + base64.b64encode(b"\x89PNG fake logo").decode() + '"' in sent
     assert (project / "index.html").read_text() == sent
+
+
+async def test_embedding_and_the_static_checks_run_off_the_event_loop(service, project, policy, monkeypatch):
+    """Embedding a large asset, and the static checks over the page it
+    grows, take a second or more; on the event loop that would stall every
+    conversation the process serves."""
+    loop_thread = threading.get_ident()
+    threads: dict[str, int] = {}
+    real_embed, real_verify = orchestrator._embed_attachments, orchestrator.verifiers.verify_frontend
+
+    def embed(state, entry_file):
+        threads["embed"] = threading.get_ident()
+        return real_embed(state, entry_file)
+
+    def verify(html, **kw):
+        threads["verify"] = threading.get_ident()
+        return real_verify(html, **kw)
+
+    monkeypatch.setattr(orchestrator, "_embed_attachments", embed)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend", verify)
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", _writes_page(project, []))
+
+    assert await orchestrator._gen_verify_frontend(_gen_state(project, policy)) is None
+
+    assert set(threads) == {"embed", "verify"}
+    assert loop_thread not in threads.values()
 
 
 def test_embedding_reads_no_link_out_of_the_persons_files(tmp_path, project, policy):
@@ -672,28 +1272,30 @@ async def test_generate_records_how_it_left_the_page(tmp_path, monkeypatch):
     st = SimpleNamespace(
         slug="dash", browser_status=None, files_written=["index.html"], is_fullstack=False, primary="index.html",
     )
-    engine._record_page_check(session, st, "Frontend verification failed after 2 attempt(s): x")
+    engine._record_page_check(session, state=st, result="Frontend verification failed after 2 attempt(s): x")
     assert session._page_checks == {("dash", "index.html"): "unverified"}
 
     st.browser_status = "failed"
-    engine._record_page_check(session, st, "Frontend verification failed after 2 attempt(s): x")
+    engine._record_page_check(session, state=st, result="Frontend verification failed after 2 attempt(s): x")
     assert session._page_checks == {("dash", "index.html"): "failed"}
 
     st.is_fullstack, st.browser_status = True, "passed"
-    engine._record_page_check(session, st, {"status": "generated"})
+    engine._record_page_check(session, state=st, result={"status": "generated"})
     assert session._page_checks[("dash", "static/index.html")] == "passed"
 
     session._page_checks.clear()
-    engine._record_page_check(session, st, {"status": "needs_confirmation"})
+    engine._record_page_check(session, state=st, result={"status": "needs_confirmation"})
     st.files_written, st.browser_status = [], None
-    engine._record_page_check(session, st, "Error: refused")
+    engine._record_page_check(session, state=st, result="Error: refused")
     assert session._page_checks == {}
 
 
 # ── generate_artifact's result ───────────────────────────────────────────────
 
 
-async def _handler_result(tmp_path: Path, monkeypatch, result: dict, *, screenshots_refused: bool = False):
+async def _handler_result(
+    tmp_path: Path, monkeypatch, result: dict, *, screenshots_refused: bool = False, images_refused: bool = False
+):
     from anton.core.tools import generate_artifact as gen_pkg
 
     store = ArtifactStore(tmp_path / "artifacts")
@@ -706,6 +1308,7 @@ async def _handler_result(tmp_path: Path, monkeypatch, result: dict, *, screensh
     session = SimpleNamespace(
         _workspace=SimpleNamespace(artifacts_dir=tmp_path / "artifacts"),
         _render_screenshots_refused=screenshots_refused,
+        _images_refused=images_refused,
     )
     out = None
     async for item in tool_handlers.handle_generate_artifact(
@@ -734,6 +1337,40 @@ async def test_the_screenshot_reaches_the_agent_beside_the_result(tmp_path, monk
     assert image == {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _SHOT}}
 
 
+async def test_the_caption_names_the_page_the_check_loaded(tmp_path, monkeypatch):
+    """The generator may write a page under another name than the primary
+    the artifact had before the run; the caption names the page the check
+    loaded, not a file that may not exist."""
+    shot = render_check.RenderScreenshot(media_type="image/jpeg", data=_SHOT)
+    slug, out = await _handler_result(tmp_path, monkeypatch, {
+        "status": "generated", "files_written": ["report.html"], "warnings": [], "checks_skipped": [],
+        "verified_in_browser": True, "screenshot": shot, "screenshot_page": "report.html",
+    })
+
+    text, caption, _ = out.content
+    assert "screenshot_page" not in json.loads(text["text"])
+    assert caption["text"] == (
+        f"[render check screenshot] {slug}/report.html as the app preview shows it, at desktop width."
+    )
+
+
+async def test_the_result_names_the_page_the_generator_wrote(service, project, policy, monkeypatch):
+    """No primary set, and the generator wrote `report.html`: the result
+    names that page beside its screenshot."""
+    st = _gen_state(project, policy)
+
+    async def fake_loop(**kw):
+        (project / "report.html").write_text(_PAGE)
+        return {"files_written": ["report.html"], "rounds_used": 1, "summary": "s"}
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+
+    shell = orchestrator._result_shell(st)
+    assert shell["screenshot"] is not None and shell["screenshot_page"] == "report.html"
+
+
 async def test_an_unverified_page_changes_what_the_agent_is_told(tmp_path, monkeypatch):
     """The old instruction said every file was verified and not to re-verify,
     which a sandboxed agent relayed as a working page."""
@@ -746,6 +1383,29 @@ async def test_an_unverified_page_changes_what_the_agent_is_told(tmp_path, monke
     assert "unverified in a browser" in instruction
     assert "statically verified by the generation pipeline" not in instruction
     assert "Do NOT re-read, re-parse or re-verify" not in instruction
+
+
+async def test_an_unverified_page_lets_the_agent_fix_what_the_check_still_found(tmp_path, monkeypatch):
+    """`checks_skipped` lists what an unverified check still found, such as
+    a blank map measured before the deadline. The instruction must not tell
+    the agent to leave it for the user to report, nor to keep editing a page
+    that may already work while no check can vouch for it."""
+    _, out = await _handler_result(tmp_path, monkeypatch, {
+        "status": "generated", "files_written": ["index.html"], "warnings": [],
+        "checks_skipped": [
+            "browser load of the page: unverified: the check ran out of time\n"
+            "Before it ran out of time, the check found:\n"
+            "- blank_view (desktop): #world-map has no drawn content (it may still have been drawing)"
+        ],
+        "verified_in_browser": False,
+    })
+    instruction = json.loads(out.content)["instruction"]
+    assert "When it also lists what the check found" in instruction
+    assert (
+        "fix those once; if a later check still cannot vouch for the page, report it as "
+        "unverified instead of editing it again"
+    ) in instruction
+    assert "otherwise act only on problems the user actually reports" in instruction
 
 
 async def test_a_verified_page_keeps_the_do_not_reverify_instruction(tmp_path, monkeypatch):
@@ -761,26 +1421,29 @@ async def test_a_verified_page_keeps_the_do_not_reverify_instruction(tmp_path, m
 # ── The check after a cell ───────────────────────────────────────────────────
 
 
-def _artifact_with_pages(tmp_path: Path, *pages: str, primary: str = "index.html") -> tuple[ArtifactStore, str]:
+def _artifact_with_pages(
+    tmp_path: Path, *pages: str, primary: str = "index.html", artifact_type: str = "html-app"
+) -> tuple[ArtifactStore, str]:
     store = ArtifactStore(tmp_path / "artifacts")
-    slug = store.create(name="Map", description="d", type="html-app", primary=primary).slug
+    slug = store.create(name="Map", description="d", type=artifact_type, primary=primary).slug
     for name in pages:
         (store.root / slug / name).write_text(_PAGE.replace("hi", name))
     return store, slug
 
 
 def test_only_edited_pages_are_sent_primary_first_with_one_screenshot(service, tmp_path):
-    store, slug = _artifact_with_pages(tmp_path, "a.html", "z.html", primary="z.html")
-    old = store.root / slug / "old.html"
-    old.write_text(_PAGE)
-    os.utime(old, (1, 1))
-    before = {slug: 10.0}  # the artifact as it stood before the cell: only old.html
+    store, slug = _artifact_with_pages(tmp_path, "old.html", primary="z.html")
+    before = tool_handlers.snapshot_existing_artifacts(store)  # the artifact before the cell: only old.html
+    for name in ("a.html", "z.html"):
+        (store.root / slug / name).write_text(_PAGE.replace("hi", name))
 
     lint = tool_handlers.lint_changed_artifact_files(store, before)
 
     sent = [r["body"] for r in service.requests]
     assert [b["html"] for b in sent] == [_PAGE.replace("hi", "z.html"), _PAGE.replace("hi", "a.html")]
-    assert [b["screenshot"] for b in sent] == [True, False]
+    # Each page is asked for a screenshot until one fails; none did, so the
+    # first page's is kept.
+    assert [b["screenshot"] for b in sent] == [True, True]
     assert lint.screenshot is not None and lint.screenshot_page == f"{slug}/z.html"
     assert lint.page_checks == {(slug, "z.html"): "passed", (slug, "a.html"): "passed"}
     assert lint.messages == [
@@ -798,7 +1461,7 @@ def test_a_failed_page_lists_its_findings_and_wins_over_a_passed_one(service, tm
         ]), 0.0),
         (200, _answer("passed", screenshot=False), 0.0),
     )
-    lint = tool_handlers.lint_changed_artifact_files(store, {slug: 0.0})
+    lint = tool_handlers.lint_changed_artifact_files(store, {slug: tool_handlers.ArtifactFiles()})
     assert lint.messages[0] == f"{slug}/index.html — separate_file (desktop and phone): data.js"
     assert lint.page_checks == {(slug, "index.html"): "failed", (slug, "b.html"): "passed"}
 
@@ -806,7 +1469,7 @@ def test_a_failed_page_lists_its_findings_and_wins_over_a_passed_one(service, tm
 def test_a_check_that_cannot_run_says_so_instead_of_nothing(service, project, policy):
     store, slug = _artifact_with_pages(project, "index.html")
     service.answer((503, {"error": "busy"}, 0.0))
-    lint = tool_handlers.lint_changed_artifact_files(store, {slug: 0.0}, cell_sandbox=policy)
+    lint = tool_handlers.lint_changed_artifact_files(store, {slug: tool_handlers.ArtifactFiles()}, cell_sandbox=policy)
     assert lint.messages == [
         f"{slug}/index.html — not checked in a browser: the render-check service is busy or not ready (HTTP 503)"
     ]
@@ -820,13 +1483,354 @@ def test_pages_past_the_cell_budget_are_named_as_not_checked(service, tmp_path, 
     store, slug = _artifact_with_pages(tmp_path, "index.html", "b.html")
     service.answer((200, _answer("passed"), 0.2))
 
-    lint = tool_handlers.lint_changed_artifact_files(store, {slug: 0.0})
+    lint = tool_handlers.lint_changed_artifact_files(store, {slug: tool_handlers.ArtifactFiles()})
 
     assert len(service.requests) == 1
     assert lint.messages[-1] == (
         f"{slug}/b.html — not checked in a browser: the browser checks after this cell ran out of time before this page"
     )
     assert lint.page_checks == {(slug, "index.html"): "passed", (slug, "b.html"): "unverified"}
+
+
+def _dashboard_with_data_file(tmp_path: Path, *, artifact_type: str = "html-app") -> tuple[ArtifactStore, str]:
+    """A dashboard built under the old skill: its page loads a sibling data file."""
+    store, slug = _artifact_with_pages(tmp_path, "details.html", artifact_type=artifact_type)
+    folder = store.root / slug
+    (folder / "index.html").write_text(_PAGE.replace("</body>", '<script src="dashboard_data.js"></script></body>'))
+    (folder / "dashboard_data.js").write_text("window.DATA = [1, 2, 3];")
+    return store, slug
+
+
+_SEPARATE_FILE = {"kind": "separate_file", "viewport": "desktop", "detail": "dashboard_data.js"}
+
+
+@pytest.mark.parametrize("artifact_type", ["html-app", "document", "mixed"])
+@pytest.mark.parametrize("cell", ["rewrite", "delete"])
+def test_a_cell_that_changes_only_a_file_the_page_loads_checks_the_page(service, tmp_path, cell, artifact_type):
+    """The cell rewrites (or deletes) only `dashboard_data.js`. No page
+    changed, but the artifact did: its primary is checked, fails, and the
+    turn ends with the line that says so. Its other pages are not sent. Any
+    artifact but a fullstack app, whose page needs its backend."""
+    store, slug = _dashboard_with_data_file(tmp_path, artifact_type=artifact_type)
+    data = store.root / slug / "dashboard_data.js"
+    service.answer((200, _answer("failed", findings=[_SEPARATE_FILE]), 0.0))
+    session = SimpleNamespace(_page_checks={})
+
+    before = tool_handlers.snapshot_existing_artifacts(store)
+    if cell == "rewrite":
+        data.write_text("window.DATA = [4, 5, 6, 7];")
+    else:
+        data.unlink()
+    lint = tool_handlers.lint_changed_artifact_files(store, before)
+    tool_handlers.record_page_checks(session, checks=lint.page_checks)
+
+    assert [r["body"]["html"] for r in service.requests] == [(store.root / slug / "index.html").read_text()]
+    assert lint.page_checks == {(slug, "index.html"): "failed"}
+    assert lint.messages == [f"{slug}/index.html — separate_file (desktop): dashboard_data.js"]
+    assert tool_handlers.page_check_lines(store, checks=session._page_checks) == [
+        "“Map” failed the browser check, so it may not display correctly in the preview."
+    ]
+
+
+def test_a_cell_that_renames_an_older_draft_into_place_checks_the_page(service, tmp_path):
+    """`os.replace(draft.html, details.html)` keeps the draft's older mtime,
+    so the artifact's newest mtime does not move. The page under
+    `details.html` is new all the same, and gets checked. It is not the
+    primary, so only its being counted as edited sends it; the primary the
+    cell left alone is not sent."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html", "details.html", "draft.html")
+    folder = store.root / slug
+    draft = folder / "draft.html"
+    draft.write_text(_PAGE.replace("hi", "the new details page"))
+    os.utime(draft, (1, 1))
+    service.answer((200, _answer("passed"), 0.0))
+
+    before = tool_handlers.snapshot_existing_artifacts(store)
+    os.replace(draft, folder / "details.html")
+    lint = tool_handlers.lint_changed_artifact_files(store, before)
+
+    assert [r["body"]["html"] for r in service.requests] == [_PAGE.replace("hi", "the new details page")]
+    assert lint.page_checks == {(slug, "details.html"): "passed"}
+
+
+def _fullstack_app(tmp_path: Path) -> tuple[ArtifactStore, str]:
+    """A fullstack app: its page under `static/` calls the backend beside it."""
+    store = ArtifactStore(tmp_path / "artifacts")
+    slug = store.create(
+        name="Orders", description="d", type="fullstack-stateless-app", primary="static/index.html"
+    ).slug
+    folder = store.root / slug
+    (folder / "static").mkdir(exist_ok=True)
+    (folder / "static" / "index.html").write_text(_PAGE.replace("</body>", "<script>api('/api/items')</script></body>"))
+    (folder / "backend.py").write_text("ITEMS = [1]\n")
+    return store, slug
+
+
+_SAME_ORIGIN = {"kind": "separate_file", "viewport": "desktop", "detail": "api/items"}
+
+
+def test_a_cell_that_changes_only_a_fullstack_backend_sends_no_page(service, tmp_path):
+    """The service fails every request to the page's own origin, which a
+    fullstack page makes to its backend. A cell that rewrites only
+    `backend.py` checks no page: no request, no line, nothing recorded."""
+    store, slug = _fullstack_app(tmp_path)
+    service.answer((200, _answer("failed", findings=[_SAME_ORIGIN]), 0.0))
+
+    before = tool_handlers.snapshot_existing_artifacts(store)
+    (store.root / slug / "backend.py").write_text("ITEMS = [1, 2]\n")
+    lint = tool_handlers.lint_changed_artifact_files(store, before)
+
+    assert service.requests == []
+    assert lint.page_checks == {}
+    assert lint.messages == []
+
+
+def test_an_edited_fullstack_page_is_named_as_not_checked(service, tmp_path):
+    """The page itself is not sent either, so it gets no false
+    `separate_file` for its own API calls: it is named as not checked."""
+    store, slug = _fullstack_app(tmp_path)
+    service.answer((200, _answer("failed", findings=[_SAME_ORIGIN]), 0.0))
+
+    before = tool_handlers.snapshot_existing_artifacts(store)
+    (store.root / slug / "static" / "index.html").write_text(_PAGE)
+    lint = tool_handlers.lint_changed_artifact_files(store, before)
+
+    assert service.requests == []
+    assert lint.page_checks == {(slug, "static/index.html"): "unverified"}
+    assert lint.messages == [
+        f"{slug}/index.html — not checked in a browser: a fullstack app's page calls its backend, "
+        "which the render check does not run"
+    ]
+
+
+async def test_what_an_unverified_check_found_reaches_the_agent_once_per_page(service, project, policy):
+    """On a slow host every load of the page runs out of time after the
+    check saw a blank map, which may still have been drawing. The first
+    cell's result lists the blank map, so the agent can fix it once. The
+    second cell's result says only that the page was not checked, so the
+    agent reports it as unverified instead of editing it again and again."""
+    service.answer((200, _answer("unverified", findings=[_BLANK, _TIMEOUT], screenshot=False), 0.0))
+    session, pad, slug = _session_for(project, [
+        _llm_response("One.", {"action": "exec", "name": "main", "code": "write_page()"}, "tc_1"),
+        _llm_response("Two.", {"action": "exec", "name": "main", "code": "write_page()"}, "tc_2"),
+        _llm_response("Done."),
+    ])
+    session._scratchpads._cell_sandbox = policy
+
+    streamed, _ = await _final_text(session)
+
+    results = [json.dumps(result["content"], ensure_ascii=False) for result in _tool_results(session)]
+    assert len(pad.ran) == 2 and len(service.requests) == 2, "one check per cell"
+    assert [result.count("blank_view") for result in results] == [1, 0]
+    unchecked = (
+        f"{slug}/index.html — not checked in a browser: the check ran out of time "
+        "(the check's 25 s ran out while measuring the page)"
+    )
+    blank = (
+        f"{slug}/index.html — before it ran out of time, the check found blank_view (desktop): "
+        "#world-map has no drawn content (it may still have been drawing)"
+    )
+    first, second = (result["content"] for result in _tool_results(session))
+    assert first.endswith(f"[artifact lint]\n{unchecked}\n{blank}")
+    assert second.endswith(f"[artifact lint]\n{unchecked}")
+    assert streamed.endswith(_LINE)
+
+
+async def test_a_page_generate_artifact_left_unverified_gets_no_findings_again(service, tmp_path):
+    """generate_artifact listed what its check found in `checks_skipped` and
+    recorded the page as unverified. The agent fixes it in a cell, and that
+    check is unverified the same way: it gets only the line that says so."""
+    from anton.core.tools.generate_artifact import engine
+
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = SimpleNamespace(_page_checks={}, _unverified_findings_listed=set(), _scratchpads=None)
+    engine._record_page_check(session, state=SimpleNamespace(
+        slug=slug, browser_status="unverified", browser_findings_listed=True, files_written=["index.html"],
+        is_fullstack=False, primary="index.html",
+    ), result={"status": "generated"})
+    service.answer((200, _answer("unverified", findings=[_BLANK, _TIMEOUT], screenshot=False), 0.0))
+
+    before = tool_handlers.snapshot_existing_artifacts(store)
+    (store.root / slug / "index.html").write_text(_PAGE.replace("hi", "fixed"))
+    lint = await tool_handlers.check_cell_artifacts(session, store=store, before=before)
+
+    assert len(service.requests) == 1
+    assert lint.messages == [
+        f"{slug}/index.html — not checked in a browser: the check ran out of time "
+        "(the check's 25 s ran out while measuring the page)"
+    ]
+    assert session._page_checks == {(slug, "index.html"): "unverified"}
+
+
+_NOT_READY = (503, {"detail": "the render check isn't ready: starting"}, 0.0)
+_BLANK_BEFORE_THE_DEADLINE = (200, _answer("unverified", findings=[_BLANK, _TIMEOUT], screenshot=False), 0.0)
+
+
+@pytest.mark.parametrize("browser_status,result", [
+    pytest.param(None, "Frontend verification failed after 2 attempt(s): no viewport meta", id="static-failure"),
+    pytest.param("unverified", {"status": "generated"}, id="its-check-got-no-answer"),
+])
+async def test_a_page_generate_artifact_listed_nothing_for_gets_its_findings_in_the_next_cell(
+    service, tmp_path, browser_status, result
+):
+    """generate_artifact left the page unverified without listing anything
+    the check found: its static checks failed and no browser loaded the
+    page, or its check got no answer. The agent then builds the page by
+    hand, and the cell's check sees a blank map before the deadline. That
+    blank map is listed: the agent never saw it."""
+    from anton.core.tools.generate_artifact import engine
+
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    session = SimpleNamespace(_page_checks={}, _unverified_findings_listed=set(), _scratchpads=None)
+    engine._record_page_check(session, state=SimpleNamespace(
+        slug=slug, browser_status=browser_status, browser_findings_listed=False, files_written=["index.html"],
+        is_fullstack=False, primary="index.html",
+    ), result=result)
+    assert session._page_checks == {(slug, "index.html"): "unverified"}
+    assert session._unverified_findings_listed == set()
+    service.answer(_BLANK_BEFORE_THE_DEADLINE)
+
+    before = tool_handlers.snapshot_existing_artifacts(store)
+    (store.root / slug / "index.html").write_text(_PAGE.replace("hi", "hand built"))
+    lint = await tool_handlers.check_cell_artifacts(session, store=store, before=before)
+
+    assert lint.messages == [
+        f"{slug}/index.html — not checked in a browser: the check ran out of time "
+        "(the check's 25 s ran out while measuring the page)",
+        f"{slug}/index.html — before it ran out of time, the check found blank_view (desktop): "
+        "#world-map has no drawn content (it may still have been drawing)",
+    ]
+    assert session._unverified_findings_listed == {(slug, "index.html")}
+
+
+def test_generate_marks_the_page_listed_only_when_its_result_carries_the_listing(tmp_path):
+    """The agent reads what generate_artifact's unverified check found in
+    the result's `checks_skipped`, which a failed run's text does not carry."""
+    from anton.core.tools.generate_artifact import engine
+
+    key = tool_handlers.PageKey("dash", "index.html")
+    st = SimpleNamespace(
+        slug="dash", browser_status="unverified", browser_findings_listed=True, files_written=["index.html"],
+        is_fullstack=False, primary="index.html",
+    )
+    session = SimpleNamespace(_page_checks={}, _unverified_findings_listed=set())
+    engine._record_page_check(session, state=st, result="Frontend verification failed after 2 attempt(s): x")
+    assert session._unverified_findings_listed == set()
+
+    st.browser_status = "failed"
+    engine._record_page_check(session, state=st, result={"status": "stopped_over_budget"})
+    assert session._unverified_findings_listed == set()
+
+    st.browser_status = "unverified"
+    engine._record_page_check(session, state=st, result={"status": "generated"})
+    assert session._page_checks == {key: "unverified"}
+    assert session._unverified_findings_listed == {key}
+
+
+async def test_a_check_that_listed_nothing_leaves_the_next_one_free_to_list(service, project):
+    """Cell 1's check got no answer, so it listed nothing. Cell 2's check
+    sees a blank map before the deadline: it lists the blank map, which the
+    agent has not seen. Cell 3's check sees the same and lists nothing,
+    since the agent already had its one chance to fix it. One request per
+    cell, none resent."""
+    service.answer(_NOT_READY, _BLANK_BEFORE_THE_DEADLINE)
+    session, pad, slug = _session_for(project, [
+        _llm_response("One.", {"action": "exec", "name": "main", "code": "write_page()"}, "tc_1"),
+        _llm_response("Two.", {"action": "exec", "name": "main", "code": "write_page()"}, "tc_2"),
+        _llm_response("Three.", {"action": "exec", "name": "main", "code": "write_page()"}, "tc_3"),
+        _llm_response("Done."),
+    ])
+
+    await _final_text(session)
+
+    results = [result["content"] for result in _tool_results(session)]
+    assert len(pad.ran) == 3 and len(service.requests) == 3
+    unchecked = f"{slug}/index.html — not checked in a browser: the check ran out of time"
+    assert results[0].endswith(
+        f"[artifact lint]\n{slug}/index.html — not checked in a browser: "
+        "the render-check service is busy or not ready (HTTP 503)"
+    )
+    assert unchecked in results[1] and unchecked in results[2]
+    assert [result.count("blank_view") for result in results] == [0, 1, 0]
+    assert session._unverified_findings_listed == {(slug, "index.html")}
+
+
+async def test_each_turn_lists_what_an_unverified_check_found_once(service, project):
+    """The record of pages already listed is the turn's: the next turn's
+    first unverified check of the page lists its findings again."""
+    service.answer(_BLANK_BEFORE_THE_DEADLINE)
+    session, _, _ = _session_for(project, [
+        _llm_response("One.", {"action": "exec", "name": "main", "code": "write_page()"}, "tc_1"),
+        _llm_response("Done."),
+        _llm_response("Two.", {"action": "exec", "name": "main", "code": "write_page()"}, "tc_2"),
+        _llm_response("Done again."),
+    ])
+    try:
+        for prompt in ("draw the map", "draw it once more"):
+            async for _ in session.turn_stream(prompt):
+                pass
+    finally:
+        await session.close()
+
+    results = [result["content"] for result in _tool_results(session)]
+    assert len(service.requests) == 2
+    assert [result.count("blank_view") for result in results] == [1, 1]
+
+
+def test_the_screenshot_is_the_failed_pages_when_the_primary_passed(service, tmp_path):
+    """The primary passes and the next page fails: the agent sees the page
+    it has to fix. Once a failed page sent one, the pages after it are asked
+    for none."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html", "b.html", "c.html")
+    failed_shot = base64.b64encode(b"the failed page").decode()
+    failed = _answer("failed", findings=[_BLANK])
+    failed["screenshot"]["data"] = failed_shot
+    service.answer(
+        (200, _answer("passed"), 0.0),
+        (200, failed, 0.0),
+        (200, _answer("failed", findings=[_BLANK], screenshot=False), 0.0),
+    )
+
+    lint = tool_handlers.lint_changed_artifact_files(store, {slug: tool_handlers.ArtifactFiles()})
+
+    assert [r["body"]["screenshot"] for r in service.requests] == [True, True, False]
+    assert lint.screenshot_page == f"{slug}/b.html"
+    assert lint.screenshot.data == failed_shot
+
+
+@pytest.mark.parametrize("answer,lines", [
+    pytest.param(
+        _answer("unverified", findings=[_BLANK, _TIMEOUT], screenshot=False),
+        [
+            "not checked in a browser: the check ran out of time "
+            "(the check's 25 s ran out while measuring the page)",
+            "before it ran out of time, the check found blank_view (desktop): "
+            "#world-map has no drawn content (it may still have been drawing)",
+        ],
+        id="a-blank-map-before-the-deadline",
+    ),
+    pytest.param(
+        _answer("unverified", findings=[_THROWN], unreachable=[_MISSING], screenshot=False),
+        [
+            "not checked in a browser: could not load "
+            "https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js (not in the check's mirror)",
+            "the check still found uncaught_exception (desktop): ReferenceError: renderChart is not defined",
+        ],
+        id="an-exception-beside-a-library-the-check-could-not-load",
+    ),
+])
+def test_an_unverified_page_lists_what_the_check_still_found(service, tmp_path, answer, lines):
+    """A check that could not vouch for the page still saw a problem: the
+    agent sees it under the line that says the page was not checked, and
+    can fix it. The deadline is named once, in that line, and a blank map
+    seen before it may still have been drawing."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+    service.answer((200, answer, 0.0))
+
+    lint = tool_handlers.lint_changed_artifact_files(store, {slug: tool_handlers.ArtifactFiles()})
+
+    assert lint.messages == [f"{slug}/index.html — {line}" for line in lines]
+    assert lint.page_checks == {(slug, "index.html"): "unverified"}
 
 
 def test_the_screenshot_rides_a_successful_cell_only(tmp_path):
@@ -845,10 +1849,12 @@ def test_the_screenshot_rides_a_successful_cell_only(tmp_path):
 def test_the_record_keeps_each_pages_latest_check(tmp_path):
     key = tool_handlers.PageKey
     session = SimpleNamespace(_page_checks={key("a", "index.html"): "passed"})
-    tool_handlers.record_page_checks(session, {key("a", "index.html"): "unverified", key("b", "index.html"): "passed"})
+    tool_handlers.record_page_checks(
+        session, checks={key("a", "index.html"): "unverified", key("b", "index.html"): "passed"}
+    )
     assert session._page_checks == {key("a", "index.html"): "unverified", key("b", "index.html"): "passed"}
     # A session without the record (a test double) is left alone.
-    tool_handlers.record_page_checks(SimpleNamespace(), {key("a", "index.html"): "failed"})
+    tool_handlers.record_page_checks(SimpleNamespace(), checks={key("a", "index.html"): "failed"})
 
 
 def test_page_lines_name_each_artifact_with_a_page_that_did_not_pass(tmp_path):
@@ -856,7 +1862,7 @@ def test_page_lines_name_each_artifact_with_a_page_that_did_not_pass(tmp_path):
     shipped = store.create(name="Shipments map", description="d", type="html-app").slug
     broken = store.create(name="Sales globe", description="d", type="html-app").slug
     key = tool_handlers.PageKey
-    lines = tool_handlers.page_check_lines(store, {
+    lines = tool_handlers.page_check_lines(store, checks={
         key(shipped, "index.html"): "unverified",
         key(broken, "index.html"): "failed",
         key(broken, "details.html"): "passed",
@@ -873,9 +1879,8 @@ def test_a_later_pass_of_another_page_keeps_the_failed_one(service, tmp_path):
     index.html stays failed when the second cell edits only details.html and
     it passes. One record per artifact let that pass hide the failure the
     preview still shows."""
-    store, slug = _artifact_with_pages(tmp_path, "index.html", "details.html")
+    store, slug = _artifact_with_pages(tmp_path, "details.html")
     index, details = store.root / slug / "index.html", store.root / slug / "details.html"
-    os.utime(details, (1, 1))
     session = SimpleNamespace(_page_checks={})
     service.answer(
         (200, _answer("failed", findings=[
@@ -884,15 +1889,17 @@ def test_a_later_pass_of_another_page_keeps_the_failed_one(service, tmp_path):
         (200, _answer("passed"), 0.0),
     )
 
-    before = {slug: 10.0}
-    tool_handlers.record_page_checks(session, tool_handlers.lint_changed_artifact_files(store, before).page_checks)
-    os.utime(index, (20, 20))
+    before = tool_handlers.snapshot_existing_artifacts(store)
+    index.write_text(_PAGE.replace("hi", "index.html"))
+    checks = tool_handlers.lint_changed_artifact_files(store, before).page_checks
+    tool_handlers.record_page_checks(session, checks=checks)
+    before = tool_handlers.snapshot_existing_artifacts(store)
     details.write_text(_PAGE)
-    before = {slug: 20.0}
-    tool_handlers.record_page_checks(session, tool_handlers.lint_changed_artifact_files(store, before).page_checks)
+    checks = tool_handlers.lint_changed_artifact_files(store, before).page_checks
+    tool_handlers.record_page_checks(session, checks=checks)
 
     assert [r["body"]["html"] for r in service.requests] == [_PAGE.replace("hi", "index.html"), _PAGE]
-    assert tool_handlers.page_check_lines(store, session._page_checks) == [
+    assert tool_handlers.page_check_lines(store, checks=session._page_checks) == [
         "“Map” failed the browser check, so it may not display correctly in the preview."
     ]
 
@@ -1201,7 +2208,7 @@ def _chat_sse(reply: "str | dict") -> bytes:
         chunks = [chunk({"role": "assistant", "content": reply}), chunk({}, "stop")]
     else:
         call = {"index": 0, "id": reply["id"], "type": "function",
-                "function": {"name": "scratchpad", "arguments": json.dumps(reply["input"])}}
+                "function": {"name": reply.get("name", "scratchpad"), "arguments": json.dumps(reply["input"])}}
         chunks = [chunk({"role": "assistant", "tool_calls": [call]}), chunk({}, "tool_calls")]
     chunks.append(chunk({}, usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}))
     return ("".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n").encode()
@@ -1227,8 +2234,8 @@ def _responses_sse(reply: "str | dict") -> bytes:
         arguments = json.dumps(reply["input"])
         events += [
             {"type": "response.output_item.added", "output_index": 0,
-             "item": {"type": "function_call", "id": "fc_1", "call_id": reply["id"], "name": "scratchpad",
-                      "arguments": "", "status": "in_progress"}},
+             "item": {"type": "function_call", "id": "fc_1", "call_id": reply["id"],
+                      "name": reply.get("name", "scratchpad"), "arguments": "", "status": "in_progress"}},
             {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "output_index": 0,
              "delta": arguments},
             {"type": "response.function_call_arguments.done", "item_id": "fc_1", "output_index": 0,
@@ -1240,13 +2247,23 @@ def _responses_sse(reply: "str | dict") -> bytes:
     ).encode()
 
 
+# What `_TextOnlyModel` answers past `_REQUEST_CAP`: the session raises a
+# provider 401 at once and never resends it.
+_OVER_THE_CAP = {"error": {
+    "message": f"more than {_REQUEST_CAP} requests in one test",
+    "type": "authentication_error", "param": None, "code": "invalid_api_key",
+}}
+
+
 class _TextOnlyModel:
     """An OpenAI-compatible API for a model that takes no image input.
 
     Real HTTP, so the real SDK and anton's real provider are in the path. A
     request `refuses` picks gets the 400 `refusal`, here any request carrying
-    an image part; any other gets the next scripted reply: a scratchpad call
-    (a dict) or an answer (a str).
+    an image part; any other gets the next scripted reply: a tool call (a
+    dict, a scratchpad call unless it names another tool) or an answer (a
+    str). Every request past `_REQUEST_CAP` gets a 401, which ends the turn
+    at once with a `ProviderAuthError`.
     """
 
     def __init__(self, refusal: dict, replies: list) -> None:
@@ -1260,7 +2277,9 @@ class _TextOnlyModel:
             def do_POST(self):  # noqa: N802 - the stdlib's name
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 owner.requests.append(body)
-                if owner.refuses(body):
+                if len(owner.requests) > _REQUEST_CAP:
+                    code, kind, data = 401, "application/json", json.dumps(_OVER_THE_CAP).encode()
+                elif owner.refuses(body):
                     code, kind, data = 400, "application/json", json.dumps(owner.refusal).encode()
                 else:
                     sse = _responses_sse if self.path.endswith("/responses") else _chat_sse
@@ -1395,6 +2414,411 @@ async def test_a_refusal_with_no_screenshot_in_the_request_ends_the_turn_as_befo
     assert session._render_screenshots_refused is False
 
 
+def _read_image(tool_id: str, *, path: str) -> dict:
+    return {"id": tool_id, "name": "read_image", "input": {"file_path": path}}
+
+
+async def _turns(session, *prompts: str) -> list[str]:
+    """Run one turn per prompt on the same session, as the CLI does; the
+    streamed text of each."""
+    from anton.core.llm.provider import StreamTextDelta
+
+    texts = []
+    try:
+        for prompt in prompts:
+            events = [event async for event in session.turn_stream(prompt)]
+            texts.append("".join(e.text for e in events if isinstance(e, StreamTextDelta)))
+    finally:
+        await session.close()
+    return texts
+
+
+@pytest.mark.parametrize("case", sorted(_REFUSALS))
+async def test_a_model_that_refuses_images_still_answers_after_read_image(project, case):
+    """The agent reads back an image it drew; a model that takes no image
+    input refuses the request that carries it. The turn replaces the image
+    with a note, sends the request once more and ends with the model's
+    answer. From then on `read_image` answers in text, so a later call
+    costs no refused request. Render screenshots stay on: they did not
+    cause this refusal."""
+    refusal = _REFUSALS[case]
+    (project / "digits.png").write_bytes(b"\x89PNG\r\n\x1a\n five digits")
+    model = _TextOnlyModel(refusal.body, [
+        _read_image("call_1", path="digits.png"), "I could not view the image.",
+        _read_image("call_2", path="digits.png"), "I still cannot view it.",
+    ])
+    session, _, _ = _session_for(project, [])
+    _on_model(session, model, refusal.flavor)
+    try:
+        first, second = await _turns(session, "what digits are in digits.png?", "try once more")
+    finally:
+        model.server.shutdown()
+
+    assert first.endswith("I could not view the image.")
+    assert second.endswith("I still cannot view it.")
+    # The read_image call; its result with the image, refused; the same
+    # request without it. The second turn's call sends no image at all.
+    assert [_image_parts(body) for body in model.requests] == [0, 1, 0, 0, 0]
+    resent = json.dumps(model.requests[2], ensure_ascii=False)
+    assert render_check.DROPPED_TOOL_IMAGE_PLACEHOLDER in resent
+    assert "Loaded digits.png" in resent, "the text beside the image stays"
+    # The resend went through, so the note says the model refused the image.
+    assert render_check.REFUSED_TOOL_IMAGE_PLACEHOLDER in json.dumps(model.requests[3], ensure_ascii=False)
+    assert "digits.png was not loaded" in json.dumps(model.requests[4], ensure_ascii=False)
+    assert session._images_refused is True
+    assert session._render_screenshots_refused is False
+    history = json.dumps(session.history)
+    assert "An error interrupted execution" not in history
+    assert "The task has failed" not in history
+
+
+@pytest.mark.parametrize("case", sorted(_REFUSALS))
+async def test_a_cell_after_a_refused_read_image_drops_its_screenshot_once(service, project, case):
+    """The model refused the image `read_image` loaded and took the request
+    without it. That says nothing about render screenshots, so the next
+    cell's check still asks for one. A model with no image input refuses
+    that request too; the turn drops the screenshot once, sends the request
+    without it and ends with the model's answer. One drop of each kind."""
+    refusal = _REFUSALS[case]
+    (project / "digits.png").write_bytes(b"\x89PNG\r\n\x1a\n five digits")
+    model = _TextOnlyModel(refusal.body, [
+        _read_image("call_1", path="digits.png"), _cell("call_2"), "The map is drawn.",
+    ])
+    session, pad, _ = _session_for(project, [])
+    _on_model(session, model, refusal.flavor)
+    try:
+        streamed, _ = await _final_text(session)
+    finally:
+        model.server.shutdown()
+
+    assert streamed.endswith("The map is drawn.")
+    assert len(pad.ran) == 1
+    assert [r["body"]["screenshot"] for r in service.requests] == [True]
+    # The read_image call; its result with the image, refused; the same
+    # request without it; the cell's result with its screenshot, refused;
+    # the same request without it.
+    assert [_image_parts(body) for body in model.requests] == [0, 1, 0, 1, 0]
+    assert render_check.DROPPED_SCREENSHOT_PLACEHOLDER in json.dumps(model.requests[4], ensure_ascii=False)
+    assert session._images_refused is True
+    assert session._render_screenshots_refused is True
+
+
+# An image `_RefusesOneImage` refuses: a PNG signature with no image after
+# it, which a model that takes images cannot decode.
+_CORRUPT_PNG = b"\x89PNG\r\n\x1a\n a PNG cut off after its signature"
+# A refusal of one image the provider could not read, naming no content path.
+_UNREADABLE_400 = {"error": {
+    "message": "You uploaded an unsupported image. Please make sure your image is valid.",
+    "type": "invalid_request_error", "param": None, "code": None,
+}}
+
+
+class _RefusesOneImage(_TextOnlyModel):
+    """A model that takes images and refuses only a request carrying
+    `_CORRUPT_PNG`."""
+
+    def refuses(self, body: dict) -> bool:
+        return base64.b64encode(_CORRUPT_PNG).decode() in json.dumps(body)
+
+
+async def test_a_vision_model_that_refuses_one_read_image_file_still_gets_screenshots(service, project):
+    """A model that takes images refuses one corrupt file `read_image`
+    loaded. `read_image` sends no more images, but the next cell's check
+    still asks for a screenshot, and the model takes it."""
+    (project / "photo.png").write_bytes(_CORRUPT_PNG)
+    model = _RefusesOneImage(_UNREADABLE_400, [
+        _read_image("call_1", path="photo.png"), _cell("call_2"), "The map is drawn.",
+    ])
+    session, pad, _ = _session_for(project, [])
+    _on_model(session, model, "openai-compatible-generic")
+    try:
+        streamed, _ = await _final_text(session)
+    finally:
+        model.server.shutdown()
+
+    assert streamed.endswith("The map is drawn.")
+    assert len(pad.ran) == 1
+    assert [r["body"]["screenshot"] for r in service.requests] == [True]
+    # The read_image call; its result with the file, refused; the same
+    # request without it; the cell's result with its screenshot, taken.
+    assert [_image_parts(body) for body in model.requests] == [0, 1, 0, 1]
+    assert session._images_refused is True
+    assert session._render_screenshots_refused is False
+
+
+async def test_a_vision_model_that_refuses_a_file_beside_a_screenshot_still_gets_screenshots(service, project):
+    """History keeps the newest render screenshot, so a request carrying a
+    corrupt file `read_image` loaded carries that screenshot too. The turn
+    drops the file first and resends; the model takes the screenshot, so
+    only `read_image` stops sending images, and the next cell's check still
+    asks for a screenshot."""
+    (project / "photo.png").write_bytes(_CORRUPT_PNG)
+    model = _RefusesOneImage(_UNREADABLE_400, [
+        _cell("call_1"), _read_image("call_2", path="photo.png"), _cell("call_3"), "Done.",
+    ])
+    session, pad, _ = _session_for(project, [])
+    _on_model(session, model, "openai-compatible-generic")
+    try:
+        streamed, _ = await _final_text(session)
+    finally:
+        model.server.shutdown()
+
+    assert streamed.endswith("Done.")
+    assert len(pad.ran) == 2
+    # The first cell's result with its screenshot, taken; the file beside
+    # it, refused; the same request with only the screenshot, taken; the
+    # second cell's result with its own screenshot, taken.
+    assert [_image_parts(body) for body in model.requests] == [0, 1, 2, 1, 1]
+    assert [r["body"]["screenshot"] for r in service.requests] == [True, True]
+    assert session._images_refused is True
+    assert session._render_screenshots_refused is False
+    assert not render_check.screenshots_refused(session.history)
+
+
+def _read_image_round(tool_use_id: str) -> list[dict]:
+    """A read_image call and its result with the image, as history holds them."""
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}}
+    return [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": tool_use_id, "name": "read_image", "input": {"file_path": "d.png"}},
+        ]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": tool_use_id, "content": [
+            image, {"type": "text", "text": "Loaded d.png"},
+        ]}]},
+    ]
+
+
+@pytest.mark.parametrize("case", sorted(_REFUSALS))
+async def test_a_text_only_model_refusing_both_kinds_drops_each_once_and_confirms_both(project, case):
+    """A request carries a render screenshot and an image `read_image`
+    loaded, and a model with no image input refuses it. The turn drops the
+    tool image and resends; the screenshot is refused too, so the turn drops
+    it and resends once more. That request goes through, which confirms
+    both drops."""
+    refusal = _REFUSALS[case]
+    model = _TextOnlyModel(refusal.body, ["Done."])
+    session, _, _ = _session_for(project, [])
+    _on_model(session, model, refusal.flavor)
+    session._history.extend([*_shot_round("t1"), *_read_image_round("t2")])
+    try:
+        async for _ in session.turn_stream("go on"):
+            pass
+    finally:
+        await session.close()
+        model.server.shutdown()
+
+    assert [_image_parts(body) for body in model.requests] == [2, 1, 0]
+    assert session._images_refused is True
+    assert session._render_screenshots_refused is True
+    assert render_check.screenshots_refused(session.history)
+    assert render_check.tool_images_refused(session.history)
+
+
+@pytest.mark.parametrize("case", sorted(_REFUSALS))
+async def test_a_refusal_neither_kind_caused_drops_each_once_and_confirms_neither(project, case):
+    """The request is refused with the tool image, without it, and without
+    the screenshot as well. Each kind is dropped once, so the turn takes the
+    old path from there and ends as it did before, and nothing records that
+    the model refused images."""
+    refusal = _REFUSALS[case]
+    model = _RefusesOnceItSawAnImage(refusal.body, [])
+    session, _, _ = _session_for(project, [])
+    _on_model(session, model, refusal.flavor)
+    session._history.extend([*_shot_round("t1"), *_read_image_round("t2")])
+    try:
+        with pytest.raises(Exception) as refused:
+            async for _ in session.turn_stream("go on"):
+                pass
+    finally:
+        await session.close()
+        model.server.shutdown()
+
+    assert type(refused.value).__name__ == refusal.terminal
+    # The tool image dropped, then the screenshot, then the requests a
+    # refusal with no image of anton's to drop always took.
+    assert [_image_parts(body) for body in model.requests] == [2, 1] + [0] * refusal.attempts
+    assert session._images_refused is False
+    assert session._render_screenshots_refused is False
+    assert not render_check.screenshots_refused(session.history)
+    assert not render_check.tool_images_refused(session.history)
+
+
+# JPEG bytes saved as a .png.
+_JPEG_NAMED_PNG = b"\xff\xd8\xff\xe0 a JPEG named .png"
+# What Anthropic's API answers an image whose bytes are not the media type it
+# was sent as.
+_MEDIA_TYPE_400 = {"error": {
+    "message": "messages.1.content.0.image.source.base64: The image was specified using the image/png "
+               "media type, but the image appears to be a image/jpeg image",
+    "type": "invalid_request_error", "param": None, "code": None,
+}}
+
+
+class _ChecksMediaType(_TextOnlyModel):
+    """A model that takes images and refuses one sent as a PNG whose bytes
+    are `_JPEG_NAMED_PNG`."""
+
+    def refuses(self, body: dict) -> bool:
+        return f"data:image/png;base64,{base64.b64encode(_JPEG_NAMED_PNG).decode()}" in json.dumps(body)
+
+
+async def test_a_jpeg_named_png_reaches_the_model_and_read_image_stays_on(project):
+    """`read_image` sends the media type the bytes show, so a provider that
+    checks the bytes takes a JPEG saved as .png, and a later valid file
+    still loads."""
+    (project / "photo.png").write_bytes(_JPEG_NAMED_PNG)
+    (project / "good.png").write_bytes(b"\x89PNG\r\n\x1a\n five digits")
+    model = _ChecksMediaType(_MEDIA_TYPE_400, [
+        _read_image("call_1", path="photo.png"), _read_image("call_2", path="good.png"), "Done.",
+    ])
+    session, _, _ = _session_for(project, [])
+    _on_model(session, model, "openai-compatible-generic")
+    try:
+        streamed, _ = await _final_text(session)
+    finally:
+        model.server.shutdown()
+
+    assert streamed.endswith("Done.")
+    assert [_image_parts(body) for body in model.requests] == [0, 1, 2]
+    assert "data:image/jpeg;base64," in json.dumps(model.requests[1])
+    assert session._images_refused is False
+
+
+async def test_read_image_sends_the_media_type_the_bytes_show(project):
+    from anton.core.tools.tool_handlers import handle_read_image
+
+    (project / "photo.png").write_bytes(_JPEG_NAMED_PNG)
+    session = SimpleNamespace(_workspace=SimpleNamespace(base=project), _scratchpads=None, _images_refused=False)
+
+    out = await handle_read_image(session, {"file_path": "photo.png"})
+
+    assert out.ok is True
+    assert out.content[0]["source"]["media_type"] == "image/jpeg"
+    assert base64.b64decode(out.content[0]["source"]["data"]) == _JPEG_NAMED_PNG
+
+
+_GIF_1X1 = (
+    b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,"
+    b"\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
+)
+_WEBP_1X1 = b"RIFF\x1a\x00\x00\x00WEBPVP8L\x0d\x00\x00\x00/\x00\x00\x00\x10\x07\x10\x11\x11\x88\x88\xfe\x07\x00"
+
+
+@pytest.mark.parametrize("name, data, media_type", [
+    ("a.gif", _GIF_1X1, "image/gif"),
+    ("a.webp", _WEBP_1X1, "image/webp"),
+])
+async def test_read_image_still_sends_a_gif_or_a_webp(project, name, data, media_type):
+    from anton.core.tools.tool_handlers import handle_read_image
+
+    (project / name).write_bytes(data)
+    session = SimpleNamespace(_workspace=SimpleNamespace(base=project), _scratchpads=None, _images_refused=False)
+
+    out = await handle_read_image(session, {"file_path": name})
+
+    assert out.ok is True
+    assert out.content[0]["source"]["media_type"] == media_type
+    assert base64.b64decode(out.content[0]["source"]["data"]) == data
+
+
+async def test_read_image_reads_bmp_bytes_as_a_bmp_whatever_the_name(project):
+    """BMP bytes named .png go to the BMP conversion, not to the "not a
+    readable image" answer: out as PNG with Pillow, or the conversion's own
+    error without it."""
+    import struct
+
+    from anton.core.tools.tool_handlers import handle_read_image
+
+    pixels = b"\x00\x00\xff\x00"
+    bmp = (
+        b"BM" + struct.pack("<IHHI", 54 + len(pixels), 0, 0, 54)
+        + struct.pack("<IiiHHIIiiII", 40, 1, 1, 1, 24, 0, len(pixels), 2835, 2835, 0, 0)
+        + pixels
+    )
+    (project / "chart.png").write_bytes(bmp)
+    session = SimpleNamespace(_workspace=SimpleNamespace(base=project), _scratchpads=None, _images_refused=False)
+
+    out = await handle_read_image(session, {"file_path": "chart.png"})
+
+    try:
+        import PIL  # noqa: F401
+    except ImportError:
+        assert (out.ok, out.reason) == (False, "bmp_convert_failed")
+    else:
+        assert out.ok is True
+        assert out.content[0]["source"]["media_type"] == "image/png"
+
+
+async def test_read_image_of_a_file_that_is_no_image_answers_in_text(project):
+    """A .png whose bytes are no PNG, JPEG, GIF or WebP gets a text answer,
+    and no image part reaches the model."""
+    (project / "notes.png").write_bytes(b"these are notes, not a picture")
+    model = _VisionModel(_UNREADABLE_400, [_read_image("call_1", path="notes.png"), "Done."])
+    session, _, _ = _session_for(project, [])
+    _on_model(session, model, "openai-compatible-generic")
+    try:
+        streamed, _ = await _final_text(session)
+    finally:
+        model.server.shutdown()
+
+    assert streamed.endswith("Done.")
+    assert [_image_parts(body) for body in model.requests] == [0, 0]
+    assert "'notes.png' is not a readable PNG, JPEG, GIF or WebP image." in json.dumps(model.requests[1])
+    assert session._images_refused is False
+
+
+class _RefusesOnceItSawAnImage(_TextOnlyModel):
+    """A model that, once a request carried an image, refuses every request
+    after it, with or without one."""
+
+    saw_image = False
+
+    def refuses(self, body: dict) -> bool:
+        self.saw_image = self.saw_image or _image_parts(body) > 0
+        return self.saw_image
+
+
+@pytest.mark.parametrize("case", sorted(_REFUSALS))
+async def test_a_refusal_the_tool_image_did_not_cause_drops_it_once(project, case):
+    """The image is dropped once per turn. The resend without it is refused
+    as well, so the turn takes the old path from there and ends as it did
+    before, and nothing records that the model refused images."""
+    refusal = _REFUSALS[case]
+    (project / "digits.png").write_bytes(b"\x89PNG\r\n\x1a\n five digits")
+    model = _RefusesOnceItSawAnImage(refusal.body, [_read_image("call_1", path="digits.png")])
+    session, _, _ = _session_for(project, [])
+    _on_model(session, model, refusal.flavor)
+    try:
+        with pytest.raises(Exception) as refused:
+            async for _ in session.turn_stream("what digits are in digits.png?"):
+                pass
+    finally:
+        await session.close()
+        model.server.shutdown()
+
+    assert type(refused.value).__name__ == refusal.terminal
+    # One request with the image; after it, the resend without it, then
+    # the requests a refusal with no image of anton's to drop always took.
+    assert [_image_parts(body) for body in model.requests] == [0, 1] + [0] * refusal.attempts
+    assert session._images_refused is False
+
+
+async def test_read_image_answers_in_text_once_the_model_refused_an_image(project):
+    from anton.core.tools.tool_handlers import handle_read_image
+
+    (project / "digits.png").write_bytes(b"\x89PNG\r\n\x1a\n five digits")
+    session = SimpleNamespace(_workspace=SimpleNamespace(base=project), _scratchpads=None, _images_refused=True)
+
+    out = await handle_read_image(session, {"file_path": "digits.png"})
+
+    assert out.ok is False and out.reason == "images_refused"
+    assert isinstance(out.content, str) and "Tell the user you could not view this image." in out.content
+
+    session._images_refused = False
+    loaded = await handle_read_image(session, {"file_path": "digits.png"})
+    assert loaded.ok is True and loaded.content[0]["type"] == "image"
+
+
 def _shot_round(tool_use_id: str) -> list[dict]:
     """A scratchpad call and its result with a render screenshot, as history holds them."""
     call = {"role": "assistant", "content": [{
@@ -1410,7 +2834,7 @@ async def test_the_screenshot_is_dropped_once_then_the_refusal_takes_its_old_pat
     it did before: here the content repair and the error the host shows.
     The screenshot was not the cause, so later checks keep theirs, and the
     note says only what happened."""
-    from anton.core.llm.provider import ContentValidationError
+    from anton.core.llm.provider import ContentValidationError, ProviderAuthError
 
     session, _, _ = _session_for(project, [])
     session._history.extend(_shot_round("t1"))
@@ -1418,6 +2842,9 @@ async def test_the_screenshot_is_dropped_once_then_the_refusal_takes_its_old_pat
 
     async def refuse(user_msg):
         calls.append(user_msg)
+        if len(calls) > _REQUEST_CAP:
+            # The session ends the turn on this at once, so a broken bound fails here.
+            raise ProviderAuthError(f"more than {_REQUEST_CAP} requests in one test")
         raise ContentValidationError("refused")
         yield  # pragma: no cover - makes this an async generator
 
@@ -1526,13 +2953,6 @@ async def test_a_session_seeded_with_a_refused_screenshot_attaches_none(service,
     assert session._render_screenshots_refused is True
 
 
-# A refusal of one image the provider could not read, naming no content path.
-_UNREADABLE_400 = {"error": {
-    "message": "You uploaded an unsupported image. Please make sure your image is valid.",
-    "type": "invalid_request_error", "param": None, "code": None,
-}}
-
-
 @pytest.mark.parametrize("flavor", ["openai", "openai-compatible-generic"])
 async def test_an_oversized_image_of_the_persons_keeps_screenshots_on(service, project, flavor):
     """The model takes images and refuses only the person's oversized one. A
@@ -1594,6 +3014,7 @@ async def test_a_refusal_the_screenshots_did_not_cause_leaves_them_on(service, p
 
 
 async def test_generate_artifact_attaches_no_screenshot_once_the_model_refused_one(tmp_path, monkeypatch):
+    """A model that refused a render screenshot would refuse this one as well."""
     shot = render_check.RenderScreenshot(media_type="image/jpeg", data=_SHOT)
     _, out = await _handler_result(tmp_path, monkeypatch, {
         "status": "generated", "files_written": ["index.html"], "warnings": [], "checks_skipped": [],
@@ -1603,6 +3024,20 @@ async def test_generate_artifact_attaches_no_screenshot_once_the_model_refused_o
     assert out.ok is True and isinstance(out.content, str)
     payload = json.loads(out.content)
     assert payload["verified_in_browser"] is True and "screenshot" not in payload
+
+
+async def test_generate_artifact_attaches_the_screenshot_after_a_refused_read_image(tmp_path, monkeypatch):
+    """A refused `read_image` image leaves render screenshots on: the model
+    may take images and have refused only that file."""
+    shot = render_check.RenderScreenshot(media_type="image/jpeg", data=_SHOT)
+    _, out = await _handler_result(tmp_path, monkeypatch, {
+        "status": "generated", "files_written": ["index.html"], "warnings": [], "checks_skipped": [],
+        "verified_in_browser": True, "screenshot": shot,
+    }, images_refused=True)
+
+    assert out.ok is True
+    _, _, image = out.content
+    assert image == {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _SHOT}}
 
 
 def test_a_refused_screenshot_leaves_a_note_and_the_text_beside_it():
@@ -1633,6 +3068,83 @@ def test_a_refused_screenshot_leaves_a_note_and_the_text_beside_it():
         }
     assert render_check.screenshots_refused(history)
     assert render_check.confirm_refused_screenshots(history) == 0
+
+
+def test_a_refused_tool_image_leaves_a_note_and_every_other_image_alone():
+    """A model with no image input refused every request carrying the image
+    `read_image` returned, and the screenshot drop found nothing to take."""
+    read_image = {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "img", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+            {"type": "text", "text": "Loaded digits.png (10x10, 3 B)."},
+        ]}],
+    }
+    image_url = {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "url", "content": [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ]}],
+    }
+    attached = {"role": "user", "content": [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "BBBB"}},
+        {"type": "text", "text": "what digits are in this?"},
+    ]}
+    history = [attached, _result_with_shot("t1", _SHOT), read_image, image_url]
+    before = json.loads(json.dumps(history))
+
+    assert render_check.drop_refused_tool_images(history) == 2
+
+    note = {"type": "text", "text": render_check.DROPPED_TOOL_IMAGE_PLACEHOLDER}
+    assert history[2]["content"][0]["content"] == [note, {"type": "text", "text": "Loaded digits.png (10x10, 3 B)."}]
+    assert history[3]["content"][0]["content"] == [note]
+    assert history[0] == before[0], "an image the person attached is the content repair's to judge"
+    assert history[1] == before[1], "a render screenshot is drop_refused_screenshots' to drop"
+    assert not render_check.screenshots_refused(history)
+    assert not render_check.tool_images_refused(history), "no request has gone through without them yet"
+    assert render_check.drop_refused_tool_images(history) == 0
+
+    # A request went through without them: the notes say the model refused them.
+    assert render_check.confirm_refused_tool_images(history) == 2
+    assert history[3]["content"][0]["content"] == [{"type": "text", "text": render_check.REFUSED_TOOL_IMAGE_PLACEHOLDER}]
+    assert render_check.tool_images_refused(history)
+    assert not render_check.screenshots_refused(history)
+    assert render_check.confirm_refused_tool_images(history) == 0
+
+
+async def test_a_session_seeded_with_a_refused_tool_image_reads_none(project):
+    """cowork-server builds a session for every turn and seeds it with the
+    conversation's earlier tool results, cut by anton's own row splitter.
+    The note a confirmed refusal of a `read_image` image left tells the new
+    session the model takes no image input, so `read_image` answers in text
+    instead of costing a refused request in every turn."""
+    from anton.cloud_turn.history_rows import split_turn_into_rows
+
+    (project / "digits.png").write_bytes(b"\x89PNG\r\n\x1a\n five digits")
+    earlier = [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t0", "name": "read_image", "input": {"file_path": "digits.png"}},
+        ]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t0", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+            {"type": "text", "text": "Loaded digits.png (10x10, 3 B)."},
+        ]}]},
+    ]
+    render_check.drop_refused_tool_images(earlier)
+    render_check.confirm_refused_tool_images(earlier)
+    model = _TextOnlyModel(_NO_IMAGES_CHAT, [_read_image("call_1", path="digits.png"), "I cannot view it."])
+    session, _, _ = _session_for(project, [])
+    session._history.extend(split_turn_into_rows(earlier))
+    _on_model(session, model, "openai-compatible-generic")
+    try:
+        streamed, _ = await _final_text(session, "what digits are in digits.png?")
+    finally:
+        model.server.shutdown()
+
+    assert streamed.endswith("I cannot view it.")
+    assert session._images_refused is True
+    assert [_image_parts(body) for body in model.requests] == [0, 0], "no request carried an image"
+    assert "digits.png was not loaded" in json.dumps(model.requests[1], ensure_ascii=False)
 
 
 # ── What the generator and the skill tell the model ──────────────────────────

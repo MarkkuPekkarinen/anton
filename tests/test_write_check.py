@@ -2235,6 +2235,33 @@ def test_a_scrubbed_token_leaves_the_where_on_the_card(sql, shown, snap):
     assert _fenced(card) == [shown]
 
 
+@pytest.mark.parametrize("sql", [
+    "UPDATE users SET access_token = NULL WHERE tenant_id = 42",
+    "UPDATE sessions SET access_token = NULL WHERE expires_at < now()",
+    "UPDATE t SET refresh_token = NULL WHERE id = 1",
+    "UPDATE sessions SET client_secret = NULL WHERE app_id = 3",
+    "UPDATE cfg SET client_secret = DEFAULT WHERE id = 1",
+    "DELETE FROM tokens WHERE access_token = abcdefghijklmnopqrstu OR 1 = 1",
+], ids=["null", "null-before-a-call", "refresh-token", "client-secret", "default", "compared-to-a-column"])
+def test_an_unquoted_token_column_keeps_the_where_on_the_card(sql, snap):
+    """A token column set to NULL or DEFAULT, or compared to another column,
+    has no secret to hide: the card quotes the statement whole, its WHERE
+    and an `OR 1 = 1` that widens it included."""
+    card = _card(PG + f'cur.execute("{sql}")', snap)
+    assert _fenced(card) == [sql]
+
+
+def test_a_token_in_a_dict_the_address_is_built_from_is_scrubbed_on_the_card():
+    """The run-time code for an address is unparsed, with a space after each
+    dict colon, so the token stands as a word of its own there."""
+    token = "abcdefghijklmnopqrstuvwxyz0123456789"
+    writes = find_cell_writes(code=f"import requests\nrequests.delete(make_url({{'access_token': '{token}'}}))",
+                              earlier_code=(), snapshots=())
+    [request] = writes.http
+    assert request.url_code == "make_url({'access_token': '[REDACTED_TOKEN]'})"
+    assert token not in _card_prompt(writes)
+
+
 @pytest.mark.parametrize("values", [
     "('access_token=\\n{t}', 1)",
     "{{'v': 'refresh_token\\n{t}', 'id': 1}}",

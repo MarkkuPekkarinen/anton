@@ -205,6 +205,11 @@ _SENTINEL_REASONS = {
     # A bare `except Exception` around a PIL round-trip: a missing Pillow is a
     # wall, a corrupt BMP is not, and the sentinel cannot tell them apart.
     "bmp_convert_failed": (TIER_UNCLASSIFIED, "unclassified"),
+    # `read_image` once the model provider refused a request carrying a
+    # tool's image and took it without one. The model may take no image
+    # input, or the refusal may have had another cause the provider only
+    # worded around an image, so it stays out of every trip rung.
+    "images_refused": (TIER_UNCLASSIFIED, "unclassified"),
     # MCP connectors (ENG-1816): a rejected/expired token needs a user
     # reconnect, same shape as a 401 (`_STATUS_WALLS["401"] = "auth_missing"`)
     # — the agent cannot fix this by retrying, so it's a genuine wall.

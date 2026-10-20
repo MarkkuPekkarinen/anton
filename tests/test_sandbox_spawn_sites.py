@@ -565,12 +565,12 @@ class _Store:
         self.root = root
 
 
-def _artifact(root: Path, slug: str, filename: str, content: bytes) -> dict[str, float]:
+def _artifact(root: Path, slug: str, filename: str, content: bytes) -> dict[str, tool_handlers.ArtifactFiles]:
     folder = root / slug
     folder.mkdir(parents=True)
     (folder / "metadata.json").write_text("{}")
     (folder / filename).write_bytes(content)
-    return {slug: 0.0}
+    return {slug: tool_handlers.ArtifactFiles()}
 
 
 def test_browser_and_office_lints_are_skipped_and_say_so(tmp_path, policy, monkeypatch):

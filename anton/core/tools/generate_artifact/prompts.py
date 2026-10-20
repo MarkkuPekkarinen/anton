@@ -151,8 +151,9 @@ VISUAL DESIGN (for every HTML file you produce):
   `<style>` block stays allowed wherever utilities fall short — keyframes,
   chart containers, complex selectors — or when the page is too small to
   need a framework. No other CSS or JS library: the two CDN scripts named in
-  these rules (Tailwind, ECharts), at exactly the versions shown, are the
-  ONLY external resources a page may load. Both are fetched every time the
+  these rules (Tailwind, ECharts) and, for a map or globe, the recipe
+  packages under MAPS AND GLOBES, each at exactly the version shown, are the
+  ONLY external resources a page may load. They are fetched every time the
   page opens, so a page that must work OFFLINE or without external resources
   (brief or PRD says so) skips Tailwind and styles itself with hand-written
   CSS.
@@ -160,6 +161,31 @@ VISUAL DESIGN (for every HTML file you produce):
   `<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>`
   Initialise with `echarts.init(dom, 'dark')` and customise background to #0d1117.
   NEVER use Plotly, matplotlib, or other chart libraries unless explicitly asked.
+- MAPS AND GLOBES: ECharts ships no world outline, so a map or globe uses
+  one of these tested recipes, at exactly these versions. Load the world
+  atlas with d3@7.9.0 and topojson-client@3.1.0:
+  `<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>`
+  `<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>`
+  `const WORLD_ATLAS = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json';`
+  `d3.json(WORLD_ATLAS).then((world) => { const countries = topojson.feature(world, world.objects.countries); /* draw */ });`
+  Load it with `d3.json`, never `fetch()`: the verifier fails an absolute
+  URL in `fetch()`. Then draw `countries` in one of three ways:
+  - d3 into an `<svg>` (`d3.geoNaturalEarth1().fitSize([w, h], countries)`,
+    `d3.geoPath`);
+  - ECharts: `echarts.registerMap('world', countries)`, then a `map` series
+    with `map: 'world'`;
+  - a globe: globe.gl@2.34.2
+    (`<script src="https://cdn.jsdelivr.net/npm/globe.gl@2.34.2/dist/globe.gl.min.js"></script>`)
+    with `.polygonsData(countries.features)`. It is heavy, so the browser
+    check may run out of time on it and leave the page unverified.
+  Never write GeoJSON into the page by hand: a world outline runs to hundreds
+  of KB. Leaflet, raster map tiles, MapLibre (it needs a web worker) and
+  echarts-gl (it needs `eval`) break the preview policy below.
+- PREVIEW POLICY: the web app preview runs the page in a sandboxed frame
+  under a content security policy that blocks what it does not allow. Build
+  to that policy so the page renders on every deployment: no external
+  stylesheet or web font, no external image or map tile (embed an image as a
+  `data:` URI), no `eval` or `new Function`, and no web workers.
 - Chart type by purpose: line for change over time, bar for comparing
   categories (horizontal when labels are long), stacked bar for composition
   across categories, scatter for the relation between two measures. Pie or
@@ -528,7 +554,8 @@ root-relative path instead of `api()`, or one whose `fetch()` names a path
 
 - Single self-contained HTML file: your own CSS in `<style>`, all JS in
   `<script>`. The only external resources are the CDN scripts named in the
-  design rules (Tailwind, ECharts).
+  design rules (Tailwind, ECharts) and, for a map or globe, the recipe
+  packages and world atlas named there.
 - Include the api-base meta tag in `<head>`:
   ```html
   <meta name="api-base" content="">
@@ -622,7 +649,8 @@ def _gen_html_task(target: str, *, fullstack: bool = False) -> str:
 Produce ONE self-contained HTML file named exactly `{target}`: the
 complete frontend of a fullstack app. Inline your own CSS and all JS; the
 only external resources allowed are the Tailwind and ECharts `<script>` tags
-from the CDNs named in the design rules. The backend is generated in parallel
+from the CDNs named in the design rules and, for a map or globe, the recipe
+packages and world atlas named there. The backend is generated in parallel
 and serves the endpoints listed under `## API Specification`: take exact
 paths and response shapes from there and call every one of them through the
 `api()` helper (see Fullstack rules). Embed no data — the page fetches it
@@ -639,7 +667,8 @@ listed under `## Attached files`, by the relative name given there in quotes
 replaces each such reference with the asset itself as a `data:` URI, since
 the app preview shows only the page. The only external resources allowed
 are the Tailwind and ECharts `<script>` tags from the CDNs named in the
-design rules."""
+design rules and, for a map or globe, the recipe packages and world atlas
+named there."""
     return f"""\
 You are a single-purpose worker inside an artifact-generation pipeline. This
 step is `generate_frontend`.
@@ -1334,9 +1363,12 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
   an absolute URL anywhere in the spec.
 - Frontend: one self-contained HTML file (`static/index.html` for fullstack
   types) — vanilla JavaScript, Tailwind CSS via CDN for styling (hand-written
-  CSS where needed), Apache ECharts for charts. Both libraries need network
-  access when the page opens; when the PRD requires offline use, the spec
-  says so and the frontend is styled with hand-written CSS only.
+  CSS where needed), Apache ECharts for charts. A map or globe uses the
+  tested recipe: d3@7.9.0 and topojson-client@3.1.0 load world-atlas@2.0.2,
+  drawn with d3, with ECharts, or on a globe with globe.gl@2.34.2. These
+  libraries need network access when the page opens; when the PRD requires
+  offline use, the spec says so and the frontend is styled with hand-written
+  CSS only.
 - Durable state (`fullstack-stateful-app` ONLY): the platform STATE store — a
   document/key-value store keyed by (partition key, sort key) with named
   collections, no scan, no secondary indexes, atomic counters. The spec must

@@ -129,14 +129,17 @@ from anton.core.tools.tool_handlers import (
     page_check_lines,
     preliminary_cell,
     resolve_artifact_store,
-    snapshot_existing_artifact_mtimes,
+    snapshot_existing_artifacts,
 )
 from anton.core.artifacts.render_check import (
     RenderStatus,
     confirm_refused_screenshots,
+    confirm_refused_tool_images,
     drop_older_screenshots,
     drop_refused_screenshots,
+    drop_refused_tool_images,
     screenshots_refused,
+    tool_images_refused,
 )
 
 from anton.explainability import ExplainabilityCollector, ExplainabilityStore
@@ -2073,12 +2076,27 @@ class ChatSession:
         # ends with a line for each artifact with a page that did not pass.
         # Reset every turn.
         self._page_checks: dict[PageKey, RenderStatus] = {}
+        # The pages whose findings an unverified check already listed for
+        # the agent this turn, in a cell's result or in generate_artifact's
+        # `checks_skipped`. A later unverified check of such a page lists
+        # none (`tool_handlers.check_cell_artifacts`). Reset every turn.
+        self._unverified_findings_listed: set[PageKey] = set()
         # Set once the model refused a request carrying render-check
         # screenshots and took it without them
         # (`_confirm_render_screenshots_refused`). From then on the checks'
         # findings reach the agent without a screenshot, for the rest of the
         # session; `tool_handlers.render_screenshots_refused` reads it.
+        # generate_artifact sets it too when the model refused its retry's
+        # screenshot (`engine._run_loop`).
         self._render_screenshots_refused = False
+        # Set once the model refused a request carrying an image a tool
+        # returned (what `read_image` loaded) and took it without that image
+        # (`_confirm_tool_images_refused`). From then on `read_image` answers
+        # in text instead of sending another image the model would refuse;
+        # `tool_handlers.images_refused` reads it. Render screenshots keep
+        # their own flag above: one corrupt file draws a
+        # refusal from a model that takes images too.
+        self._images_refused = False
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
         # call at end-of-turn, and encodes lessons via cortex.encode(),
@@ -2229,7 +2247,7 @@ class ChatSession:
         after every edit and no service is involved."""
         if not self._page_checks or cell_sandbox_of(self._scratchpads) is None:
             return []
-        return page_check_lines(resolve_artifact_store(self), self._page_checks)
+        return page_check_lines(resolve_artifact_store(self), checks=self._page_checks)
 
     @property
     def last_compaction(self) -> dict | None:
@@ -3612,6 +3630,28 @@ class ChatSession:
         rest of the session."""
         confirm_refused_screenshots(self._history)
         self._render_screenshots_refused = True
+
+    def _drop_refused_tool_images(self) -> int:
+        """Replace every image a tool returned in history (what `read_image`
+        loaded) with a note that it was removed after a refusal; return how
+        many went.
+
+        The counterpart of `_drop_render_screenshots` for the other images
+        anton put in history itself. A render screenshot is left to that
+        method, and an image the person attached to
+        `_strip_image_blocks_from_history`. `read_image` keeps sending images
+        until a request goes through without them
+        (`_confirm_tool_images_refused`).
+        """
+        return drop_refused_tool_images(self._history)
+
+    def _confirm_tool_images_refused(self) -> None:
+        """The request went through without the tool images, so they caused
+        the refusal: say so in history, where a session seeded from it finds
+        it (`tool_images_refused`), and send no more for the rest of the
+        session."""
+        confirm_refused_tool_images(self._history)
+        self._images_refused = True
 
     def _seal_dangling_tool_uses(self, reason: str = "interrupted") -> int:
         """Append synthetic `tool_result` blocks for any unmatched
@@ -5347,6 +5387,7 @@ class ChatSession:
         # session per turn get the same result either way.
         self._artifacts_touched = set()
         self._page_checks = {}
+        self._unverified_findings_listed = set()
         # What the project held when this turn began: a cell may delete or
         # rename a file it wrote this turn without asking, not one from before.
         if self._write_gate is not None:
@@ -5407,10 +5448,12 @@ class ChatSession:
         self._append_history({"role": "user", "content": stamped_input})
         # A host may seed history with earlier turns' render screenshots.
         drop_older_screenshots(self._history)
-        # A host that builds a session per turn seeds the note that says the
-        # model refused a screenshot in an earlier turn.
+        # A host that builds a session per turn seeds the notes that say the
+        # model refused a screenshot, or a tool's image, in an earlier turn.
         if screenshots_refused(self._history):
             self._render_screenshots_refused = True
+        if tool_images_refused(self._history):
+            self._images_refused = True
 
         # Log user input to episodic memory
         if self._episodic is not None:
@@ -5429,9 +5472,12 @@ class ChatSession:
         _retry_count = 0
         # The one resend this turn allows after the model refused a request
         # over a render-check screenshot (see the handler below), and whether
-        # it still waits for a request that goes through without them.
+        # it still waits for a request that goes through without them. The
+        # same pair for the images other tools returned (`read_image`).
         _screenshots_dropped = False
         _screenshot_drop_unconfirmed = False
+        _tool_images_dropped = False
+        _tool_image_drop_unconfirmed = False
         # One-time cap grace, reset once per turn_stream() call rather than in
         # `_stream_and_handle_tools`, which retries re-enter and would re-arm.
         self._spend_ceiling_grace_used = False
@@ -5519,12 +5565,15 @@ class ChatSession:
                 try:
                     async for event in self._stream_and_handle_tools(user_msg_str):
                         # The first model call after the drop sends the
-                        # history without the screenshots; its completion
+                        # history without the dropped images; its completion
                         # shows they caused the refusal. Before the generator
                         # resumes, so the tools it runs next see the flag.
                         if _screenshot_drop_unconfirmed and isinstance(event, StreamComplete):
                             _screenshot_drop_unconfirmed = False
                             self._confirm_render_screenshots_refused()
+                        if _tool_image_drop_unconfirmed and isinstance(event, StreamComplete):
+                            _tool_image_drop_unconfirmed = False
+                            self._confirm_tool_images_refused()
                         if isinstance(event, StreamTextDelta):
                             assistant_text_parts.append(event.text)
                             if event.text.strip():
@@ -5671,31 +5720,48 @@ class ChatSession:
                         ) from _agent_exc
 
                     # A model that takes no image input refuses every request
-                    # carrying a render-check screenshot, and the request is
-                    # rebuilt from history, so a plain resend fails the same
-                    # way. The screenshot is anton's own addition: drop it,
-                    # keep the findings beside it, and send the request once
-                    # more within this turn, with no recovery note, since the
-                    # agent did nothing wrong. Before the count below, which
-                    # is for resends of an unchanged request. Sealed first, as
-                    # every resend here is. Checks keep their screenshots
-                    # until a request goes through without them (above); a
-                    # second image refusal shows the screenshots were not the
-                    # cause, so nothing confirms the drop after it.
+                    # carrying a render-check screenshot or an image
+                    # `read_image` loaded, and the request is rebuilt from
+                    # history, so a plain resend fails the same way. Those
+                    # images are anton's own additions: drop them, keep the
+                    # text beside them, and send the request once more within
+                    # this turn, with no recovery note, since the agent did
+                    # nothing wrong. A model that takes images refuses a
+                    # corrupt file too, so the tool images go first, and the
+                    # screenshots go only on a refusal that finds no tool
+                    # image left to drop. Each kind is dropped at most once
+                    # per turn, so this resends at most twice. Before the
+                    # count below, which is for resends of an unchanged
+                    # request. Sealed first, as every resend here is. Checks
+                    # and `read_image` keep sending images until a request
+                    # goes through without them (above). An image refusal
+                    # after a drop shows the dropped images were not the
+                    # cause, so nothing confirms that drop after it. The one
+                    # exception is a refusal after a tool-image drop that
+                    # still finds screenshots: the screenshots go too, and
+                    # the request that then goes through confirms both.
                     if is_image_refusal(_agent_exc):
-                        if _screenshots_dropped:
+                        self._seal_dangling_tool_uses("interrupted by error")
+                        _tool_images = 0 if _tool_images_dropped else self._drop_refused_tool_images()
+                        _screens = (
+                            0 if (_tool_images or _screenshots_dropped)
+                            else self._drop_render_screenshots()
+                        )
+                        if _tool_images:
                             _screenshot_drop_unconfirmed = False
+                            _tool_images_dropped = _tool_image_drop_unconfirmed = True
+                        elif _screens:
+                            _screenshots_dropped = _screenshot_drop_unconfirmed = True
                         else:
-                            self._seal_dangling_tool_uses("interrupted by error")
-                            _dropped = self._drop_render_screenshots()
-                            if _dropped:
-                                _screenshots_dropped = _screenshot_drop_unconfirmed = True
-                                logger.info(
-                                    "the model refused a request with %d render-check "
-                                    "screenshot(s); sending it again without them",
-                                    _dropped,
-                                )
-                                continue
+                            _screenshot_drop_unconfirmed = _tool_image_drop_unconfirmed = False
+                        if _screens or _tool_images:
+                            logger.info(
+                                "the model refused a request with images; sending it "
+                                "again without %d render-check screenshot(s) and %d "
+                                "other tool image(s)",
+                                _screens, _tool_images,
+                            )
+                            continue
 
                     _retry_count += 1
                     # Anthropic's API rejects any history where the
@@ -6603,8 +6669,8 @@ class ChatSession:
                                 # (below) can tell which artifact this cell
                                 # actually touched
                                 artifact_store = resolve_artifact_store(self)
-                                before_artifact_mtimes = (
-                                    snapshot_existing_artifact_mtimes(artifact_store)
+                                before_artifacts = (
+                                    snapshot_existing_artifacts(artifact_store)
                                     if artifact_store is not None
                                     else {}
                                 )
@@ -6643,7 +6709,7 @@ class ChatSession:
                                     # one the streaming product actually
                                     # takes, so it needs its own call.
                                     lint = await check_cell_artifacts(
-                                        self, artifact_store, before_artifact_mtimes
+                                        self, store=artifact_store, before=before_artifacts
                                     )
                                     result_text = cell_content_with_lint(
                                         result_text, lint,

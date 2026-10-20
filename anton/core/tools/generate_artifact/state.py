@@ -151,12 +151,15 @@ class BrowserCheck:
     `status` is `passed` or `failed` when a browser loaded the page (`verdict`
     holds its findings as verifier messages), `unverified` when none did or
     the check could not vouch for it (`reason` says why; the verdict is
-    empty). `screenshot` is the render check's desktop view, when it sent one.
+    empty). `findings_listed` says whether `reason` also lists what an
+    unverified check still found. `screenshot` is the render check's
+    desktop view, when it sent one.
     """
 
     status: "RenderStatus"
     verdict: VerifyResult = field(default_factory=VerifyResult)
     reason: str = ""
+    findings_listed: bool = False
     screenshot: "RenderScreenshot | None" = None
 
 
@@ -211,9 +214,17 @@ class GenState:
     # it. None until a browser step runs. The result reports whether it
     # passed, and the session records it for the end-of-turn line.
     browser_status: "RenderStatus | None" = None
+    # Whether the latest load was unverified and its `checks_skipped` line
+    # lists what the check still found. The session then lists those
+    # findings no second time this turn.
+    browser_findings_listed: bool = False
     # The render check's desktop view of the latest load, when it sent one.
     # Reaches the calling agent as an image beside the result.
     browser_screenshot: "RenderScreenshot | None" = None
+    # The page the latest load checked, by its path inside the artifact
+    # folder (`index.html`); it captions the screenshot. The generator may
+    # have named it differently from the primary the run started with.
+    browser_page: str = ""
     # Files the user attached to the conversation, as the tool call named
     # them (S-01). Data files are read by the gathering step; assets are
     # copied into the artifact by `orchestrator._stage_attachments`.

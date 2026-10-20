@@ -451,7 +451,9 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
     `unverified` when no browser loaded the page or the check could not
     vouch for it (no browser configured, a timeout, a library the check
     cannot load); `reason` says why and the caller rests on the static
-    verdict. Never a pass in that case.
+    verdict. Never a pass in that case. Below that line, `reason` lists what
+    the render check still found (`render_check.unverified_findings`), such
+    as a blank map measured before the deadline, so the agent can fix it.
 
     Single-file `html-app` pages only: `lint_html` loads through `file://`,
     where a fullstack frontend's relative `/api/*` fetches cannot resolve and
@@ -465,9 +467,10 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
     if render_check.configured_url() is not None:
         outcome = render_check.check_file(entry.resolve(), cell_sandbox=cell_sandbox, screenshot=screenshot)
         if outcome.status == "unverified":
+            found = render_check.unverified_findings(outcome)
             return BrowserCheck(
-                status="unverified", reason=f"unverified: {outcome.unverified_reason}",
-                screenshot=outcome.screenshot,
+                status="unverified", reason=_unverified_reason(outcome, found=found),
+                findings_listed=bool(found.lines), screenshot=outcome.screenshot,
             )
         verdict = _render_verdict(outcome.findings)
         return BrowserCheck(
@@ -482,13 +485,30 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, scree
     return BrowserCheck(status="passed" if verdict.ok else "failed", verdict=verdict)
 
 
+def _unverified_reason(
+    outcome: render_check.RenderCheckOutcome, *, found: render_check.UnverifiedFindings
+) -> str:
+    """`unverified: <why>`, and under it one line per finding the check still
+    made (`found`), so the agent sees a problem the check found before it
+    gave up."""
+    lines = [f"unverified: {outcome.unverified_reason}"]
+    if found.lines:
+        lines.append(f"{found.lead.capitalize()}:")
+        lines += [f"- {line}" for line in found.lines]
+    if found.more:
+        lines.append(f"- and {found.more} more distinct findings, not listed")
+    return "\n".join(lines)
+
+
 def _render_verdict(findings: list[RenderFinding]) -> VerifyResult:
     """The render check's findings as verifier errors, each named once with
     the viewports it was seen in.
 
     Every literal below is a `.append(...)` on purpose: the contract lock
     reads them from this file and requires each in the generator prompts.
-    `timeout` never gets here: a check that ran out of time is unverified.
+    A `timeout` finding adds no error: it reaches here only beside a
+    finding that failed the page, which fails it with or without the
+    deadline.
     Past `render_check.MAX_FINDINGS_SHOWN` distinct findings, the rest are
     counted in one line, so a page that logs one error per data row cannot
     fill the retry prompt.

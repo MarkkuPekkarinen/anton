@@ -3,10 +3,10 @@
 The service runs headless Chromium in its own container and loads the page
 inside a sandboxed srcdoc frame under the preview's content security policy,
 at a desktop and a phone width. A deployment that runs agent code in a
-sandbox runs it beside anton. anton sends the page's text and reads back a
-verdict. Nothing runs in this process
-and nothing of this process's environment is sent, so the check works where
-agent code runs in a sandbox and no local browser may start.
+sandbox runs the service next to anton. anton sends the page's text and
+reads back a verdict. Nothing runs in this process and nothing of this
+process's environment is sent, so the check works where agent code runs in a
+sandbox and no local browser may start.
 
 The service's URL comes from `ANTON_RENDER_CHECK_URL` in this process's
 environment, read at call time the way `html_lint` reads

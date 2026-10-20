@@ -259,6 +259,18 @@ _BROWSER_GATE_SERVED = """\
 """
 
 
+# Follows either browser-gate bullet. The browser check counts console errors,
+# so a view whose error is caught and only written into the page passes it
+# while the view stays broken.
+_CAUGHT_ERRORS = """\
+- A view you guard with `try`/`catch` logs what it caught as well as writing
+  a short message into the view:
+  `try { drawMap(el); } catch (e) { console.error(e); el.textContent = 'The map could not load.'; }`.
+  A catch that only writes the message hides the error from the browser
+  check, so the broken view passes.\
+"""
+
+
 # Rules the verifier does not check, kept after the browser-gate bullet so the
 # list above holds only what is checked.
 _FRAME_NOTES = """\
@@ -279,7 +291,7 @@ Not checked by the verifier, but the page breaks inside the frame without them:
 def _verifier_contract(*, served: bool) -> str:
     return "## Verifier contract\n" + _VERIFIER_CONTRACT + "\n" + (
         _BROWSER_GATE_SERVED if served else _BROWSER_GATE_HTML
-    ) + "\n\n" + _FRAME_NOTES
+    ) + "\n" + _CAUGHT_ERRORS + "\n\n" + _FRAME_NOTES
 
 
 # ---------------------------------------------------------------------------

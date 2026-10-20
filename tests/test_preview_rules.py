@@ -25,3 +25,17 @@ def test_the_verifier_contract_names_the_external_resource_warning():
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
     ):
         assert "the app preview does not load it" in " ".join(prompt.split())
+
+
+def test_a_caught_view_error_is_logged_where_the_browser_check_sees_it():
+    """A per-view `try`/`catch` that only wrote "This view failed to load"
+    into the map panel passed every check while the map stayed broken: the
+    check counts console errors, and the catch logged none. The rule follows
+    the browser-gate bullet in both frontend prompts."""
+    for prompt in (
+        prompts.build_subagent_system_prompt(Path("/tmp/a")),
+        prompts.build_frontend_system_prompt(Path("/tmp/a")),
+    ):
+        gate = prompt.index("Where a headless browser is available")
+        rule = prompt.index("catch (e) { console.error(e); el.textContent")
+        assert gate < rule < prompt.index("Not checked by the verifier")

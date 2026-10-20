@@ -55,12 +55,14 @@ def test_absolute_fetch_url_is_error():
     assert any("absolute" in e.lower() for e in r.errors)
 
 
-def test_absolute_href_and_img_src_are_not_flagged_at_all():
+def test_absolute_href_and_img_src_never_fail_the_step():
     """I-17: a dashboard built from a web article links back to it and shows its images.
 
-    Neither an error nor a warning — the accepted PRD asks for exactly these,
-    and the previous rule failed two correct artifacts in a row. Verified for
-    both artifact shapes because `_VERIFIER_CONTRACT` is shared.
+    Never an error — the accepted PRD asks for exactly these, and the previous
+    rule failed two correct artifacts in a row. A link is not flagged at all;
+    an external image or stylesheet gets the advisory warning, since the app
+    preview's content security policy does not load it. Verified for both
+    artifact shapes because `_VERIFIER_CONTRACT` is shared.
     """
     html = GOOD.replace(
         '<div id="kpi-revenue"></div>',
@@ -71,7 +73,11 @@ def test_absolute_href_and_img_src_are_not_flagged_at_all():
     for is_fullstack in (True, False):
         r = verify_frontend(html, is_fullstack=is_fullstack)
         assert r.ok, r.errors
-        assert not [w for w in r.warnings if "absolute" in w.lower() or "http" in w.lower()]
+        external = [w for w in r.warnings if w.startswith("External resource the app preview does not load")]
+        assert len(external) == 1
+        assert "images.example.com/upload_files/a.png" in external[0]
+        assert "fonts.googleapis.com" in external[0]
+        assert "example.com/articles" not in external[0]
 
 
 def test_absolute_fetch_url_is_still_an_error_next_to_absolute_href():
@@ -280,10 +286,13 @@ def test_tailwind_cdn_is_not_flagged():
     assert not r.warnings, r.warnings
 
 
-def test_tailwind_play_cdn_v3_is_not_flagged_either():
+def test_tailwind_from_its_own_cdn_is_flagged_because_the_preview_blocks_the_host():
+    """Matched by host: the preview's `script-src` names only cdn.jsdelivr.net,
+    so the Tailwind play CDN never loads there whatever the library is."""
     html = GOOD.replace("</head>", '<script src="https://cdn.tailwindcss.com"></script></head>')
     r = verify_frontend(html, is_fullstack=True)
-    assert not r.warnings, r.warnings
+    assert r.ok, r.errors
+    assert len(r.warnings) == 1 and "cdn.tailwindcss.com" in r.warnings[0]
 
 
 def test_other_library_cdn_is_still_a_warning():
@@ -291,8 +300,39 @@ def test_other_library_cdn_is_still_a_warning():
     r = verify_frontend(html, is_fullstack=True)
     assert r.ok, r.errors
     assert len(r.warnings) == 1
-    assert "other than ECharts or Tailwind" in r.warnings[0]
+    assert r.warnings[0].startswith("External resource the app preview does not load: ")
     assert "cdn.plot.ly" in r.warnings[0]
+
+
+@pytest.mark.parametrize("markup", [
+    # A library named like an allowed one, from a host the preview blocks.
+    '<script src="https://unpkg.com/echarts@5.5.1/dist/echarts.min.js"></script>',
+    '<script src="//unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>',
+    '<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">',
+    "<link href='https://unpkg.com/leaflet/dist/leaflet.css' rel=stylesheet>",
+    '<img src="https://tile.openstreetmap.org/1/0/0.png">',
+    '<script type="module">import * as THREE from "https://unpkg.com/three@0.169.0/build/three.module.js";</script>',
+], ids=["echarts-on-unpkg", "protocol-relative", "jsdelivr-stylesheet", "bare-rel", "tile-image", "module-import"])
+def test_a_resource_the_preview_blocks_is_a_warning_by_host(markup):
+    """The old check matched library names and passed an `echarts` script from
+    unpkg, and never looked at stylesheets or images."""
+    r = verify_frontend(GOOD.replace("</head>", markup + "</head>"), is_fullstack=False)
+    assert r.ok, r.errors
+    assert [w for w in r.warnings if w.startswith("External resource the app preview does not load: ")], r.warnings
+
+
+@pytest.mark.parametrize("markup", [
+    '<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3"></script>',
+    '<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>',
+    '<script type="module">import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js";</script>',
+    '<img src="data:image/png;base64,iVBORw0KGgo=">',
+    '<img src="logo.png">',
+    '<link rel="icon" href="https://example.com/favicon.ico">',
+    '<a href="https://example.com/source">Source</a>',
+], ids=["tailwind", "d3", "module-import", "data-image", "relative-image", "icon-link", "anchor"])
+def test_what_the_preview_loads_is_not_flagged(markup):
+    r = verify_frontend(GOOD.replace("</head>", markup + "</head>"), is_fullstack=False)
+    assert not [w for w in r.warnings if w.startswith("External resource")], r.warnings
 
 
 # ── the API contract from the page's side (I-34) ────────────────────────────

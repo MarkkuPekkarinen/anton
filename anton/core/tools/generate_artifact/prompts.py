@@ -145,18 +145,19 @@ VISUAL DESIGN (for every HTML file you produce):
   System sans-serif font stack, generous padding, responsive layout.
 - STYLING: Tailwind CSS is the recommended way to style the page. Load it
   once in `<head>` via CDN:
-  `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>`
+  `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3"></script>`
   and use utility classes for layout, spacing, typography and colour
   (`bg-[#0d1117] text-[#e6edf3]` for the theme). Hand-written CSS in a
   `<style>` block stays allowed wherever utilities fall short — keyframes,
   chart containers, complex selectors — or when the page is too small to
   need a framework. No other CSS or JS library: the two CDN scripts named in
-  these rules (Tailwind, ECharts) are the ONLY external resources a page
-  may load. Both are fetched every time the page opens, so a page that must
-  work OFFLINE or without external resources (brief or PRD says so) skips
-  Tailwind and styles itself with hand-written CSS.
+  these rules (Tailwind, ECharts), at exactly the versions shown, are the
+  ONLY external resources a page may load. Both are fetched every time the
+  page opens, so a page that must work OFFLINE or without external resources
+  (brief or PRD says so) skips Tailwind and styles itself with hand-written
+  CSS.
 - ALWAYS use Apache ECharts for interactive charts via CDN:
-  `<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>`
+  `<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>`
   Initialise with `echarts.init(dom, 'dark')` and customise background to #0d1117.
   NEVER use Plotly, matplotlib, or other chart libraries unless explicitly asked.
 - Chart type by purpose: line for change over time, bar for comparing
@@ -221,7 +222,10 @@ step and costs a regeneration, unless the item says it is only a warning:
 - Every `z-index` is 1000 or below.
 - Significant block containers (`div`, `section`, `table`, `main`,
   `article`) carry stable `id` attributes — the host app attaches comments
-  to them. A missing `id` is only a warning.\
+  to them. A missing `id` is only a warning.
+- A script from any host but `https://cdn.jsdelivr.net/npm/`, an external
+  stylesheet or an external image is only a warning, but the app preview
+  does not load it: keep styles in `<style>` and embed images as `data:` URIs.\
 """
 
 # The browser gate, one bullet per page kind: the html-app page is loaded

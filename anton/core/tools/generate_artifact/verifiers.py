@@ -97,7 +97,6 @@ def _fetch_path_key(raw: str) -> str | None:
         return None
     key = normalise_api_path(target)
     return None if key == _HEALTH_PATH else key
-_BARE_SCRIPT_SRC = re.compile(r"""<script[^>]*\bsrc\s*=\s*['"]([^'"]+)['"]""", re.I)
 # The body of a tag, scanned for attributes in a second step so that every
 # `src`/`href` of one tag is seen. Two steps also keep it linear: a single
 # `<[a-z][^>]*?…(src|href)` pattern rescanned to the next `>` from every `<b`
@@ -154,11 +153,22 @@ _HINT_API_CALL = (
     "new EventSource(api('/api/stream'))."
 )
 _HINT_EMBED = "Embed the data in the page instead of fetching it."
-# Libraries the design rules let a page load from the network. Matched as
-# substrings of the script URL so a different CDN host or version still
-# passes; anything else is advisory-flagged, since the prompt allows other
-# libraries only when the user asked for them.
-_ALLOWED_CDN_LIBRARIES = ("echarts", "tailwindcss")
+# The one host the app preview's content security policy lets a page load a
+# script from (cowork's web shell, `script-src`). Its `style-src` and
+# `img-src` name no host a page can use, so an external stylesheet or image
+# never loads there at all. Matched by host, not by library name, so a
+# library from another CDN is flagged whatever it is called.
+_PREVIEW_SCRIPT_HOST = "cdn.jsdelivr.net"
+_SCRIPT_TAG = re.compile(r"<script\b[^>]*>", re.I)
+_IMG_TAG = re.compile(r"<img\b[^>]*>", re.I)
+_SRC_ATTR = re.compile(r"""(?<![\w-])src\s*=\s*(?:['"](?P<quoted>[^'"]*)['"]|(?P<bare>[^\s'"<>]+))""", re.I)
+_HREF_ATTR = re.compile(r"""(?<![\w-])href\s*=\s*(?:['"](?P<quoted>[^'"]*)['"]|(?P<bare>[^\s'"<>]+))""", re.I)
+# `import x from 'https://…'`, `import 'https://…'` and `import('https://…')`
+# in a module script: loaded under the same `script-src`.
+_MODULE_IMPORT = re.compile(
+    r"""\bimport\s*(?:\(\s*|[\w*{}\s,$]*?\bfrom\s*|\s)['"](?P<url>(?:https?:)?//[^'"]+)['"]""", re.I
+)
+_EXTERNAL_SHOWN = 5
 
 _UNIVERSAL_IMPORTANT = re.compile(r"\*\s*\{[^}]*!important")
 # Media queries whose universal `!important` blocks are legitimate practice
@@ -210,6 +220,47 @@ def _loads_nothing(tag: str) -> bool:
     m = _LINK_REL.search(tag)
     rels = (m["quoted"] or m["bare"] or "").lower().split() if m else []
     return _LOADING_LINK_RELS.isdisjoint(rels)
+
+
+def _attr_value(pattern: re.Pattern[str], tag: str) -> str | None:
+    m = pattern.search(tag)
+    if m is None:
+        return None
+    return (m["quoted"] if m["quoted"] is not None else m["bare"]).strip()
+
+
+def _external_host(url: str) -> str | None:
+    """The host of an `http(s)://` or `//` URL, lower case, or None for any
+    other value (a relative path, `data:`, `blob:`)."""
+    m = re.match(r"(?:https?:)?//([^/?#\s:]+)", url.strip(), re.I)
+    return m.group(1).lower() if m else None
+
+
+def _resources_the_preview_blocks(html: str) -> list[str]:
+    """External scripts from a host other than `_PREVIEW_SCRIPT_HOST`, and
+    every external stylesheet and image, in page order without repeats."""
+    found: list[tuple[int, str]] = []
+    for tag in _SCRIPT_TAG.finditer(html):
+        src = _attr_value(_SRC_ATTR, tag.group())
+        host = _external_host(src) if src else None
+        if host is not None and host != _PREVIEW_SCRIPT_HOST:
+            found.append((tag.start(), src))
+    for m in _MODULE_IMPORT.finditer(html):
+        if _external_host(m["url"]) != _PREVIEW_SCRIPT_HOST:
+            found.append((m.start(), m["url"]))
+    for tag in _LINK_TAG.finditer(html):
+        body = _TAG_BODY.match(html, tag.start())
+        text = body.group() if body else ""
+        rel = _LINK_REL.search(text)
+        rels = (rel["quoted"] or rel["bare"] or "").lower().split() if rel else []
+        href = _attr_value(_HREF_ATTR, text)
+        if "stylesheet" in rels and href and _external_host(href) is not None:
+            found.append((tag.start(), href))
+    for tag in _IMG_TAG.finditer(html):
+        src = _attr_value(_SRC_ATTR, tag.group())
+        if src and _external_host(src) is not None:
+            found.append((tag.start(), src))
+    return list(dict.fromkeys(url for _, url in sorted(found)))
 
 
 def _root_relative_detail(html: str, *, is_fullstack: bool) -> str | None:
@@ -361,11 +412,19 @@ def verify_frontend(
     block_tags = re.findall(r"<(?:div|section|table|main|article)\b", low)
     if block_tags and "id=" not in low:
         warnings.append("Significant blocks have no stable `id` attributes.")
-    # A library loaded from a CDN the design rules do not name.
-    for src in _BARE_SCRIPT_SRC.findall(html):
-        if src.startswith("http") and not any(lib in src.lower() for lib in _ALLOWED_CDN_LIBRARIES):
-            warnings.append(f"Library CDN other than ECharts or Tailwind detected: {src!r} (allowed only if the user asked).")
-            break
+    # A script, stylesheet or image the app preview's content security policy
+    # blocks. Advisory: the page works opened from disk or on the desktop,
+    # and the browser check reports what the preview really blocks.
+    blocked = _resources_the_preview_blocks(html)
+    if blocked:
+        listed = ", ".join(_shown_value(url) for url in blocked[:_EXTERNAL_SHOWN])
+        if len(blocked) > _EXTERNAL_SHOWN:
+            listed += f" and {len(blocked) - _EXTERNAL_SHOWN} more"
+        warnings.append(
+            f"External resource the app preview does not load: {listed}. The preview loads "
+            "scripts only from https://cdn.jsdelivr.net/npm/ and no external stylesheet or "
+            "image: put styles in a <style> block and embed images as data: URIs."
+        )
 
     return VerifyResult(errors=errors, warnings=warnings)
 

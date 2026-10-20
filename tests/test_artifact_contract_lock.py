@@ -392,8 +392,10 @@ RULES: tuple[Rule, ...] = (
          _both(_FRONT_BOTH, "z-index")),
     Rule("warnings", "Significant blocks have no stable `id` attributes.",
          _both(_FRONT_BOTH, "stable `id`")),
-    Rule("warnings", "Library CDN other than ECharts or Tailwind detected: ",
-         _both(_FRONT_BOTH, "ECharts") + _both(_FRONT_BOTH, "Tailwind")),
+    # Matched by host: the preview's content security policy loads scripts
+    # only from cdn.jsdelivr.net and no external stylesheet or image.
+    Rule("warnings", "External resource the app preview does not load: ",
+         _both(_FRONT_BOTH, "the app preview does not load it")),
     # ── verify_frontend_live (html-app, from disk) and verify_app_live
     # (fullstack, from the running backend after run_app — S-02). Each prompt
     # carries its own browser-gate bullet (`_BROWSER_GATE_HTML` /

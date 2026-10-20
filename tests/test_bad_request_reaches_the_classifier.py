@@ -41,6 +41,7 @@ from anton.core.llm.provider import (
     ContentTooLargeError,
     ContentValidationError,
     RequestRefusedError,
+    TransientProviderError,
     is_image_refusal,
 )
 
@@ -782,3 +783,43 @@ def test_an_error_that_is_no_client_refusal_is_not_an_image_refusal():
     )
     assert not is_image_refusal(outage)
     assert not is_image_refusal(ConnectionError("Could not process image"))
+
+
+# A refusal of one image says nothing about whether the model takes images,
+# so the session keeps its render screenshots for it.
+
+
+@pytest.mark.parametrize("flavor", _FLAVORS)
+async def test_an_oversized_image_is_not_an_image_refusal(flavor):
+    provider = _provider(_PATCHES_400, flavor)
+    try:
+        with pytest.raises(ContentTooLargeError) as err:
+            async for _ in provider.stream(model="m", system="s", messages=_MESSAGES):
+                pass
+        assert not is_image_refusal(err.value)
+    finally:
+        await provider.aclose()
+
+
+@pytest.mark.parametrize("code", ["invalid_image", "image_content_policy_violation", "failed_to_download_image"])
+@pytest.mark.parametrize("flavor", _FLAVORS)
+async def test_a_400_naming_one_images_code_is_not_an_image_refusal(flavor, code):
+    body = {"error": {
+        "message": "The image could not be used.", "type": "invalid_request_error", "param": None, "code": code,
+    }}
+    provider = _provider(body, flavor)
+    try:
+        with pytest.raises(openai.BadRequestError) as err:
+            async for _ in provider.stream(model="m", system="s", messages=_MESSAGES):
+                pass
+        assert not is_image_refusal(err.value)
+    finally:
+        await provider.aclose()
+
+
+def test_a_transient_error_that_mentions_an_image_is_not_an_image_refusal():
+    """A provider fault, whatever status it came with and whatever it says."""
+    overloaded = TransientProviderError(
+        "image service overloaded", provider="p", code="overloaded_error", session_backoff=False, status_code=400,
+    )
+    assert not is_image_refusal(overloaded)

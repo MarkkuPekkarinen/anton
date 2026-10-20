@@ -241,13 +241,18 @@ result, so a later pass of one page never clears another page's failure.
 The service also sends a screenshot of the page, which reaches the agent as
 an image beside the check's text. History keeps only the newest one
 (`render_check.drop_older_screenshots`). When the model refuses a request
-over an image part (`provider.is_image_refusal`: a content rejection, or a
-400 or 422 that names an image, which is what a model with no image input
-gets), the turn replaces every render screenshot with a note, keeps the
-findings beside it, and sends the request once more
-(`ChatSession._drop_render_screenshots`). Later checks in that session
-attach no screenshot. A session seeded with the note, as cowork-server
-builds one for every turn, starts that way too.
+that may have failed for carrying images at all (`provider.is_image_refusal`:
+a content rejection, or a 400 or 422 that names an image, which is what a
+model with no image input gets), the turn replaces every render screenshot
+with a note, keeps the findings beside it, and sends the request once more
+(`ChatSession._drop_render_screenshots`). A refusal of one image, such as
+an image over the size limit, does not count. Only when that request goes
+through without the screenshots does the note say the model refused them
+(`ChatSession._confirm_render_screenshots_refused`). From then on, later
+checks in that session attach no screenshot. If the request
+is refused again, the screenshots were not the cause, and later checks keep
+theirs. A session seeded with the confirmed note, as cowork-server builds
+one for every turn, starts without screenshots too.
 
 `ScratchpadManager` refuses at construction a runtime factory that does not
 name a `cell_sandbox` parameter (a bare `**kwargs` is refused), and refuses

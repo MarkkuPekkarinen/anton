@@ -1236,8 +1236,9 @@ class _TextOnlyModel:
     """An OpenAI-compatible API for a model that takes no image input.
 
     Real HTTP, so the real SDK and anton's real provider are in the path. A
-    request carrying an image part gets the 400 `refusal`; any other gets the
-    next scripted reply: a scratchpad call (a dict) or an answer (a str).
+    request `refuses` picks gets the 400 `refusal`, here any request carrying
+    an image part; any other gets the next scripted reply: a scratchpad call
+    (a dict) or an answer (a str).
     """
 
     def __init__(self, refusal: dict, replies: list) -> None:
@@ -1251,7 +1252,7 @@ class _TextOnlyModel:
             def do_POST(self):  # noqa: N802 - the stdlib's name
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 owner.requests.append(body)
-                if _image_parts(body):
+                if owner.refuses(body):
                     code, kind, data = 400, "application/json", json.dumps(owner.refusal).encode()
                 else:
                     sse = _responses_sse if self.path.endswith("/responses") else _chat_sse
@@ -1265,12 +1266,27 @@ class _TextOnlyModel:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
 
+    def refuses(self, body: dict) -> bool:
+        return _image_parts(body) > 0
+
     def provider(self, flavor: str):
         from anton.core.llm.openai import OpenAIProvider
 
         return OpenAIProvider(
             api_key="k", base_url=f"http://127.0.0.1:{self.server.server_port}/v1", flavor=flavor,
         )
+
+
+# The person's own image, which `_VisionModel` refuses.
+_PERSONS_IMAGE = base64.b64encode(b"the person's logo").decode()
+
+
+class _VisionModel(_TextOnlyModel):
+    """A model that takes images: it refuses only a request carrying the
+    person's image (`_PERSONS_IMAGE`), and takes render screenshots."""
+
+    def refuses(self, body: dict) -> bool:
+        return _PERSONS_IMAGE in json.dumps(body)
 
 
 def _cell(tool_id: str) -> dict:
@@ -1335,8 +1351,12 @@ async def test_a_model_that_refuses_images_still_gets_the_findings_in_the_same_t
     retried, after_second_cell = (json.dumps(body, ensure_ascii=False) for body in model.requests[2:])
     finding = f"{slug}/index.html — uncaught_exception (desktop): {_EXCEPTION}"
     assert finding in retried
-    assert render_check.REFUSED_SCREENSHOT_PLACEHOLDER in retried
+    assert render_check.DROPPED_SCREENSHOT_PLACEHOLDER in retried
+    assert render_check.REFUSED_SCREENSHOT_PLACEHOLDER not in retried
+    # The resend went through, so the note says the model refused it.
     assert after_second_cell.count(finding) == 2
+    assert render_check.REFUSED_SCREENSHOT_PLACEHOLDER in after_second_cell
+    assert session._render_screenshots_refused is True
     history = json.dumps(session.history)
     assert "An error interrupted execution" not in history
     assert "The task has failed" not in history
@@ -1377,7 +1397,9 @@ def _shot_round(tool_use_id: str) -> list[dict]:
 async def test_the_screenshot_is_dropped_once_then_the_refusal_takes_its_old_path(project):
     """When the request still fails without the screenshot, as it does for an
     image the person attached, the turn resends once and then ends the way
-    it did before: here the content repair and the error the host shows."""
+    it did before: here the content repair and the error the host shows.
+    The screenshot was not the cause, so later checks keep theirs, and the
+    note says only what happened."""
     from anton.core.llm.provider import ContentValidationError
 
     session, _, _ = _session_for(project, [])
@@ -1399,9 +1421,74 @@ async def test_the_screenshot_is_dropped_once_then_the_refusal_takes_its_old_pat
 
     assert len(calls) == 2
     shot_result = _tool_results(session)[0]["content"]
-    assert {"type": "text", "text": render_check.REFUSED_SCREENSHOT_PLACEHOLDER} in shot_result
+    assert {"type": "text", "text": render_check.DROPPED_SCREENSHOT_PLACEHOLDER} in shot_result
     assert shot_result[0]["text"] == "[output]\n", "the text beside the screenshot stays"
-    assert session._render_screenshots_refused is True
+    assert session._render_screenshots_refused is False
+    assert not render_check.screenshots_refused(session.history)
+
+
+class _ImagePart400(Exception):
+    """A 400 that names an image, as the SDK raises it for a refused image part."""
+
+    status_code = 400
+    body = {"message": "Invalid image.", "type": "invalid_request_error"}
+
+
+async def test_a_later_success_after_a_second_image_refusal_confirms_nothing(project):
+    """The request is refused again without the screenshots, so they were
+    not the cause. The recovery resend that goes through after it says
+    nothing about them: later checks keep their screenshots."""
+    from anton.core.llm.provider import StreamComplete
+
+    session, _, _ = _session_for(project, [])
+    session._history.extend(_shot_round("t1"))
+    outcomes = [_ImagePart400("Invalid image."), _ImagePart400("Invalid image."), None]
+
+    async def stream(user_msg):
+        outcome = outcomes.pop(0)
+        if outcome is not None:
+            raise outcome
+        yield StreamComplete(response=_llm_response("Done."))
+
+    session._stream_and_handle_tools = stream
+    try:
+        async for _ in session.turn_stream("check the page again"):
+            pass
+    finally:
+        await session.close()
+
+    assert outcomes == []
+    assert session._render_screenshots_refused is False
+    assert not render_check.screenshots_refused(session.history)
+
+
+async def test_the_screenshot_drop_leaves_both_recovery_resends_for_a_later_error(project):
+    """The resend without screenshots is outside the count of resends of an
+    unchanged request. A turn whose next attempts fail for another reason
+    still gets both recovery-note resends before the explain call."""
+    from anton.core.llm.provider import ContentValidationError
+
+    session, _, _ = _session_for(project, [])
+    session._history.extend(_shot_round("t1"))
+    errors = [ContentValidationError("refused"), *(RuntimeError("the tool crashed") for _ in range(3))]
+    calls: list[str] = []
+
+    async def stream(user_msg):
+        calls.append(user_msg)
+        raise errors.pop(0)
+        yield  # pragma: no cover - makes this an async generator
+
+    session._stream_and_handle_tools = stream
+    try:
+        async for _ in session.turn_stream("check the page again"):
+            pass
+    finally:
+        await session.close()
+
+    assert len(calls) == 4
+    history = json.dumps(session.history)
+    assert history.count("An error interrupted execution") == 2
+    assert "The task has failed 3 times" in history
 
 
 async def test_a_session_seeded_with_a_refused_screenshot_attaches_none(service, project):
@@ -1413,6 +1500,7 @@ async def test_a_session_seeded_with_a_refused_screenshot_attaches_none(service,
 
     earlier = _shot_round("t0")
     render_check.drop_refused_screenshots(earlier)
+    render_check.confirm_refused_screenshots(earlier)
     session, _, slug = _session_for(project, [
         _llm_response("Writing.", {"action": "exec", "name": "main", "code": "write_page()"}),
         _llm_response("Done."),
@@ -1425,6 +1513,73 @@ async def test_a_session_seeded_with_a_refused_screenshot_attaches_none(service,
     result = _tool_results(session)[-1]["content"]
     assert isinstance(result, str) and f"{slug}/index.html — loaded in a browser" in result
     assert session._render_screenshots_refused is True
+
+
+# A refusal of one image the provider could not read, naming no content path.
+_UNREADABLE_400 = {"error": {
+    "message": "You uploaded an unsupported image. Please make sure your image is valid.",
+    "type": "invalid_request_error", "param": None, "code": None,
+}}
+
+
+@pytest.mark.parametrize("flavor", ["openai", "openai-compatible-generic"])
+async def test_an_oversized_image_of_the_persons_keeps_screenshots_on(service, project, flavor):
+    """The model takes images and refuses only the person's oversized one. A
+    size refusal is about that image, so the render screenshots stay in the
+    request and on for the rest of the conversation."""
+    from tests.test_bad_request_reaches_the_classifier import _PATCHES_400
+
+    model = _VisionModel(_PATCHES_400, [_cell("call_1"), "Done.", _cell("call_3"), "Checked."])
+    session, _, _ = _session_for(project, [])
+    _on_model(session, model, flavor)
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _PERSONS_IMAGE}}
+    try:
+        async for _ in session.turn_stream("draw the map"):
+            pass
+        with pytest.raises(Exception) as refused:
+            async for _ in session.turn_stream([{"type": "text", "text": "use this logo"}, image]):
+                pass
+        async for _ in session.turn_stream("check the map again"):
+            pass
+    finally:
+        await session.close()
+        model.server.shutdown()
+
+    assert type(refused.value).__name__ == "ContentTooLargeError"
+    # The refused request held the screenshot and the person's image, and
+    # was sent once. The last check's screenshot reached the model.
+    assert [_image_parts(body) for body in model.requests] == [0, 1, 2, 0, 1]
+    assert [r["body"]["screenshot"] for r in service.requests] == [True, True]
+    assert session._render_screenshots_refused is False
+    assert not render_check.screenshots_refused(session.history)
+    assert render_check.DROPPED_SCREENSHOT_PLACEHOLDER not in json.dumps(session.history)
+
+
+@pytest.mark.parametrize("flavor", ["openai", "openai-compatible-generic"])
+async def test_a_refusal_the_screenshots_did_not_cause_leaves_them_on(service, project, flavor):
+    """A 400 that names an image may be about one image the person attached.
+    The turn drops the screenshot and resends once; the resend is refused
+    the same way, so nothing confirms the drop and the next conversation's
+    sessions start with screenshots on."""
+    model = _VisionModel(_UNREADABLE_400, [_cell("call_1"), "Done."])
+    session, _, _ = _session_for(project, [])
+    _on_model(session, model, flavor)
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _PERSONS_IMAGE}}
+    try:
+        async for _ in session.turn_stream("draw the map"):
+            pass
+        with pytest.raises(Exception):
+            async for _ in session.turn_stream([{"type": "text", "text": "use this logo"}, image]):
+                pass
+    finally:
+        await session.close()
+        model.server.shutdown()
+
+    # The refusal with the screenshot, then the same request without it.
+    assert [_image_parts(body) for body in model.requests][2:4] == [2, 1]
+    assert session._render_screenshots_refused is False
+    assert not render_check.screenshots_refused(session.history)
+    assert render_check.DROPPED_SCREENSHOT_PLACEHOLDER in json.dumps(session.history)
 
 
 async def test_generate_artifact_attaches_no_screenshot_once_the_model_refused_one(tmp_path, monkeypatch):
@@ -1455,10 +1610,18 @@ def test_a_refused_screenshot_leaves_a_note_and_the_text_beside_it():
         text, caption, note = message["content"][0]["content"]
         assert text == {"type": "text", "text": "[output]\n"}
         assert caption["text"].startswith(render_check.SCREENSHOT_CAPTION)
-        assert note == {"type": "text", "text": render_check.REFUSED_SCREENSHOT_PLACEHOLDER}
+        assert note == {"type": "text", "text": render_check.DROPPED_SCREENSHOT_PLACEHOLDER}
     assert history[1] == read_image, "an image the agent read itself is not anton's to drop"
-    assert render_check.screenshots_refused(history)
+    assert not render_check.screenshots_refused(history), "no request went through without them yet"
     assert render_check.drop_refused_screenshots(history) == 0
+
+    assert render_check.confirm_refused_screenshots(history) == 2
+    for message in (history[0], history[2]):
+        assert message["content"][0]["content"][-1] == {
+            "type": "text", "text": render_check.REFUSED_SCREENSHOT_PLACEHOLDER,
+        }
+    assert render_check.screenshots_refused(history)
+    assert render_check.confirm_refused_screenshots(history) == 0
 
 
 # ── What the generator and the skill tell the model ──────────────────────────

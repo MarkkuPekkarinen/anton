@@ -27,7 +27,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 import httpx2 as httpx
@@ -309,6 +309,12 @@ OLDER_SCREENSHOT_PLACEHOLDER = (
     "[An older render-check screenshot was removed to keep the conversation small; "
     "the newest one is kept.]"
 )
+# Left by `drop_refused_screenshots`. `confirm_refused_screenshots` turns it
+# into the note below once a request goes through without the screenshots.
+DROPPED_SCREENSHOT_PLACEHOLDER = (
+    "[This render-check screenshot was removed after the model refused a request "
+    "that carried it. The findings above still apply.]"
+)
 REFUSED_SCREENSHOT_PLACEHOLDER = (
     "[The model refused a request with this render-check screenshot in it, so the "
     "screenshot was removed. The findings above still apply, and later checks in this "
@@ -351,8 +357,8 @@ def _render_results(messages: list[dict]) -> list[dict]:
     return found
 
 
-def _replace_screenshots(sites: list[tuple[dict, int]], text: str) -> int:
-    """Put a text block holding `text` in place of each image; return how many."""
+def _replace_blocks(sites: list[tuple[dict, int]], text: str) -> int:
+    """Put a text block holding `text` at each site; return how many."""
     for block, index in sites:
         inner = list(block["content"])
         inner[index] = {"type": "text", "text": text}
@@ -360,14 +366,22 @@ def _replace_screenshots(sites: list[tuple[dict, int]], text: str) -> int:
     return len(sites)
 
 
-def _screenshot_sites(messages: list[dict]) -> list[tuple[dict, int]]:
-    """Each render screenshot in `messages`, as its `tool_result` block and
-    the image's index inside it, oldest first."""
+def _sites(messages: list[dict], wanted: Callable[[dict], bool]) -> list[tuple[dict, int]]:
+    """Each `wanted` block inside a render result in `messages`, as its
+    `tool_result` block and its index inside it, oldest first."""
     return [
         (block, i)
         for block in _render_results(messages)
-        for i, b in enumerate(block["content"]) if isinstance(b, dict) and b.get("type") == "image"
+        for i, b in enumerate(block["content"]) if isinstance(b, dict) and wanted(b)
     ]
+
+
+def _is_screenshot(block: dict) -> bool:
+    return block.get("type") == "image"
+
+
+def _is_note(text: str) -> Callable[[dict], bool]:
+    return lambda block: block.get("type") == "text" and block.get("text") == text
 
 
 def drop_older_screenshots(messages: list[dict]) -> int:
@@ -380,18 +394,30 @@ def drop_older_screenshots(messages: list[dict]) -> int:
     Edits the blocks in place, so a list that shares them (the turn's own
     messages) sees the same history.
     """
-    return _replace_screenshots(_screenshot_sites(messages)[:-1], OLDER_SCREENSHOT_PLACEHOLDER)
+    return _replace_blocks(_sites(messages, _is_screenshot)[:-1], OLDER_SCREENSHOT_PLACEHOLDER)
 
 
 def drop_refused_screenshots(messages: list[dict]) -> int:
-    """Replace every render screenshot in `messages` with a note that the
-    model refused it; return how many went.
+    """Replace every render screenshot in `messages` with a note that it was
+    removed after a refusal; return how many went.
 
-    For a model that takes no image input. The caption and the findings
-    beside each screenshot stay, and the note tells the agent why later
-    checks come without one. Edits in place, like `drop_older_screenshots`.
+    For a model that may take no image input. The caption and the findings
+    beside each screenshot stay. The note claims no more than what
+    happened: whether the screenshots caused the refusal is known only once
+    a request goes through without them (`confirm_refused_screenshots`).
+    Edits in place, like `drop_older_screenshots`.
     """
-    return _replace_screenshots(_screenshot_sites(messages), REFUSED_SCREENSHOT_PLACEHOLDER)
+    return _replace_blocks(_sites(messages, _is_screenshot), DROPPED_SCREENSHOT_PLACEHOLDER)
+
+
+def confirm_refused_screenshots(messages: list[dict]) -> int:
+    """Turn each note `drop_refused_screenshots` left into the note that the
+    model refused the screenshot and later checks come without one; return
+    how many. For once a request without the screenshots went through.
+    """
+    return _replace_blocks(
+        _sites(messages, _is_note(DROPPED_SCREENSHOT_PLACEHOLDER)), REFUSED_SCREENSHOT_PLACEHOLDER
+    )
 
 
 def screenshots_refused(messages: list[dict]) -> bool:
@@ -400,14 +426,11 @@ def screenshots_refused(messages: list[dict]) -> bool:
     A host that builds a new session for every turn (cowork-server) seeds it
     with the conversation's earlier tool results as
     `anton.cloud_turn.history_rows.split_turn_into_rows` cut them, which keeps
-    their text blocks, the note `drop_refused_screenshots` left included. So
-    the new session learns from them that the model takes no image input.
+    their text blocks, the note `confirm_refused_screenshots` left included.
+    So the new session learns from them that the model takes no image input.
+    A note no request confirmed does not count.
     """
-    return any(
-        isinstance(b, dict) and b.get("type") == "text" and b.get("text") == REFUSED_SCREENSHOT_PLACEHOLDER
-        for block in _render_results(messages)
-        for b in block["content"]
-    )
+    return bool(_sites(messages, _is_note(REFUSED_SCREENSHOT_PLACEHOLDER)))
 
 
 def _status_reason(status: int) -> str:

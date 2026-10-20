@@ -31,7 +31,7 @@ from anton.core.llm.prompt_builder import ChatSystemPromptBuilder, SystemPromptC
 from anton.core.memory.acc import AnteriorCingulate
 from anton.core.root_cause import RootCauseLedger
 from anton.core.root_cause import classify as classify_root_cause
-from anton.core.memory.base import Engram, LearnedMemoryScope
+from anton.core.memory.base import Engram, LearnedMemoryScope, MemoryRead
 from anton.core.memory.cerebellum import Cerebellum
 from anton.core.memory.skills import SkillStore
 from anton.core.tools.recall_skill import RECALL_SKILL_TOOL
@@ -2196,6 +2196,14 @@ class ChatSession:
         surface, and must not be able to mutate the session's own record.
         """
         return set(self._artifacts_touched)
+
+    @property
+    def memory_read(self) -> MemoryRead | None:
+        """The learned memory this session's latest turn put in front of the
+        model (Cortex.memory_read). A host reads it after the turn to record
+        it. None without a Cortex, or before the first turn built its prompt.
+        """
+        return self._cortex.memory_read if self._cortex is not None else None
 
     @property
     def last_compaction(self) -> dict | None:

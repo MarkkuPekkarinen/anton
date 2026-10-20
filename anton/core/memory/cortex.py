@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -34,7 +35,13 @@ from anton.core.llm.structured import (
     generate_with_truncation_retry,
     no_preamble_instruction,
 )
-from anton.core.memory.base import Engram, HippocampusProtocol, LearnedMemoryScope, MemoryPresence
+from anton.core.memory.base import (
+    Engram,
+    HippocampusProtocol,
+    LearnedMemoryScope,
+    MemoryPresence,
+    MemoryRead,
+)
 from anton.core.memory.hippocampus import Hippocampus
 
 if TYPE_CHECKING:
@@ -244,8 +251,20 @@ class Cortex:
         self._episodic = episodic
         self._seen_texts: set[str] = set()
         self._turn_count = 0
+        # What the latest build_memory_context and get_scratchpad_context read
+        # from the learned tiers; memory_read combines them.
+        self._prompt_read: MemoryRead | None = None
+        self._scratchpad_read = 0
 
         self._move_project_identity()
+
+    @property
+    def memory_read(self) -> MemoryRead | None:
+        """The learned memory the latest system prompt and scratchpad
+        description held, or None before build_memory_context has run."""
+        if self._prompt_read is None:
+            return None
+        return replace(self._prompt_read, scratchpad=self._scratchpad_read)
 
     def _move_project_identity(self) -> None:
         """Move identity lines that landed in project scope up to `global_hc`.
@@ -391,6 +410,7 @@ Do NOT add, modify, or summarize rules — return them verbatim.
                 sections.append(f"## Operator Memory — Lessons\n{precedence}{managed_lessons}")
 
         if not read_learned:
+            self._prompt_read = MemoryRead(learned=False)
             return "\n\n" + "\n\n".join(sections)
 
         # 2. Identity
@@ -433,6 +453,19 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         minds_topic = self.project_hc.recall_topic("minds-datasource")
         if minds_topic:
             sections.append(f"## Minds — Datasource Context\n{minds_topic}")
+
+        # The entries the sections above hold, counted from the same reads as
+        # Engrams. recall_lessons renders get_lessons with these arguments.
+        lessons = 0
+        for text, hc in ((global_lessons, self.global_hc), (project_lessons, self.project_hc)):
+            if text:
+                lessons += len(hc.get_lessons(token_budget=self._LESSONS_BUDGET_TOKENS, exclude_scratchpad=True))
+        self._prompt_read = MemoryRead(
+            learned=True,
+            rules=len(global_engrams) + len(project_engrams),
+            lessons=lessons,
+            profile_lines=len(self.global_hc.get_identities()) if identity else 0,
+        )
 
         if not sections:
             return ""
@@ -581,10 +614,12 @@ Do NOT add, modify, or summarize rules — return them verbatim.
             if self.managed_hc is not None
             else ""
         )
-        person_parts = [] if learned_memory_scope in ("off", "unavailable") else [
-            self.global_hc.recall_scratchpad_wisdom(),
-            self.project_hc.recall_scratchpad_wisdom(),
+        person_tiers = [] if learned_memory_scope in ("off", "unavailable") else [
+            self.global_hc,
+            self.project_hc,
         ]
+        person_parts = [hc.recall_scratchpad_wisdom() for hc in person_tiers]
+        self._scratchpad_read = sum(len(hc.get_scratchpad_wisdom()) for hc in person_tiers)
         person_wisdom = "\n".join(p for p in person_parts if p)
 
         if not managed_wisdom:

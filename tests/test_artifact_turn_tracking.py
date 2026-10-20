@@ -273,10 +273,11 @@ def test_lint_walk_skips_revision_blobs(tmp_path, monkeypatch):
     index = folder / "index.html"
     index.write_text("<html></html>")
     monkeypatch.setattr(
-        th, "_artifact_linters", lambda *, cell_sandbox: {".html": lambda p: [f"bad {p.name}"]}
+        th, "_check_pages",
+        lambda store, pages, *, cell_sandbox, screenshot: th.ArtifactLint(messages=[f"{p.slug}/{p.path.name} — bad {p.path.name}" for p in pages]),
     )
 
-    messages = lint_changed_artifact_files(Store(), {"art": 0.0})
+    messages = lint_changed_artifact_files(Store(), {"art": 0.0}).messages
 
     assert messages == ["art/index.html — bad index.html"]
 

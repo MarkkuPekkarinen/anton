@@ -23,6 +23,7 @@ from anton.core.artifacts.internal_files import (
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
 from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox, cell_sandbox_of
 from anton.utils.datasources import scrub_output
+from anton.utils.nofollow import read_text_nofollow, write_text_nofollow
 
 from . import attachments, engine, prompts, verifiers
 from .discovery import checkpoint as cp
@@ -783,6 +784,8 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
 
         state.step_started("verify_frontend", attempt=attempt)
         entry_file = _frontend_entry(state, result["files_written"])
+        if entry_file is not None and not state.is_fullstack:
+            _embed_attachments(state, entry_file)
         if entry_file is None:
             # One channel: this message rides on VerifyResult like every other
             # check — otherwise the contract lock cannot see it and the terminal
@@ -801,24 +804,29 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
             if verdict.ok and not state.is_fullstack:
                 # Second gate, only once the text checks pass and only for the
                 # single-file page — see `verify_frontend_live` for why not the
-                # fullstack frontend. In a thread: the browser subprocess
-                # blocks for up to its 8-second timeout. The sandbox starts
-                # no browser.
+                # fullstack frontend. In a thread: the browser subprocess or
+                # the render-check request blocks for seconds.
+                from anton.core.tools.tool_handlers import render_screenshots_refused
+
                 policy = _cell_sandbox(state)
+                if verifiers.browser_can_load(sandboxed=policy is not None):
+                    state.step_started("browser_check", attempt=attempt)
                 live = await asyncio.to_thread(
-                    verifiers.verify_frontend_live, entry_file, cell_sandbox=policy
+                    verifiers.verify_frontend_live, entry_file, cell_sandbox=policy,
+                    screenshot=not render_screenshots_refused(state.session),
                 )
-                if live is None:
-                    reason = verifiers.browser_check_skip_reason(sandboxed=policy is not None)
-                    state.trace_log.node("verify_frontend", "browser_skipped", reason)
-                    _note_skipped(state, f"browser load of the page: {reason}")
+                state.browser_status = live.status
+                state.browser_screenshot = live.screenshot
+                if live.status == "unverified":
+                    state.trace_log.node("verify_frontend", "browser_skipped", live.reason)
+                    _note_skipped(state, f"browser load of the page: {live.reason}")
                 else:
                     # `extend`, not `append`: the contract lock keys on
                     # `.append(...)` / `VerifyResult(...)` literals, and these
                     # strings are registered where `verify_frontend_live`
                     # builds them.
-                    verdict.errors.extend(live.errors)
-                    verdict.warnings.extend(live.warnings)
+                    verdict.errors.extend(live.verdict.errors)
+                    verdict.warnings.extend(live.verdict.warnings)
             # The fullstack page is loaded later, from its running backend
             # (`_run_and_verify_app`): under file:// its `/api/*` fetches
             # cannot resolve.
@@ -1073,7 +1081,9 @@ async def _verify_app_in_browser(state: GenState) -> "str | None | object":
             reason = verifiers.browser_check_skip_reason(sandboxed=policy is not None)
             state.trace_log.node("verify_fullstack", "browser_skipped", reason)
             _note_skipped(state, f"browser load of {target} via the running backend: {reason}")
+            state.browser_status = "unverified"
             return None
+        state.browser_status = "passed" if live.ok else "failed"
         state.trace_log.verifier(
             node="verify_fullstack", ok=live.ok,
             errors=list(live.errors), warnings=list(live.warnings),
@@ -1126,6 +1136,27 @@ def _stage_attachments(state: GenState) -> None:
         )
 
 
+def _embed_attachments(state: GenState, entry_file: Path) -> None:
+    """Put each staged asset the html-app page references into the page as a
+    `data:` URI (`attachments.embed_assets`), before the page is verified:
+    the app preview shows only the page itself, never a file next to it.
+    The fullstack frontend keeps its references: its backend serves
+    `static/`. The page is read and rewritten refusing a link below the
+    artifact folder, since agent code can write there. A page that cannot be
+    rewritten keeps its references, which the checks then report."""
+    if not state.attachments:
+        return
+    try:
+        html = read_text_nofollow(state.artifact_path, entry_file)
+        embedded = attachments.embed_assets(
+            html, state.attachments, state.artifact_path, cell_sandbox=_cell_sandbox(state)
+        )
+        if embedded != html:
+            write_text_nofollow(state.artifact_path, entry_file, embedded)
+    except (OSError, ValueError):
+        state.trace_log.node("verify_frontend", "embed_skipped", "the page could not be rewritten")
+
+
 def _note_skipped(state: GenState, text: str) -> None:
     """Record a check that did not run, once per distinct reason.
 
@@ -1147,6 +1178,9 @@ def _result_shell(state: GenState) -> dict:
         # only if the agent knows the key exists (S-03).
         "warnings": state.verify_warnings,
         "checks_skipped": state.checks_skipped,
+        # True only when a browser loaded the page and found nothing wrong.
+        # The handler picks the agent's instruction by it.
+        "verified_in_browser": state.browser_status == "passed",
         "summary": "; ".join(f"{s.node}:{s.outcome}" for s in state.trace),
         "trace": [{"node": s.node, "outcome": s.outcome, "detail": s.detail} for s in state.trace],
     }
@@ -1157,6 +1191,10 @@ def _result_shell(state: GenState) -> dict:
     if state.app_url:
         shell["url"] = state.app_url
         shell["port"] = state.app_port
+    # The model itself, not its JSON: the handler takes it out of the result
+    # and shows it to the agent as an image beside the text.
+    if state.browser_screenshot is not None:
+        shell["screenshot"] = state.browser_screenshot
     return shell
 
 

@@ -1389,11 +1389,121 @@ def test_the_card_names_the_method_the_url_and_the_call():
     assert "A part in braces, `{...}`, is the code that fills in that value when the step runs." in card
 
 
-def test_a_method_the_code_picks_when_it_runs_is_held_and_shown_as_code():
+def test_a_method_the_code_picks_when_it_runs_is_held_and_said_in_words():
+    """The card used to read "This step would send `{row['verb']}` to:", a
+    placeholder standing where the method would. It says in words that the
+    code decides the method, and shows that code."""
     writes = find_cell_writes(code=f"import requests\nrequests.request(row['verb'], {URL!r})",
                               earlier_code=(), snapshots=())
     assert [(w.method, w.url) for w in writes.http] == [("{row['verb']}", URL)]
-    assert "This step would send `{row['verb']}` to:" in _card_prompt(writes)
+    card = _card_prompt(writes)
+    assert "This step would send a request to:" in card
+    assert "The code decides the request's method when it runs, from `row['verb']`." in card
+    assert "`{row['verb']}`" not in card and "send `{" not in card
+
+
+_API_HELPER = (
+    "import requests\nBASE = 'https://erp.example.com/api'\n"
+    "def api(method, path):\n    return requests.request(method, BASE + path)",
+)
+
+
+def test_a_helper_parameter_is_shown_as_what_the_call_passes():
+    """`def api(method, path)` called with a value the code picks: the card
+    names the call's `verb`, the code the person wrote in this step, not the
+    helper's own `{method}`."""
+    writes = find_cell_writes(code="for verb in verbs:\n    api(verb, '/orders/42')",
+                              earlier_code=_API_HELPER, snapshots=())
+    card = _card_prompt(writes)
+    assert "The code decides the request's method when it runs, from `verb`." in card
+    assert "{method}" not in card and "`method`" not in card
+    assert _fenced(card) == [URL, "api(verb, '/orders/42')"]
+
+
+def test_an_address_the_code_picks_whole_is_said_in_words():
+    """A URL that is nothing but run-time code used to show as a bare
+    `{u}` fence, as if it were the address."""
+    writes = find_cell_writes(code="import requests\nfor u in urls:\n    requests.delete(u)",
+                              earlier_code=(), snapshots=())
+    card = _card_prompt(writes)
+    assert "This step would send DELETE to an address the code decides when it runs, from `u`:" in card
+    assert _fenced(card) == ["requests.delete(u)"]
+    assert "{u}" not in card
+    assert "A part in braces" not in card
+
+
+def test_the_refusal_says_a_run_time_method_in_words_too():
+    writes = find_cell_writes(code=f"import requests\nrequests.request(row['verb'], {URL!r})",
+                              earlier_code=(), snapshots=())
+    text = _refusal(writes, "cancelled").content
+    assert f"send a request to `{URL}` (the code decides its method when it runs, from `row['verb']`)" in text
+    assert "send {row" not in text
+
+
+def test_a_helper_that_reassigns_its_parameter_names_its_own_variable():
+    """`api(method, path)` that sets `method = 'DELETE'` for some paths: the
+    caller's `verb` does not decide the method alone, so the card must not
+    say it does. A person who knows `verbs` holds only GET would approve a
+    DELETE."""
+    helper = (
+        "import requests\nBASE = 'https://erp.example.com/api'\n"
+        "def api(method, path):\n    if path.endswith('/42'):\n        method = 'DELETE'\n"
+        "    return requests.request(method, BASE + path)",
+    )
+    writes = find_cell_writes(code="for verb in verbs:\n    api(verb, '/orders/42')",
+                              earlier_code=helper, snapshots=())
+    card = _card_prompt(writes)
+    assert "The code decides the request's method when it runs, from `method`." in card
+    assert "from `verb`" not in card
+
+
+def test_a_written_out_method_cannot_hide_a_held_request_from_the_card():
+    """A method is any text an HTTP library sends. Written into the prose as
+    is, `<!--` and `-->` made Cowork drop the DELETE between them from the
+    card the person approves."""
+    rules = parse_http_write_rules("* https://erp.example.com/api/**")
+    code = (
+        "import requests\nU = 'https://erp.example.com/api/ping'\n"
+        "requests.request('<!--', U)\n"
+        "requests.delete('https://erp.example.com/api/orders/1')\n"
+        "requests.request('-->', U)\n"
+    )
+    writes = find_cell_writes(code=code, earlier_code=(), snapshots=(), http_rules=rules)
+    assert [w.method for w in writes.http] == ["<!--", "DELETE", "-->"]
+
+    card = _card_prompt(writes)
+    assert "<!--" not in card and "-->" not in card
+    assert "This step would send DELETE to:" in re.sub(r"<!--[\s\S]*?-->", "", card)
+    assert "This step would send `<\u200b!--` to:" in card
+    refusal = _refusal(writes, "cancelled").content
+    assert "<!--" not in refusal and "-->" not in refusal
+
+@pytest.mark.parametrize("code,earlier,held", [
+    (f"import requests\nrequests.request(row['verb'], {URL!r})", (),
+     [(2, f"requests.request(row['verb'], {URL!r})", URL)]),
+    ("import requests\nBASE = 'https://erp.example.com/api'\ndef api(method, path):\n"
+     "    return requests.request(method, BASE + path)\nfor verb, path in jobs:\n    api(verb, path)", (),
+     [(4, "return requests.request(method, BASE + path)", "https://erp.example.com/api{path}")]),
+    ("import requests\ndef call(method, url):\n    return requests.request(method, url)\nfor v, u in jobs:\n    call(v, u)",
+     (), [(3, "return requests.request(method, url)", "{url}")]),
+    ("import requests\nfor u in urls:\n    requests.delete(u)", (), [(3, "requests.delete(u)", "{u}")]),
+    ("for v in verbs:\n    api(v, '/orders/42')", _API_HELPER, [(2, "api(v, '/orders/42')", URL)]),
+    ("api(job['m'], job['p'])", _API_HELPER,
+     [(1, "api(job['m'], job['p'])", "https://erp.example.com/api{job['p']}")]),
+    ("api('PUT', '/orders/42')", _API_HELPER, [(1, "api('PUT', '/orders/42')", URL)]),
+    ("api('GET', '/orders/42')", _API_HELPER, []),
+    ("api('POST', '/orders')", _API_HELPER, []),
+    ("import requests\nrequests.get('https://erp.example.com/api/orders')", (), []),
+], ids=["method-from-data", "helper-in-the-cell", "helper-whole-url", "url-from-a-loop",
+        "helper-called-with-a-variable", "helper-called-with-data", "helper-called-with-put",
+        "helper-called-with-get", "helper-called-with-post", "plain-get"])
+def test_the_card_wording_holds_the_same_requests_as_before(code, earlier, held):
+    """Presentation only: each cell holds exactly the requests, lines and
+    addresses the check held before the card said run-time parts in words
+    (values read from the check at anton v2.26.10.19.3)."""
+    writes = find_cell_writes(code=code, earlier_code=earlier, snapshots=())
+    assert [(w.line, w.call, w.url) for w in writes.http] == held
+    assert writes.kinds() == (("http",) if held else ())
 
 
 def test_a_client_base_url_is_joined_to_a_relative_path():

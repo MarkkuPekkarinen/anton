@@ -145,18 +145,19 @@ VISUAL DESIGN (for every HTML file you produce):
   System sans-serif font stack, generous padding, responsive layout.
 - STYLING: Tailwind CSS is the recommended way to style the page. Load it
   once in `<head>` via CDN:
-  `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>`
+  `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3"></script>`
   and use utility classes for layout, spacing, typography and colour
   (`bg-[#0d1117] text-[#e6edf3]` for the theme). Hand-written CSS in a
   `<style>` block stays allowed wherever utilities fall short — keyframes,
   chart containers, complex selectors — or when the page is too small to
   need a framework. No other CSS or JS library: the two CDN scripts named in
-  these rules (Tailwind, ECharts) are the ONLY external resources a page
-  may load. Both are fetched every time the page opens, so a page that must
-  work OFFLINE or without external resources (brief or PRD says so) skips
-  Tailwind and styles itself with hand-written CSS.
+  these rules (Tailwind, ECharts), at exactly the versions shown, are the
+  ONLY external resources a page may load. Both are fetched every time the
+  page opens, so a page that must work OFFLINE or without external resources
+  (brief or PRD says so) skips Tailwind and styles itself with hand-written
+  CSS.
 - ALWAYS use Apache ECharts for interactive charts via CDN:
-  `<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>`
+  `<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>`
   Initialise with `echarts.init(dom, 'dark')` and customise background to #0d1117.
   NEVER use Plotly, matplotlib, or other chart libraries unless explicitly asked.
 - Chart type by purpose: line for change over time, bar for comparing
@@ -221,7 +222,10 @@ step and costs a regeneration, unless the item says it is only a warning:
 - Every `z-index` is 1000 or below.
 - Significant block containers (`div`, `section`, `table`, `main`,
   `article`) carry stable `id` attributes — the host app attaches comments
-  to them. A missing `id` is only a warning.\
+  to them. A missing `id` is only a warning.
+- A script from any host but `https://cdn.jsdelivr.net/npm/`, an external
+  stylesheet or an external image is only a warning, but the app preview
+  does not load it: keep styles in `<style>` and embed images as `data:` URIs.\
 """
 
 # The browser gate, one bullet per page kind: the html-app page is loaded
@@ -231,10 +235,19 @@ step and costs a regeneration, unless the item says it is only a warning:
 # speak of a fullstack app, and the failure it can see differs (a local file
 # under file://, a URL of the page's own origin over http).
 _BROWSER_GATE_HTML = """\
-- Where a headless browser is available, the page is also loaded once from
-  disk right after these checks: a console error, a crashed renderer or a
-  request for a local file that does not exist fails the step; a page with
-  no visible text or elements is a warning.\
+- Where a headless browser is available, the page is also loaded once right
+  after these checks, on a deployment that supports it the way the app
+  preview loads it: in a sandboxed frame under the preview's content security
+  policy, at a desktop and a phone width. A console error, an uncaught
+  exception, a
+  crashed renderer, a request for a local file that does not exist, a load
+  the preview's content security policy blocks, a separate file the page asks
+  for (the preview serves only the page itself), a chart, map or canvas that
+  stays blank, or a page wider than the screen fails the step; a page with no
+  visible text or elements is a warning. A library the check cannot load
+  leaves the page unverified, which does not fail the step. A page with
+  many findings gets the first ones listed and a count of more distinct
+  problems: fix the listed ones first.\
 """
 
 _BROWSER_GATE_SERVED = """\
@@ -243,6 +256,22 @@ _BROWSER_GATE_SERVED = """\
   or a request for a URL that failed (a missing asset in `static/`, a
   `fetch()` to a route the backend does not serve) fails the step; a page
   with no visible text or elements is a warning.\
+"""
+
+
+# Follows either browser-gate bullet. The browser check counts console errors,
+# so an error a view catches and only writes into the page never reaches it,
+# and an expected failure that logs one fails a page that works.
+_CAUGHT_ERRORS = """\
+- A view you guard with `try`/`catch` logs what it caught as well as writing
+  a short message into the view:
+  `try { drawMap(el); } catch (e) { console.error(e); el.textContent = 'The map could not load.'; }`.
+  A catch that only writes the message hides the error from the browser
+  check: at most the check reports the view as empty, and it cannot say what
+  broke it. Log with `console.error` only a view that failed to draw. An
+  expected failure stays silent or uses `console.warn`: the guarded storage
+  helper the browser storage note below asks for catches a throw on every
+  load in the preview frame, and a `console.error` there fails the check.\
 """
 
 
@@ -266,7 +295,7 @@ Not checked by the verifier, but the page breaks inside the frame without them:
 def _verifier_contract(*, served: bool) -> str:
     return "## Verifier contract\n" + _VERIFIER_CONTRACT + "\n" + (
         _BROWSER_GATE_SERVED if served else _BROWSER_GATE_HTML
-    ) + "\n\n" + _FRAME_NOTES
+    ) + "\n" + _CAUGHT_ERRORS + "\n\n" + _FRAME_NOTES
 
 
 # ---------------------------------------------------------------------------
@@ -605,9 +634,12 @@ the relative name given there."""
 Produce ONE self-contained HTML file named exactly `{target}`, at the root
 of the artifact folder. Inline your own CSS and all JS and embed all data in
 the file. Do not reference any other file of the artifact, except the assets
-listed under `## Attached files` (already in the folder, referenced by the
-relative name given there); the only external resources allowed are the
-Tailwind and ECharts `<script>` tags from the CDNs named in the design rules."""
+listed under `## Attached files`, by the relative name given there in quotes
+(`<img src="logo.png">`): once you have written the page, the pipeline
+replaces each such reference with the asset itself as a `data:` URI, since
+the app preview shows only the page. The only external resources allowed
+are the Tailwind and ECharts `<script>` tags from the CDNs named in the
+design rules."""
     return f"""\
 You are a single-purpose worker inside an artifact-generation pipeline. This
 step is `generate_frontend`.

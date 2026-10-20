@@ -215,10 +215,44 @@ Under a policy, app backends are refused (`launch_artifact_backend` returns
 `BACKENDS_OFF_MESSAGE` before it touches the pool, and `generate_artifact`
 refuses a fullstack artifact before discovery asks anything, or before the
 spec when discovery settles on one). The checks that start a browser or
-LibreOffice (`lint_html`, `lint_url`, `check_xlsx_via_office`,
-`check_opens_via_office`, `verify_frontend_live`, `verify_app_live`) take a
-required `cell_sandbox` and return None under a policy before they spawn.
-The in-process lints still run.
+LibreOffice in this process (`lint_html`, `lint_url`, `check_xlsx_via_office`,
+`check_opens_via_office`, `verify_app_live`) take a required `cell_sandbox`
+and return None under a policy before they spawn. The in-process lints still
+run.
+
+Pages are still loaded in a browser under a policy when the host sets
+`ANTON_RENDER_CHECK_URL`: the render-check service
+(`anton/core/artifacts/render_check.py`) runs Chromium in its own container
+and loads the page the way the app preview does, and only the page's text
+leaves this process. The server reads the page only where the person's own
+cells may read (`CellSandbox.allows_read`), and through
+`nofollow.read_bytes_nofollow`, so a link agent code swaps in after that
+check is refused, never followed. The variable is not on the cell
+environment's allowlist. `generate_artifact`'s browser step
+(`verify_frontend_live`) and the check after every scratchpad cell that
+changes an artifact's `.html` (`tool_handlers._check_pages`) both use it.
+Without the variable, `verify_frontend_live` reports the page as unverified
+and the cell's result says the page was not checked in a browser. Either
+way, a sandboxed turn with a page that did not pass its last check ends
+with a line anton writes itself, naming the artifact
+(`ChatSession._unverified_page_lines`). Each page keeps its own latest
+result, so a later pass of one page never clears another page's failure.
+
+The service also sends a screenshot of the page, which reaches the agent as
+an image beside the check's text. History keeps only the newest one
+(`render_check.drop_older_screenshots`). When the model refuses a request
+that may have failed for carrying images at all (`provider.is_image_refusal`:
+a content rejection, or a 400 or 422 that names an image, which is what a
+model with no image input gets), the turn replaces every render screenshot
+with a note, keeps the findings beside it, and sends the request once more
+(`ChatSession._drop_render_screenshots`). A refusal of one image, such as
+an image over the size limit, does not count. Only when that request goes
+through without the screenshots does the note say the model refused them
+(`ChatSession._confirm_render_screenshots_refused`). From then on, later
+checks in that session ask the service for no screenshot. If the request
+is refused again, the screenshots were not the cause, and later checks keep
+theirs. A session seeded with the confirmed note, as cowork-server builds
+one for every turn, starts without screenshots too.
 
 `ScratchpadManager` refuses at construction a runtime factory that does not
 name a `cell_sandbox` parameter (a bare `**kwargs` is refused), and refuses

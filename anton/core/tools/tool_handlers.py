@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, NamedTuple
 
 from anton.core.backends.base import Cell
 from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
@@ -26,6 +28,7 @@ from anton.core.utils.scratchpad import (
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
+    from anton.core.artifacts.render_check import RenderScreenshot, RenderStatus
 
 
 _log = logging.getLogger(__name__)
@@ -175,29 +178,67 @@ def snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
 # Bounded: never lint a huge file inline on the agent's turn.
 _ARTIFACT_LINT_SIZE_CEILING = 10 * 1024 * 1024  # 10 MB
 
+# The render checks after one cell share this budget: the agent waits for
+# them before it sees the cell's result. A page that would start with less
+# than `_RENDER_CHECK_MIN_SECONDS` left is reported as not checked.
+_RENDER_CHECK_CELL_BUDGET_SECONDS = 45.0
+_RENDER_CHECK_MIN_SECONDS = 5.0
+
 
 # Said once per file when a check that would start a browser or LibreOffice
 # is skipped because agent code runs in a sandbox on this host.
-_SANDBOX_BROWSER_SKIP = "browser check skipped: agent code runs in a sandbox on this deployment"
+_SANDBOX_BROWSER_SKIP = (
+    "not checked in a browser: agent code runs in a sandbox on this deployment, "
+    "which starts no browser"
+)
 _SANDBOX_OFFICE_SKIP = "LibreOffice check skipped: agent code runs in a sandbox on this deployment"
+
+
+class PageKey(NamedTuple):
+    """One page of one artifact: its slug and its path inside the artifact
+    folder (`index.html`, `static/index.html`)."""
+
+    slug: str
+    page: str
+
+
+@dataclass(frozen=True)
+class ArtifactLint:
+    """What the checks after one cell found in the artifacts it changed."""
+
+    # `<slug>/<file> — <finding>` lines for the `[artifact lint]` block.
+    messages: list[str] = field(default_factory=list)
+    # The first page the render check loaded, as the app preview shows it,
+    # and that page's `<slug>/<file>`.
+    screenshot: "RenderScreenshot | None" = None
+    screenshot_page: str = ""
+    # How each page this cell checked fared in a browser.
+    page_checks: "dict[PageKey, RenderStatus]" = field(default_factory=dict)
+
+
+_STATUS_RANK = {"passed": 0, "unverified": 1, "failed": 2}
+
+
+def _worse(a: "RenderStatus | None", b: "RenderStatus") -> "RenderStatus":
+    return b if a is None or _STATUS_RANK[b] > _STATUS_RANK[a] else a
 
 
 def _artifact_linters(*, cell_sandbox: CellSandbox | None = None) -> dict[str, Callable[[Path], list[str] | None]]:
     """suffix -> checker. `None` means it could not run at all (e.g. no
-    headless browser); `[]` means it ran and found nothing; a non-empty
-    list is real findings — only that last case is ever appended to the
-    agent-facing message list.
+    LibreOffice); `[]` means it ran and found nothing; a non-empty list is
+    real findings — only that last case is ever appended to the agent-facing
+    message list.
 
-    Add a format by adding one entry here. Only `.xlsx`/`.html`/`.pptx`/
-    `.docx` are registered — every other extension is silently unchecked,
-    which is honest as-is: nothing ever claimed to validate a `.csv`.
+    Add a format by adding one entry here. Only `.xlsx`/`.pptx`/`.docx` are
+    registered here and `.html` has its own pass (`_check_pages`) — every
+    other extension is silently unchecked, which is honest as-is: nothing
+    ever claimed to validate a `.csv`.
 
-    A `cell_sandbox` policy skips the checks that start a browser or
-    LibreOffice on the agent's file (each of them also refuses under it);
-    the in-process lints still run. Where the skipped tool is installed, the
-    result says the check was skipped.
+    A `cell_sandbox` policy skips the checks that start LibreOffice on the
+    agent's file (each of them also refuses under it); the in-process lints
+    still run. Where the skipped tool is installed, the result says the check
+    was skipped.
     """
-    from anton.core.artifacts.html_lint import discover_browser, lint_html
     from anton.core.artifacts.office_open_check import check_opens_via_office
     from anton.core.artifacts.ooxml_lint import lint_ooxml
     from anton.core.artifacts.xlsx_lint import lint_xlsx
@@ -240,14 +281,6 @@ def _artifact_linters(*, cell_sandbox: CellSandbox | None = None) -> dict[str, C
         ]
         return messages
 
-    def _html_linter(path: Path) -> list[str] | None:
-        if sandboxed:
-            return [_SANDBOX_BROWSER_SKIP] if discover_browser() is not None else None
-        findings = lint_html(path, cell_sandbox=cell_sandbox)
-        if findings is not None:
-            return [f.message() for f in findings]
-        return None
-
     def _ooxml_linter(kind: str) -> Callable[[Path], list[str] | None]:
         def _lint(path: Path) -> list[str] | None:
             # Structure first (ENG-2175): a truncated or hand-rolled package
@@ -269,29 +302,144 @@ def _artifact_linters(*, cell_sandbox: CellSandbox | None = None) -> dict[str, C
 
     return {
         ".xlsx": _xlsx_linter,
-        ".html": _html_linter,
         ".pptx": _ooxml_linter("pptx"),
         ".docx": _ooxml_linter("docx"),
     }
 
 
+@dataclass(frozen=True)
+class _ChangedPage:
+    """An `.html` content file of an artifact the cell changed."""
+
+    slug: str
+    path: Path
+    # The file itself is newer than the artifact was before the cell.
+    edited: bool
+    size: int
+
+    def key(self, store) -> PageKey:
+        return PageKey(slug=self.slug, page=self.path.relative_to(store.root / self.slug).as_posix())
+
+
+def _primary_name(store, slug: str) -> str | None:
+    """The artifact's primary file as its metadata names it, or None.
+
+    `read_metadata`, not `open`: `open` reconciles the file list and may
+    rewrite the metadata, which a check must not do.
+    """
+    metadata = store.read_metadata(slug)
+    return metadata.primary if metadata is not None else None
+
+
+def _check_pages(
+    store, pages: list[_ChangedPage], *, cell_sandbox: CellSandbox | None, screenshot: bool
+) -> ArtifactLint:
+    """Load the changed artifacts' pages in a browser.
+
+    With the render-check service configured: only the pages this cell
+    edited, each artifact's primary first, within one budget per cell; the
+    first screenshot is kept, unless `screenshot` is False, when the service
+    is asked for none. Otherwise the local Electron browser loads
+    every page of a changed artifact (`lint_html`), and a sandbox policy,
+    which starts no browser, says so on each page.
+
+    Every page checked gets a line: its findings, that it passed, or that it
+    was not checked in a browser and why (no browser here, a sandbox, the
+    service could not vouch for it, the budget ran out, the page is too
+    large). Silence never stands for a pass.
+    """
+    from anton.core.artifacts import render_check
+    from anton.core.artifacts.html_lint import discover_browser, lint_html
+
+    messages: list[str] = []
+    page_checks: "dict[PageKey, RenderStatus]" = {}
+    shot = None
+    shot_page = ""
+
+    if render_check.configured_url() is None:
+        for page in pages:
+            label = f"{page.slug}/{page.path.name}"
+            if cell_sandbox is not None:
+                messages.append(f"{label} — {_SANDBOX_BROWSER_SKIP}")
+                page_checks[page.key(store)] = "unverified"
+                continue
+            if page.size > _ARTIFACT_LINT_SIZE_CEILING:
+                messages.append(
+                    f"{label} — not checked in a browser: the page is over "
+                    f"{_ARTIFACT_LINT_SIZE_CEILING // (1024 * 1024)} MB"
+                )
+                page_checks[page.key(store)] = "unverified"
+                continue
+            findings = lint_html(page.path, cell_sandbox=None)
+            if findings is None:
+                reason = (
+                    "no browser on this deployment" if discover_browser() is None
+                    else "the local browser check gave no answer"
+                )
+                messages.append(f"{label} — not checked in a browser: {reason}")
+                page_checks[page.key(store)] = "unverified"
+                continue
+            if findings:
+                messages += [f"{label} — {f.message()}" for f in findings]
+            else:
+                messages.append(f"{label} — loaded in a local browser from disk: no problems found")
+            page_checks[page.key(store)] = "failed" if findings else "passed"
+        return ArtifactLint(messages=messages, page_checks=page_checks)
+
+    edited = [page for page in pages if page.edited]
+    primaries = {page.slug: _primary_name(store, page.slug) for page in edited}
+
+    def _order(page: _ChangedPage) -> tuple:
+        rel = page.path.relative_to(store.root / page.slug).as_posix()
+        return (rel != primaries[page.slug], rel != "index.html", rel)
+
+    deadline = time.monotonic() + _RENDER_CHECK_CELL_BUDGET_SECONDS
+    for page in sorted(edited, key=_order):
+        label = f"{page.slug}/{page.path.name}"
+        remaining = deadline - time.monotonic()
+        if remaining < _RENDER_CHECK_MIN_SECONDS:
+            outcome = render_check.RenderCheckUnavailable(
+                reason="the browser checks after this cell ran out of time before this page"
+            )
+        else:
+            outcome = render_check.check_file(
+                page.path, cell_sandbox=cell_sandbox, screenshot=screenshot and shot is None,
+                timeout=min(render_check.TIMEOUT_SECONDS, remaining),
+            )
+        page_checks[page.key(store)] = outcome.status
+        if outcome.screenshot is not None and shot is None:
+            shot, shot_page = outcome.screenshot, label
+        if outcome.status == "unverified":
+            messages.append(f"{label} — not checked in a browser: {outcome.unverified_reason}")
+        elif outcome.status == "passed":
+            messages.append(f"{label} — loaded in a browser the way the app preview loads it: no problems found")
+        else:
+            grouped = render_check.grouped_findings(outcome.findings)
+            messages += [f"{label} — {group.kind} ({group.viewports}): {group.detail}" for group in grouped.shown]
+            if grouped.more:
+                messages.append(f"{label} — and {grouped.more} more distinct findings, not listed")
+    return ArtifactLint(messages=messages, screenshot=shot, screenshot_page=shot_page, page_checks=page_checks)
+
+
 def lint_changed_artifact_files(
-    store, before: dict[str, float], *, cell_sandbox: CellSandbox | None = None
-) -> list[str]:
+    store, before: dict[str, float], *, cell_sandbox: CellSandbox | None = None, screenshot: bool = True
+) -> ArtifactLint:
     """Run the format-appropriate checker on artifact folders this cell
     edited (mtime moved since `before`), so findings reach the agent as
     tool-result text right away, not only via a later open()/list().
 
     Under a sandbox policy the checks that start a browser or LibreOffice
-    are skipped: they would run the agent's file outside the sandbox.
+    locally are skipped: they would run the agent's file outside the
+    sandbox. The render-check service still loads pages there: only the
+    page's text leaves this process (`_check_pages`). `screenshot=False`
+    asks it for no screenshot.
     """
     from anton.core.artifacts.store import iter_content_files
 
     linters = _artifact_linters(cell_sandbox=cell_sandbox)
-    if not linters:
-        return []
     after = snapshot_existing_artifact_mtimes(store)
     messages: list[str] = []
+    pages: list[_ChangedPage] = []
     for slug, prev_mtime in before.items():
         current = after.get(slug)
         if current is None or current <= prev_mtime:
@@ -299,8 +447,15 @@ def lint_changed_artifact_files(
 
         artifact_dir = store.root / slug
         for path, st in iter_content_files(artifact_dir):
+            if path.suffix.lower() == ".html":
+                # Whatever its size: `_check_pages` says why a page too large
+                # to check was not checked.
+                pages.append(_ChangedPage(slug=slug, path=path, edited=st.st_mtime > prev_mtime, size=st.st_size))
+                continue
+            if st.st_size > _ARTIFACT_LINT_SIZE_CEILING:
+                continue
             linter = linters.get(path.suffix.lower())
-            if linter is None or st.st_size > _ARTIFACT_LINT_SIZE_CEILING:
+            if linter is None:
                 continue
             file_messages = linter(path)
             if not file_messages:
@@ -310,7 +465,102 @@ def lint_changed_artifact_files(
             for message in file_messages:
                 messages.append(f"{slug}/{path.name} — {message}")
 
-    return messages
+    checked = _check_pages(store, pages, cell_sandbox=cell_sandbox, screenshot=screenshot)
+    return ArtifactLint(
+        messages=messages + checked.messages,
+        screenshot=checked.screenshot,
+        screenshot_page=checked.screenshot_page,
+        page_checks=checked.page_checks,
+    )
+
+
+def record_page_checks(session: "ChatSession", checks: "dict[PageKey, RenderStatus]") -> None:
+    """Remember, for this turn, how each page last fared in a browser.
+
+    Per page: a check of one page replaces that page's earlier result and
+    never another page's. The session reads it when the turn ends
+    (`ChatSession._unverified_page_lines`). Best-effort, like
+    `_track_artifact`: a session without the record (a test double) loses
+    nothing else.
+    """
+    record = getattr(session, "_page_checks", None)
+    if isinstance(record, dict):
+        record.update(checks)
+
+
+def render_screenshots_refused(session: "ChatSession") -> bool:
+    """Whether the model refused a request carrying a render-check screenshot
+    in this session and took it without one
+    (`ChatSession._confirm_render_screenshots_refused`), so checks ask the
+    service for none and the findings go to the agent without one. A test
+    double without the flag gets screenshots."""
+    return getattr(session, "_render_screenshots_refused", False) is True
+
+
+def page_check_lines(store, checks: "dict[PageKey, RenderStatus]") -> list[str]:
+    """One line for each artifact with a page that did not pass its last
+    browser check, naming the artifact, for the end of the agent's final
+    message. A failed page wins over an unverified one."""
+    by_slug: "dict[str, RenderStatus]" = {}
+    for key, status in checks.items():
+        by_slug[key.slug] = _worse(by_slug.get(key.slug), status)
+    lines: list[str] = []
+    for slug, status in by_slug.items():
+        if status == "passed":
+            continue
+        metadata = store.read_metadata(slug) if store is not None else None
+        name = metadata.name if metadata is not None and metadata.name.strip() else slug
+        if status == "failed":
+            lines.append(f"“{name}” failed the browser check, so it may not display correctly in the preview.")
+        else:
+            lines.append(f"“{name}” was not verified in a browser, so it may not display correctly in the preview.")
+    return lines
+
+
+def cell_content_with_lint(text: str, lint: ArtifactLint, *, cell_ok: bool) -> "str | list[dict]":
+    """A cell's result with the checks' `[artifact lint]` block, and the
+    render screenshot after it when the cell succeeded.
+
+    Only a successful cell carries the image: a list result with a failure
+    verdict skips the error streak's nudge text (see `handle_read_image`).
+    """
+    from anton.core.artifacts import render_check
+
+    if lint.messages:
+        # [artifact lint] follows format_cell_result's own [output]/[error]
+        # labeling convention so the agent can tell the finding apart from
+        # its own code's output. cowork-server's figure sources cut this
+        # block from a replayed cell's output.
+        text += "\n\n[artifact lint]\n" + "\n".join(lint.messages)
+    if lint.screenshot is None or not cell_ok:
+        return text
+    return [{"type": "text", "text": text}, *render_check.screenshot_blocks(lint.screenshot, page=lint.screenshot_page)]
+
+
+async def check_cell_artifacts(session: "ChatSession", store, before: dict[str, float]) -> ArtifactLint:
+    """After an exec cell: attribute its artifact edits, check the changed
+    files and record how their pages fared. Both exec paths (`handle_scratchpad`
+    and `ChatSession`'s inline streaming exec) call this. Never raises.
+    """
+    import asyncio
+
+    track_edits_since(session, store, before)
+    refused = render_screenshots_refused(session)
+    try:
+        # The checkers take seconds; run them off the event loop.
+        lint = await asyncio.to_thread(
+            lint_changed_artifact_files, store, before,
+            cell_sandbox=cell_sandbox_of(getattr(session, "_scratchpads", None)), screenshot=not refused,
+        )
+    except Exception:
+        # Best-effort: a lint crash must never fail the cell's own result.
+        _log.warning("artifact lint failed for this cell", exc_info=True)
+        return ArtifactLint()
+    record_page_checks(session, lint.page_checks)
+    if refused:
+        # A service that sends a screenshot it was not asked for.
+        return replace(lint, screenshot=None, screenshot_page="")
+    return lint
 
 
 def track_edits_since(session: "ChatSession", store, before: dict[str, float]) -> None:
@@ -680,24 +930,42 @@ async def _generate_with_progress_close(coro, queue) -> "dict | str":
         queue.put_nowait(None)
 
 
+# What every `generated` instruction says after its opening, verified in a
+# browser or not.
+_GENERATED_REPORTING = (
+    "When the result carries `url`, the backend is running there and that URL "
+    "is the app's entry point: give the user the URL, not the path of "
+    "`static/index.html` — opened from disk the page cannot reach its "
+    "`/api/*`. Without `url` (html-app), the entry point is "
+    "`<path>/<primary>`. `checks_skipped` lists verifier checks that "
+    "could not run (for example, no headless browser to load the page) "
+    "and `warnings` what the verifier flagged without failing the step: "
+    "when either is non-empty, tell the user in one sentence what was "
+    "not checked or flagged — never present a skipped check as passed."
+    " When the result carries `brief_shown: true`, the user has already "
+    "seen the brief: do not repeat it. When it carries `brief_summary`, "
+    "the user has not seen it: sum up its assumptions in a sentence or two."
+)
+
 _STATUS_INSTRUCTIONS = {
     "generated": (
         "Every file listed was statically verified by the generation "
-        "pipeline. Do NOT re-read, re-parse or re-verify them, and do not "
+        "pipeline, and a browser loaded the page without finding a problem. "
+        "Do NOT re-read, re-parse or re-verify them, and do not "
         "open them looking for problems — report the result to the user and "
-        "act only on problems the user actually reports. When the result "
-        "carries `url`, the backend is running there and that URL is the "
-        "app's entry point: give the user the URL, not the path of "
-        "`static/index.html` — opened from disk the page cannot reach its "
-        "`/api/*`. Without `url` (html-app), the entry point is "
-        "`<path>/<primary>`. `checks_skipped` lists verifier checks that "
-        "could not run (for example, no headless browser to load the page) "
-        "and `warnings` what the verifier flagged without failing the step: "
-        "when either is non-empty, tell the user in one sentence what was "
-        "not checked or flagged — never present a skipped check as passed."
-        " When the result carries `brief_shown: true`, the user has already "
-        "seen the brief: do not repeat it. When it carries `brief_summary`, "
-        "the user has not seen it: sum up its assumptions in a sentence or two."
+        "act only on problems the user actually reports. "
+        + _GENERATED_REPORTING
+    ),
+    # `generated` when no browser check passed: `verified_in_browser` false.
+    "generated_unverified": (
+        "The files listed passed the pipeline's static checks, but no browser "
+        "verified the page: `checks_skipped` says why. Reading the files again "
+        "cannot verify how they render, so do not open them looking for "
+        "problems; report the result to the user and act only on problems the "
+        "user actually reports. Your reply MUST say, in those words, that the "
+        "page is unverified in a browser and may not display correctly in the "
+        "preview; never say it works, was tested or renders correctly. "
+        + _GENERATED_REPORTING
     ),
     "cancelled": (
         "The user declined the brief. Do NOT write prd.md yourself and do "
@@ -847,23 +1115,39 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     # leaving this one otherwise unattributed.
     if status != "cancelled":
         _track_artifact(session, store, slug, summary="Generated artifact files")
+    # The render check's view of the page travels beside the text, as an
+    # image the agent can look at, never inside the JSON, unless the model
+    # refused one earlier in the session.
+    screenshot = result.pop("screenshot", None)
+    if render_screenshots_refused(session):
+        screenshot = None
+    instruction_key = status
+    if status == "generated" and not result.get("verified_in_browser"):
+        instruction_key = "generated_unverified"
+    text = json.dumps(
+        {
+            "slug": slug,
+            "path": str(folder),
+            **result,
+            "instruction": _STATUS_INSTRUCTIONS.get(
+                instruction_key, _STATUS_INSTRUCTIONS["generated_unverified"]
+            ),
+        },
+        indent=2,
+    )
     # I-03: an explicit verdict rather than the dispatcher substring-matching
     # the text. A successful run's `trace` legitimately contains the word
     # "failed" (e.g. "backend.py failed to import in venv" after a successful
     # retry), which the legacy classifier counted as an error and fed into the
     # per-tool error streak.
+    if screenshot is None:
+        yield ToolOutcome(content=text, ok=True)
+        return
+    from anton.core.artifacts import render_check
+
+    page = f"{slug}/{artifact.primary or 'index.html'}"
     yield ToolOutcome(
-        content=json.dumps(
-            {
-                "slug": slug,
-                "path": str(folder),
-                **result,
-                "instruction": _STATUS_INSTRUCTIONS.get(
-                    status, _STATUS_INSTRUCTIONS["generated"]
-                ),
-            },
-            indent=2,
-        ),
+        content=[{"type": "text", "text": text}, *render_check.screenshot_blocks(screenshot, page=page)],
         ok=True,
     )
 
@@ -1124,39 +1408,21 @@ async def handle_scratchpad(
             # Post-execute ACC event (killed vs result) via the shared helper —
             # the streaming path emits the same.
             observe_scratchpad_cell(session, name, cell)
-            lint_messages: list[str] = []
-            if artifact_store is not None:
-                track_edits_since(session, artifact_store, before_artifact_mtimes)
-                try:
-                    import asyncio
-
-                    # the checkers might be with multi-second timeouts, run them async
-                    lint_messages = await asyncio.to_thread(
-                        lint_changed_artifact_files,
-                        artifact_store, before_artifact_mtimes,
-                        cell_sandbox=cell_sandbox_of(getattr(session, "_scratchpads", None)),
-                    )
-                except Exception:
-                    # Best-effort: a lint crash must never fail
-                    # the cell's own result.
-                    _log.warning("artifact lint failed for this cell", exc_info=True)
+            lint = (
+                await check_cell_artifacts(session, artifact_store, before_artifact_mtimes)
+                if artifact_store is not None
+                else ArtifactLint()
+            )
         else:
-            lint_messages = []
+            lint = ArtifactLint()
         # The runtime's verdict: a raised error/timeout/kill is a failure;
         # stderr-only output (warnings) is not, and stdout containing words
         # like "failed" is not either — the streak reads this flag, never the
         # text (ENG-1276). The reason is the traceback's LAST line (the cause),
         # the machine-comparable key ENG-1286's thrash breaker will consume.
         error = (cell.error or "").strip() if cell is not None else ""
-        content = format_cell_result(cell)
-        if lint_messages:
-            # [artifact lint] follows format_cell_result's own [output]/[error]
-            # labeling convention so the agent can tell the finding apart from
-            # its own code's output. cowork-server's figure sources cut this
-            # block from a replayed cell's output.
-            content += "\n\n[artifact lint]\n" + "\n".join(lint_messages)
         return ToolOutcome(
-            content=content,
+            content=cell_content_with_lint(format_cell_result(cell), lint, cell_ok=not error),
             ok=not error,
             reason=cell_failure_reason(error),
         )

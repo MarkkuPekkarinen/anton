@@ -77,6 +77,14 @@ async def test_a_call_with_code_and_no_action_runs_the_code(tmp_path: Path):
         for block in message["content"] if isinstance(block, dict) and block.get("type") == "tool_result"
     ]
     assert results == ["[output]\nran it"]
+    # The call as history stores it says what ran: cowork-server rebuilds an
+    # earlier turn's cells from these rows and counts only `exec` steps.
+    calls = [
+        block["input"]
+        for message in session.history if message["role"] == "assistant" and isinstance(message["content"], list)
+        for block in message["content"] if isinstance(block, dict) and block.get("type") == "tool_use"
+    ]
+    assert calls == [{"name": "main", "code": "print(1)", "action": "exec"}]
 
 
 async def test_handle_scratchpad_runs_a_call_with_code_and_no_action_as_exec(monkeypatch):

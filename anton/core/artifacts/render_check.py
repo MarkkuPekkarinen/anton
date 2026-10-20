@@ -2,8 +2,9 @@
 
 The service runs headless Chromium in its own container and loads the page
 inside a sandboxed srcdoc frame under the preview's content security policy,
-at a desktop and a phone width (cowork-self-hosted `render-check/`). anton
-sends the page's text and reads back a verdict. Nothing runs in this process
+at a desktop and a phone width. A deployment that runs agent code in a
+sandbox runs it beside anton. anton sends the page's text and reads back a
+verdict. Nothing runs in this process
 and nothing of this process's environment is sent, so the check works where
 agent code runs in a sandbox and no local browser may start.
 

@@ -7,7 +7,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, NamedTuple
 
 from anton.core.backends.base import Cell
 from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
@@ -28,7 +28,6 @@ from anton.core.utils.scratchpad import (
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
-    from anton.core.artifacts.models import Artifact
     from anton.core.artifacts.render_check import RenderScreenshot, RenderStatus
 
 
@@ -195,6 +194,14 @@ _SANDBOX_BROWSER_SKIP = (
 _SANDBOX_OFFICE_SKIP = "LibreOffice check skipped: agent code runs in a sandbox on this deployment"
 
 
+class PageKey(NamedTuple):
+    """One page of one artifact: its slug and its path inside the artifact
+    folder (`index.html`, `static/index.html`)."""
+
+    slug: str
+    page: str
+
+
 @dataclass(frozen=True)
 class ArtifactLint:
     """What the checks after one cell found in the artifacts it changed."""
@@ -205,9 +212,8 @@ class ArtifactLint:
     # and that page's `<slug>/<file>`.
     screenshot: "RenderScreenshot | None" = None
     screenshot_page: str = ""
-    # slug -> how its pages fared in a browser: `failed` if any page failed,
-    # else `unverified` if any page went unchecked, else `passed`.
-    page_checks: dict[str, "RenderStatus"] = field(default_factory=dict)
+    # How each page this cell checked fared in a browser.
+    page_checks: "dict[PageKey, RenderStatus]" = field(default_factory=dict)
 
 
 _STATUS_RANK = {"passed": 0, "unverified": 1, "failed": 2}
@@ -309,25 +315,19 @@ class _ChangedPage:
     path: Path
     # The file itself is newer than the artifact was before the cell.
     edited: bool
+    size: int
+
+    def key(self, store) -> PageKey:
+        return PageKey(slug=self.slug, page=self.path.relative_to(store.root / self.slug).as_posix())
 
 
-def _read_metadata(folder: Path) -> "Artifact | None":
-    """The artifact's metadata, or None when it is missing or does not parse.
+def _primary_name(store, slug: str) -> str | None:
+    """The artifact's primary file as its metadata names it, or None.
 
-    Read directly: `ArtifactStore.open` reconciles the file list and may
+    `read_metadata`, not `open`: `open` reconciles the file list and may
     rewrite the metadata, which a check must not do.
     """
-    from anton.core.artifacts.models import Artifact
-
-    try:
-        return Artifact.model_validate_json((folder / "metadata.json").read_bytes())
-    except (OSError, ValueError):
-        return None
-
-
-def _primary_name(folder: Path) -> str | None:
-    """The artifact's primary file as its metadata names it, or None."""
-    metadata = _read_metadata(folder)
+    metadata = store.read_metadata(slug)
     return metadata.primary if metadata is not None else None
 
 
@@ -342,14 +342,16 @@ def _check_pages(
     every page of a changed artifact (`lint_html`), and a sandbox policy,
     which starts no browser, says so on each page.
 
-    A page the service cannot vouch for, or that the budget leaves out, gets
-    a line saying it was not checked in a browser and why: never silence.
+    Every page checked gets a line: its findings, that it passed, or that it
+    was not checked in a browser and why (no browser here, a sandbox, the
+    service could not vouch for it, the budget ran out, the page is too
+    large). Silence never stands for a pass.
     """
     from anton.core.artifacts import render_check
-    from anton.core.artifacts.html_lint import lint_html
+    from anton.core.artifacts.html_lint import discover_browser, lint_html
 
     messages: list[str] = []
-    page_checks: dict[str, "RenderStatus"] = {}
+    page_checks: "dict[PageKey, RenderStatus]" = {}
     screenshot = None
     screenshot_page = ""
 
@@ -358,20 +360,33 @@ def _check_pages(
             label = f"{page.slug}/{page.path.name}"
             if cell_sandbox is not None:
                 messages.append(f"{label} — {_SANDBOX_BROWSER_SKIP}")
-                page_checks[page.slug] = _worse(page_checks.get(page.slug), "unverified")
+                page_checks[page.key(store)] = "unverified"
+                continue
+            if page.size > _ARTIFACT_LINT_SIZE_CEILING:
+                messages.append(
+                    f"{label} — not checked in a browser: the page is over "
+                    f"{_ARTIFACT_LINT_SIZE_CEILING // (1024 * 1024)} MB"
+                )
+                page_checks[page.key(store)] = "unverified"
                 continue
             findings = lint_html(page.path, cell_sandbox=None)
             if findings is None:
-                # No browser here (the cloud, a bare CLI): nothing to say.
-                page_checks[page.slug] = _worse(page_checks.get(page.slug), "unverified")
+                reason = (
+                    "no browser on this deployment" if discover_browser() is None
+                    else "the local browser check gave no answer"
+                )
+                messages.append(f"{label} — not checked in a browser: {reason}")
+                page_checks[page.key(store)] = "unverified"
                 continue
-            messages += [f"{label} — {f.message()}" for f in findings]
-            status = "failed" if findings else "passed"
-            page_checks[page.slug] = _worse(page_checks.get(page.slug), status)
+            if findings:
+                messages += [f"{label} — {f.message()}" for f in findings]
+            else:
+                messages.append(f"{label} — loaded in a local browser from disk: no problems found")
+            page_checks[page.key(store)] = "failed" if findings else "passed"
         return ArtifactLint(messages=messages, page_checks=page_checks)
 
     edited = [page for page in pages if page.edited]
-    primaries = {page.slug: _primary_name(store.root / page.slug) for page in edited}
+    primaries = {page.slug: _primary_name(store, page.slug) for page in edited}
 
     def _order(page: _ChangedPage) -> tuple:
         rel = page.path.relative_to(store.root / page.slug).as_posix()
@@ -390,7 +405,7 @@ def _check_pages(
                 page.path, cell_sandbox=cell_sandbox, screenshot=screenshot is None,
                 timeout=min(render_check.TIMEOUT_SECONDS, remaining),
             )
-        page_checks[page.slug] = _worse(page_checks.get(page.slug), outcome.status)
+        page_checks[page.key(store)] = outcome.status
         if outcome.screenshot is not None and screenshot is None:
             screenshot, screenshot_page = outcome.screenshot, label
         if outcome.status == "unverified":
@@ -398,10 +413,10 @@ def _check_pages(
         elif outcome.status == "passed":
             messages.append(f"{label} — loaded in a browser the way the app preview loads it: no problems found")
         else:
-            messages += [
-                f"{label} — {group.kind} ({group.viewports}): {group.detail}"
-                for group in render_check.grouped_findings(outcome.findings)
-            ]
+            grouped = render_check.grouped_findings(outcome.findings)
+            messages += [f"{label} — {group.kind} ({group.viewports}): {group.detail}" for group in grouped.shown]
+            if grouped.more:
+                messages.append(f"{label} — and {grouped.more} more distinct findings, not listed")
     return ArtifactLint(
         messages=messages, screenshot=screenshot, screenshot_page=screenshot_page, page_checks=page_checks
     )
@@ -432,10 +447,12 @@ def lint_changed_artifact_files(
 
         artifact_dir = store.root / slug
         for path, st in iter_content_files(artifact_dir):
-            if st.st_size > _ARTIFACT_LINT_SIZE_CEILING:
-                continue
             if path.suffix.lower() == ".html":
-                pages.append(_ChangedPage(slug=slug, path=path, edited=st.st_mtime > prev_mtime))
+                # Whatever its size: `_check_pages` says why a page too large
+                # to check was not checked.
+                pages.append(_ChangedPage(slug=slug, path=path, edited=st.st_mtime > prev_mtime, size=st.st_size))
+                continue
+            if st.st_size > _ARTIFACT_LINT_SIZE_CEILING:
                 continue
             linter = linters.get(path.suffix.lower())
             if linter is None:
@@ -457,26 +474,32 @@ def lint_changed_artifact_files(
     )
 
 
-def record_page_checks(session: "ChatSession", checks: "dict[str, RenderStatus]") -> None:
-    """Remember, for this turn, how each artifact's page last fared in a browser.
+def record_page_checks(session: "ChatSession", checks: "dict[PageKey, RenderStatus]") -> None:
+    """Remember, for this turn, how each page last fared in a browser.
 
-    The session reads it when the turn ends (`ChatSession._unverified_page_lines`).
-    Best-effort, like `_track_artifact`: a session without the record (a test
-    double) loses nothing else.
+    Per page: a check of one page replaces that page's earlier result and
+    never another page's. The session reads it when the turn ends
+    (`ChatSession._unverified_page_lines`). Best-effort, like
+    `_track_artifact`: a session without the record (a test double) loses
+    nothing else.
     """
     record = getattr(session, "_page_checks", None)
     if isinstance(record, dict):
         record.update(checks)
 
 
-def page_check_lines(store, checks: "dict[str, RenderStatus]") -> list[str]:
-    """One line for each artifact whose page did not pass its last browser
-    check, naming the artifact, for the end of the agent's final message."""
+def page_check_lines(store, checks: "dict[PageKey, RenderStatus]") -> list[str]:
+    """One line for each artifact with a page that did not pass its last
+    browser check, naming the artifact, for the end of the agent's final
+    message. A failed page wins over an unverified one."""
+    by_slug: "dict[str, RenderStatus]" = {}
+    for key, status in checks.items():
+        by_slug[key.slug] = _worse(by_slug.get(key.slug), status)
     lines: list[str] = []
-    for slug, status in checks.items():
+    for slug, status in by_slug.items():
         if status == "passed":
             continue
-        metadata = _read_metadata(store.root / slug) if store is not None else None
+        metadata = store.read_metadata(slug) if store is not None else None
         name = metadata.name if metadata is not None and metadata.name.strip() else slug
         if status == "failed":
             lines.append(f"“{name}” failed the browser check, so it may not display correctly in the preview.")

@@ -33,13 +33,18 @@ is dropped with the reason, for both kinds of file.
 
 from __future__ import annotations
 
+import base64
 import mimetypes
+import os
+import re
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 from anton.core.tools import file_access
+from anton.utils.nofollow import read_bytes_nofollow
 
 if TYPE_CHECKING:
     from anton.core.backends.sandbox import CellSandbox
@@ -223,6 +228,58 @@ def stage_assets(attachments: list[Attachment], artifact_path: Path, *, static: 
     return written
 
 
+def embed_assets(
+    html: str, attachments: list[Attachment], artifact_path: Path, *, cell_sandbox: CellSandbox | None
+) -> str:
+    """`html` with each reference to a staged asset replaced by the asset
+    itself as a `data:` URI.
+
+    For the single-file page (html-app): the app preview shows only the page
+    itself, so a file next to it never loads there (the render check fails
+    the page for asking for one). The generator still writes the relative
+    name it was given and never touches the bytes; this puts them in. A
+    reference is the name, or `./` and the name, as a quoted value
+    (`src="logo.png"`, `'logo.png'` in a script), an unquoted attribute value
+    or a CSS `url(...)`. A name inside other text is left as it is.
+
+    The staged copy sits where agent code can write, and its bytes end up in
+    a page the agent can read, so under a policy it is read only where the
+    person's cells may read, and through `read_bytes_nofollow`: a link
+    swapped in for the copy is refused, never followed. A copy that cannot be
+    read that way stays a reference.
+    """
+    for att in attachments:
+        if att.kind != KIND_ASSET or not att.staged:
+            continue
+        names = "|".join(re.escape(n) for n in dict.fromkeys((att.staged, quote(att.staged))))
+        pattern = re.compile(
+            rf"""(?P<q>["'])(?:\./)?(?:{names})(?P=q)"""
+            rf"""|(?P<eq>=)(?:\./)?(?:{names})(?=[\s>])"""
+            rf"""|(?P<url>url\(\s*)(?:\./)?(?:{names})(?P<close>\s*\))"""
+        )
+        if pattern.search(html) is None:
+            continue
+        try:
+            real = Path(os.path.realpath(artifact_path / att.staged))
+            if cell_sandbox is not None and not cell_sandbox.allows_read(real):
+                continue
+            raw = read_bytes_nofollow(real.anchor, real, limit=ASSET_MAX_BYTES)
+        except OSError:
+            continue
+        mime = mimetypes.guess_type(att.name)[0] or "application/octet-stream"
+        uri = f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
+
+        def _embedded(m: re.Match[str], uri: str = uri) -> str:
+            if m["q"]:
+                return f"{m['q']}{uri}{m['q']}"
+            if m["eq"]:
+                return f'="{uri}"'
+            return f"{m['url']}{uri}{m['close']}"
+
+        html = pattern.sub(_embedded, html)
+    return html
+
+
 def _human_size(n: int) -> str:
     if n < 1024:
         return f"{n} B"
@@ -284,6 +341,6 @@ def render_for_generation(attachments: list[Attachment]) -> str:
 __all__ = [
     "ASSET_MAX_BYTES", "ATTACHMENTS_HEADER", "Attachment", "DATA_SUFFIXES",
     "KIND_ASSET", "KIND_DATA", "REFUSED_HIDDEN", "REFUSED_OUTSIDE",
-    "UPLOAD_ROOTS_IN_WORKSPACE", "refusal_reason", "render_for_gathering",
+    "UPLOAD_ROOTS_IN_WORKSPACE", "embed_assets", "refusal_reason", "render_for_gathering",
     "render_for_generation", "resolve_attachments", "stage_assets",
 ]

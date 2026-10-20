@@ -124,6 +124,7 @@ from anton.core.tools.tool_handlers import (
     _fire_pre_execute,
     cell_content_with_lint,
     check_cell_artifacts,
+    PageKey,
     page_check_lines,
     preliminary_cell,
     resolve_artifact_store,
@@ -2059,11 +2060,12 @@ class ChatSession:
         # project-wide) directory can never be mistaken for this turn's work.
         # Reset at the top of every turn.
         self._artifacts_touched: set[str] = set()
-        # slug -> how that artifact's page last fared in a browser this turn
-        # (`passed`, `failed` or `unverified`), from generate_artifact and the
-        # checks after each cell. On a sandboxed deployment the turn ends
-        # with a line for each page that did not pass. Reset every turn.
-        self._page_checks: dict[str, RenderStatus] = {}
+        # (artifact slug, page) -> how that page last fared in a browser this
+        # turn (`passed`, `failed` or `unverified`), from generate_artifact
+        # and the checks after each cell. On a sandboxed deployment the turn
+        # ends with a line for each artifact with a page that did not pass.
+        # Reset every turn.
+        self._page_checks: dict[PageKey, RenderStatus] = {}
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
         # call at end-of-turn, and encodes lessons via cortex.encode(),
@@ -2207,9 +2209,9 @@ class ChatSession:
 
     def _unverified_page_lines(self) -> list[str]:
         """The lines that end the turn's final message on a sandboxed
-        deployment: one per artifact whose page did not pass its last browser
-        check this turn. Written by anton, not the model, so the user hears it
-        whatever the reply claims. Empty without a sandbox: there the local
+        deployment: one per artifact with a page that did not pass its last
+        browser check this turn. Written by anton, not the model, so the user
+        hears it whatever the reply claims. Empty without a sandbox: there the local
         browser check (`tool_handlers._check_pages`) reports to the agent
         after every edit and no service is involved."""
         if not self._page_checks or cell_sandbox_of(self._scratchpads) is None:

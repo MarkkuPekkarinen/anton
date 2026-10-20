@@ -23,6 +23,7 @@ from anton.core.artifacts.internal_files import (
 from anton.core.artifacts.store import BACKEND_LOG_FILENAME
 from anton.core.backends.sandbox import BACKENDS_OFF_MESSAGE, CellSandbox, cell_sandbox_of
 from anton.utils.datasources import scrub_output
+from anton.utils.nofollow import read_text_nofollow, write_text_nofollow
 
 from . import attachments, engine, prompts, verifiers
 from .discovery import checkpoint as cp
@@ -783,6 +784,8 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
 
         state.step_started("verify_frontend", attempt=attempt)
         entry_file = _frontend_entry(state, result["files_written"])
+        if entry_file is not None and not state.is_fullstack:
+            _embed_attachments(state, entry_file)
         if entry_file is None:
             # One channel: this message rides on VerifyResult like every other
             # check — otherwise the contract lock cannot see it and the terminal
@@ -1128,6 +1131,27 @@ def _stage_attachments(state: GenState) -> None:
             "stage_attachments", "done" if written else "skipped",
             "; ".join([*written, *skipped]),
         )
+
+
+def _embed_attachments(state: GenState, entry_file: Path) -> None:
+    """Put each staged asset the html-app page references into the page as a
+    `data:` URI (`attachments.embed_assets`), before the page is verified:
+    the app preview shows only the page itself, never a file next to it.
+    The fullstack frontend keeps its references: its backend serves
+    `static/`. The page is read and rewritten refusing a link below the
+    artifact folder, since agent code can write there. A page that cannot be
+    rewritten keeps its references, which the checks then report."""
+    if not state.attachments:
+        return
+    try:
+        html = read_text_nofollow(state.artifact_path, entry_file)
+        embedded = attachments.embed_assets(
+            html, state.attachments, state.artifact_path, cell_sandbox=_cell_sandbox(state)
+        )
+        if embedded != html:
+            write_text_nofollow(state.artifact_path, entry_file, embedded)
+    except (OSError, ValueError):
+        state.trace_log.node("verify_frontend", "embed_skipped", "the page could not be rewritten")
 
 
 def _note_skipped(state: GenState, text: str) -> None:

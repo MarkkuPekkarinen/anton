@@ -607,7 +607,7 @@ def test_a_page_the_sandbox_cannot_load_says_so_even_with_no_browser_installed(t
     lint = tool_handlers.lint_changed_artifact_files(store, before, cell_sandbox=policy)
     assert lint.messages == [f"page/page.html — {tool_handlers._SANDBOX_BROWSER_SKIP}"]
     assert tool_handlers._SANDBOX_BROWSER_SKIP.startswith("not checked in a browser: ")
-    assert lint.page_checks == {"page": "unverified"}
+    assert lint.page_checks == {("page", "page.html"): "unverified"}
 
 
 def test_the_generator_skips_its_browser_check_and_says_why():

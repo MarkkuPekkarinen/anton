@@ -57,6 +57,8 @@ class _Service:
         # Each answer: (HTTP status, body bytes, delay in seconds). The last
         # one repeats once the list runs out.
         self.answers: list[tuple[int, bytes, float]] = [(200, json.dumps(_answer()).encode(), 0.0)]
+        # When set, answers each request from its JSON body instead.
+        self.respond = None
 
     def answer(self, *answers) -> None:
         self.answers = [
@@ -78,14 +80,21 @@ def service(monkeypatch):
                 "content_type": self.headers.get("Content-Type"),
                 "body": json.loads(raw),
             })
-            code, body, delay = state.answers.pop(0) if len(state.answers) > 1 else state.answers[0]
+            if state.respond is not None:
+                code, body, delay = state.respond(state.requests[-1]["body"])
+                body = body if isinstance(body, bytes) else json.dumps(body).encode()
+            else:
+                code, body, delay = state.answers.pop(0) if len(state.answers) > 1 else state.answers[0]
             if delay:
                 time.sleep(delay)
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # the client stopped reading an answer over its cap
 
         def log_message(self, *args):  # keep pytest output clean
             pass
@@ -278,6 +287,144 @@ def test_check_file_never_follows_a_link_out_of_the_persons_files(service, tmp_p
     assert service.requests == []
 
 
+def _swap_after_the_check(monkeypatch, swap) -> None:
+    """Run `swap` right after the policy approves a path: agent code racing
+    the host between the check and the read."""
+    approve = CellSandbox.allows_read
+
+    def racing(self, path):
+        allowed = approve(self, path)
+        swap()
+        return allowed
+
+    monkeypatch.setattr(CellSandbox, "allows_read", racing)
+
+
+def test_a_link_swapped_in_after_the_check_is_not_followed(service, tmp_path, project, policy, monkeypatch):
+    """The page was checked by name and then read by name, so a thread in
+    the agent's kernel that swaps the page for a link between the two had
+    the host read the link's target and send it to the service."""
+    secret = tmp_path / "other-person.html"
+    secret.write_text("<html><body>someone else's data</body></html>")
+    page = project / "index.html"
+    page.write_text(_PAGE)
+
+    def swap():
+        link = project / "swap.tmp"
+        os.symlink(secret, link)
+        os.replace(link, page)
+
+    _swap_after_the_check(monkeypatch, swap)
+    result = check_file(page, cell_sandbox=policy)
+
+    assert result.status == "unverified"
+    assert service.requests == []
+
+
+def test_a_folder_swapped_for_a_link_after_the_check_is_not_followed(service, tmp_path, project, policy, monkeypatch):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "index.html").write_text("<html><body>someone else's data</body></html>")
+    site = project / "site"
+    site.mkdir()
+    (site / "index.html").write_text(_PAGE)
+
+    def swap():
+        os.rename(site, project / "site-old")
+        os.symlink(elsewhere, site)
+
+    _swap_after_the_check(monkeypatch, swap)
+    result = check_file(site / "index.html", cell_sandbox=policy)
+
+    assert result.status == "unverified"
+    assert service.requests == []
+
+
+def test_a_hard_link_to_another_persons_file_is_not_read(service, tmp_path, project, policy):
+    """A hard link is another name for the same file: its resolved path
+    sits in the project, but its bytes are someone else's."""
+    secret = tmp_path / "other-person.html"
+    secret.write_text("<html><body>someone else's data</body></html>")
+    page = project / "index.html"
+    os.link(secret, page)
+
+    result = check_file(page, cell_sandbox=policy)
+
+    assert result.status == "unverified"
+    assert service.requests == []
+
+
+def test_a_fifo_at_the_name_neither_hangs_nor_is_sent(service, project, policy):
+    """Reading a FIFO with no writer never returns, which held the cell and
+    a thread of the server forever."""
+    page = project / "index.html"
+    os.mkfifo(page)
+    outcome: list = []
+    worker = threading.Thread(target=lambda: outcome.append(check_file(page, cell_sandbox=policy)), daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), "check_file hung on a FIFO"
+    assert outcome[0].status == "unverified"
+    assert outcome[0].unverified_reason == "the page could not be read (refused a file that is not a regular file)"
+    assert service.requests == []
+
+
+def test_a_name_that_cannot_be_resolved_is_unverified_not_raised(service, project, policy, monkeypatch):
+    """Resolving a name agent code is swapping can raise (macOS: EINVAL
+    from readlink); `check_file` never raises."""
+    def failing(path):
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(render_check.os.path, "realpath", failing)
+    result = check_file(project / "index.html", cell_sandbox=policy)
+    assert result.status == "unverified"
+    assert result.unverified_reason == "the page could not be read (Invalid argument)"
+    assert service.requests == []
+
+def test_an_answer_over_the_response_cap_is_unverified(service):
+    """anton used to read the whole answer, whatever its size, into a
+    process every person on the server shares."""
+    detail = "x" * (64 * 1024)
+    service.answer((200, _answer("failed", findings=[
+        {"kind": "console_error", "viewport": "desktop", "detail": f"{i} {detail}"} for i in range(80)
+    ]), 0.0))
+
+    result = check_html(_PAGE)
+
+    assert isinstance(result, RenderCheckUnavailable)
+    assert result.reason == "the render check's answer is over 4 MB, more than anton reads"
+
+
+def _flood(count: int) -> dict:
+    """A page that logs one error per data row."""
+    return _answer("failed", findings=[
+        {"kind": "console_error", "viewport": "desktop", "detail": f"missing value for row {i}"} for i in range(count)
+    ])
+
+
+def test_a_page_with_thousands_of_findings_reaches_the_agent_bounded(service, tmp_path):
+    """Every distinct finding used to become a line of the cell's result and
+    a verifier error of the retry prompt: 10,000 rows, 10,000 lines."""
+    service.answer((200, _flood(10_000), 0.0))
+    store, slug = _artifact_with_pages(tmp_path, "index.html")
+
+    lint = tool_handlers.lint_changed_artifact_files(store, {slug: 0.0})
+
+    shown = render_check.MAX_FINDINGS_SHOWN
+    assert len(lint.messages) == shown + 1
+    assert lint.messages[0] == f"{slug}/index.html — console_error (desktop): missing value for row 0"
+    assert lint.messages[-1] == f"{slug}/index.html — and {10_000 - shown} more distinct findings, not listed"
+
+    check = verifiers.verify_frontend_live(store.root / slug / "index.html", cell_sandbox=None)
+    assert check.status == "failed"
+    assert len(check.verdict.errors) == shown + 1
+    assert check.verdict.errors[-1] == (
+        f"Loaded in a headless browser, the page had {10_000 - shown} more distinct problems, "
+        "not listed here: fix the ones above first."
+    )
+
+
 def test_the_url_never_reaches_agent_code(policy, monkeypatch):
     """The service holds no secret, but its address is the server's to use:
     a cell has no business calling it."""
@@ -400,6 +547,85 @@ async def test_an_unverified_page_passes_the_step_and_says_why(service, project,
     assert orchestrator._result_shell(st)["verified_in_browser"] is False
 
 
+async def test_an_attached_image_is_embedded_so_the_page_passes(service, project, policy, monkeypatch):
+    """An html-app with an attached logo: the generator writes
+    `<img src="logo.png">` as told, and the preview never serves a file next
+    to the page. The pipeline embeds the bytes before the check, so the
+    check passes on the first attempt instead of failing every retry."""
+    from anton.core.tools.generate_artifact import attachments as att_mod
+
+    upload = project / "upload" / "logo.png"
+    upload.parent.mkdir()
+    upload.write_bytes(b"\x89PNG fake logo")
+    st = _gen_state(project, policy)
+    st.attachments = [att_mod.Attachment(path=str(upload), name="logo.png", size=15, kind=att_mod.KIND_ASSET)]
+    orchestrator._stage_attachments(st)
+    page = _PAGE.replace("<div", '<img src="logo.png" alt="logo"><div')
+
+    kickoffs: list[str] = []
+
+    async def fake_loop(**kw):
+        kickoffs.append(kw["kickoff"])
+        (project / "index.html").write_text(page)
+        return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
+
+    def respond(body):
+        if 'src="logo.png"' in body["html"]:
+            return 200, _answer("failed", findings=[
+                {"kind": "separate_file", "viewport": "desktop", "detail": "logo.png"},
+            ]), 0.0
+        return 200, _answer("passed"), 0.0
+
+    monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
+    service.respond = respond
+
+    assert await orchestrator._gen_verify_frontend(st) is None
+
+    assert len(kickoffs) == 1
+    assert st.browser_status == "passed"
+    sent = service.requests[0]["body"]["html"]
+    assert 'src="data:image/png;base64,' + base64.b64encode(b"\x89PNG fake logo").decode() + '"' in sent
+    assert (project / "index.html").read_text() == sent
+
+
+def test_embedding_reads_no_link_out_of_the_persons_files(tmp_path, project, policy):
+    """The staged copy sits where agent code writes, and its bytes land in a
+    page the agent reads back: a link put there must not carry another
+    person's file into the page."""
+    from anton.core.tools.generate_artifact import attachments as att_mod
+
+    secret = tmp_path / "other-person.png"
+    secret.write_bytes(b"someone else's file")
+    os.symlink(secret, project / "logo.png")
+    att = att_mod.Attachment(path="x", name="logo.png", size=1, kind=att_mod.KIND_ASSET, staged="logo.png")
+    html = '<img src="logo.png">'
+
+    assert att_mod.embed_assets(html, [att], project, cell_sandbox=policy) == html
+
+
+def test_embedding_covers_the_reference_shapes_and_leaves_text_alone(tmp_path):
+    from anton.core.tools.generate_artifact import attachments as att_mod
+
+    (tmp_path / "logo.png").write_bytes(b"png")
+    (tmp_path / "font.woff2").write_bytes(b"font")
+    atts = [
+        att_mod.Attachment(path="x", name="logo.png", size=3, kind=att_mod.KIND_ASSET, staged="logo.png"),
+        att_mod.Attachment(path="y", name="font.woff2", size=4, kind=att_mod.KIND_ASSET, staged="font.woff2"),
+    ]
+    png = "data:image/png;base64," + base64.b64encode(b"png").decode()
+    html = (
+        "<img src=\"logo.png\"><img src='./logo.png'><img src=logo.png>"
+        "<style>@font-face{src:url(font.woff2)} .a{background:url( './logo.png' )}</style>"
+        "<script>img.src = 'logo.png'</script><p>see logo.png</p>"
+    )
+
+    out = att_mod.embed_assets(html, atts, tmp_path, cell_sandbox=None)
+
+    assert out.count(png) == 5
+    assert "src:url(data:font/woff2;base64," + base64.b64encode(b"font").decode() + ")" in out
+    assert "<p>see logo.png</p>" in out
+
+
 async def test_the_browser_line_shows_only_where_a_browser_will_load_the_page(project, policy, monkeypatch):
     """`Loading the page in a browser` claims a browser: under a sandbox with
     no service none runs, so the line must not appear."""
@@ -434,13 +660,19 @@ async def test_generate_records_how_it_left_the_page(tmp_path, monkeypatch):
     from anton.core.tools.generate_artifact import engine
 
     session = SimpleNamespace(_page_checks={})
-    st = SimpleNamespace(slug="dash", browser_status=None, files_written=["index.html"])
+    st = SimpleNamespace(
+        slug="dash", browser_status=None, files_written=["index.html"], is_fullstack=False, primary="index.html",
+    )
     engine._record_page_check(session, st, "Frontend verification failed after 2 attempt(s): x")
-    assert session._page_checks == {"dash": "unverified"}
+    assert session._page_checks == {("dash", "index.html"): "unverified"}
 
     st.browser_status = "failed"
     engine._record_page_check(session, st, "Frontend verification failed after 2 attempt(s): x")
-    assert session._page_checks == {"dash": "failed"}
+    assert session._page_checks == {("dash", "index.html"): "failed"}
+
+    st.is_fullstack, st.browser_status = True, "passed"
+    engine._record_page_check(session, st, {"status": "generated"})
+    assert session._page_checks[("dash", "static/index.html")] == "passed"
 
     session._page_checks.clear()
     engine._record_page_check(session, st, {"status": "needs_confirmation"})
@@ -538,7 +770,7 @@ def test_only_edited_pages_are_sent_primary_first_with_one_screenshot(service, t
     assert [b["html"] for b in sent] == [_PAGE.replace("hi", "z.html"), _PAGE.replace("hi", "a.html")]
     assert [b["screenshot"] for b in sent] == [True, False]
     assert lint.screenshot is not None and lint.screenshot_page == f"{slug}/z.html"
-    assert lint.page_checks == {slug: "passed"}
+    assert lint.page_checks == {(slug, "z.html"): "passed", (slug, "a.html"): "passed"}
     assert lint.messages == [
         f"{slug}/z.html — loaded in a browser the way the app preview loads it: no problems found",
         f"{slug}/a.html — loaded in a browser the way the app preview loads it: no problems found",
@@ -556,7 +788,7 @@ def test_a_failed_page_lists_its_findings_and_wins_over_a_passed_one(service, tm
     )
     lint = tool_handlers.lint_changed_artifact_files(store, {slug: 0.0})
     assert lint.messages[0] == f"{slug}/index.html — separate_file (desktop and phone): data.js"
-    assert lint.page_checks == {slug: "failed"}
+    assert lint.page_checks == {(slug, "index.html"): "failed", (slug, "b.html"): "passed"}
 
 
 def test_a_check_that_cannot_run_says_so_instead_of_nothing(service, project, policy):
@@ -566,7 +798,7 @@ def test_a_check_that_cannot_run_says_so_instead_of_nothing(service, project, po
     assert lint.messages == [
         f"{slug}/index.html — not checked in a browser: the render-check service is busy or not ready (HTTP 503)"
     ]
-    assert lint.page_checks == {slug: "unverified"}
+    assert lint.page_checks == {(slug, "index.html"): "unverified"}
     assert lint.screenshot is None
 
 
@@ -582,7 +814,7 @@ def test_pages_past_the_cell_budget_are_named_as_not_checked(service, tmp_path, 
     assert lint.messages[-1] == (
         f"{slug}/b.html — not checked in a browser: the browser checks after this cell ran out of time before this page"
     )
-    assert lint.page_checks == {slug: "unverified"}
+    assert lint.page_checks == {(slug, "index.html"): "passed", (slug, "b.html"): "unverified"}
 
 
 def test_the_screenshot_rides_a_successful_cell_only(tmp_path):
@@ -598,22 +830,58 @@ def test_the_screenshot_rides_a_successful_cell_only(tmp_path):
     assert failed == "[error]\nboom\n\n[artifact lint]\ndash/index.html — ok"
 
 
-def test_the_record_keeps_each_artifacts_latest_check(tmp_path):
-    session = SimpleNamespace(_page_checks={"a": "passed"})
-    tool_handlers.record_page_checks(session, {"a": "unverified", "b": "passed"})
-    assert session._page_checks == {"a": "unverified", "b": "passed"}
+def test_the_record_keeps_each_pages_latest_check(tmp_path):
+    key = tool_handlers.PageKey
+    session = SimpleNamespace(_page_checks={key("a", "index.html"): "passed"})
+    tool_handlers.record_page_checks(session, {key("a", "index.html"): "unverified", key("b", "index.html"): "passed"})
+    assert session._page_checks == {key("a", "index.html"): "unverified", key("b", "index.html"): "passed"}
     # A session without the record (a test double) is left alone.
-    tool_handlers.record_page_checks(SimpleNamespace(), {"a": "failed"})
+    tool_handlers.record_page_checks(SimpleNamespace(), {key("a", "index.html"): "failed"})
 
 
-def test_page_lines_name_each_page_that_did_not_pass(tmp_path):
+def test_page_lines_name_each_artifact_with_a_page_that_did_not_pass(tmp_path):
     store = ArtifactStore(tmp_path / "artifacts")
     shipped = store.create(name="Shipments map", description="d", type="html-app").slug
     broken = store.create(name="Sales globe", description="d", type="html-app").slug
-    lines = tool_handlers.page_check_lines(store, {shipped: "unverified", broken: "failed", "ok": "passed"})
+    key = tool_handlers.PageKey
+    lines = tool_handlers.page_check_lines(store, {
+        key(shipped, "index.html"): "unverified",
+        key(broken, "index.html"): "failed",
+        key(broken, "details.html"): "passed",
+        key("ok", "index.html"): "passed",
+    })
     assert lines == [
         "“Shipments map” was not verified in a browser, so it may not display correctly in the preview.",
         "“Sales globe” failed the browser check, so it may not display correctly in the preview.",
+    ]
+
+
+def test_a_later_pass_of_another_page_keeps_the_failed_one(service, tmp_path):
+    """Two cells, two pages of one artifact: the first cell's failed
+    index.html stays failed when the second cell edits only details.html and
+    it passes. One record per artifact let that pass hide the failure the
+    preview still shows."""
+    store, slug = _artifact_with_pages(tmp_path, "index.html", "details.html")
+    index, details = store.root / slug / "index.html", store.root / slug / "details.html"
+    os.utime(details, (1, 1))
+    session = SimpleNamespace(_page_checks={})
+    service.answer(
+        (200, _answer("failed", findings=[
+            {"kind": "csp_violation", "viewport": "desktop", "detail": "style-src blocked leaflet.css"},
+        ]), 0.0),
+        (200, _answer("passed"), 0.0),
+    )
+
+    before = {slug: 10.0}
+    tool_handlers.record_page_checks(session, tool_handlers.lint_changed_artifact_files(store, before).page_checks)
+    os.utime(index, (20, 20))
+    details.write_text(_PAGE)
+    before = {slug: 20.0}
+    tool_handlers.record_page_checks(session, tool_handlers.lint_changed_artifact_files(store, before).page_checks)
+
+    assert [r["body"]["html"] for r in service.requests] == [_PAGE.replace("hi", "index.html"), _PAGE]
+    assert tool_handlers.page_check_lines(store, session._page_checks) == [
+        "“Map” failed the browser check, so it may not display correctly in the preview."
     ]
 
 
@@ -761,7 +1029,7 @@ async def test_the_cell_result_carries_the_screenshot_on_the_streaming_path(serv
     )
     assert caption["text"].startswith(render_check.SCREENSHOT_CAPTION)
     assert image["source"]["data"] == _SHOT
-    assert session._page_checks == {slug: "passed"}
+    assert session._page_checks == {(slug, "index.html"): "passed"}
 
 
 async def test_two_cells_leave_one_screenshot_in_history(service, project):

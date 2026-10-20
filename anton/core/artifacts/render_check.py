@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import errno
 import logging
 import os
 import time
@@ -32,6 +33,7 @@ import httpx2 as httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from anton.utils.datasources import scrub_output
+from anton.utils.nofollow import read_bytes_nofollow
 
 if TYPE_CHECKING:
     from anton.core.backends.sandbox import CellSandbox
@@ -45,6 +47,15 @@ RENDER_CHECK_ENV_VAR = "ANTON_RENDER_CHECK_URL"
 TIMEOUT_SECONDS = 30.0
 # The service refuses a larger body with 413; anton does not send one.
 MAX_BODY_BYTES = 8 * 1024 * 1024
+# anton stops reading an answer at this size and counts the page unverified.
+# Room for the largest screenshot it keeps (`MAX_SCREENSHOT_BASE64_CHARS`)
+# and many findings; a page that logs without end cannot make this process
+# hold an answer of any size.
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+# At most this many distinct findings of one check reach the agent; the rest
+# are counted. A page that logs one error per data row would otherwise put
+# thousands of lines into one tool result, resent on every model call.
+MAX_FINDINGS_SHOWN = 20
 # A screenshot larger than this (base64 text) is not shown to the model. The
 # service sends a JPEG at most 1024 px wide, far below it; the cap keeps a
 # request with one screenshot well under the model route's 16 MB limit.
@@ -185,16 +196,25 @@ class FindingGroup(NamedTuple):
     viewports: str
 
 
-def grouped_findings(findings: Sequence[RenderFinding]) -> list[FindingGroup]:
+class GroupedFindings(NamedTuple):
+    """The distinct findings to show, and how many more were left out."""
+
+    shown: list[FindingGroup]
+    more: int
+
+
+def grouped_findings(findings: Sequence[RenderFinding]) -> GroupedFindings:
     """Each distinct finding once, in the order first seen, its detail scrubbed:
-    the same problem in both viewports is one problem to fix."""
+    the same problem in both viewports is one problem to fix. The first
+    `MAX_FINDINGS_SHOWN` are shown and the rest counted."""
     seen: dict[tuple[str, str], list[str]] = {}
     for f in findings:
         seen.setdefault((f.kind, scrub_output(f.detail)), []).append(f.viewport)
-    return [
+    groups = [
         FindingGroup(kind=kind, detail=detail, viewports=" and ".join(dict.fromkeys(viewports)))
         for (kind, detail), viewports in seen.items()
     ]
+    return GroupedFindings(shown=groups[:MAX_FINDINGS_SHOWN], more=max(len(groups) - MAX_FINDINGS_SHOWN, 0))
 
 
 def configured_url() -> str | None:
@@ -221,18 +241,26 @@ def check_html(html: str, *, screenshot: bool = True, timeout: float = TIMEOUT_S
         # trust_env=False: the service is a sibling container on an internal
         # network, never behind the egress proxy a deployment may set.
         with httpx.Client(timeout=timeout, trust_env=False) as client:
-            response = client.post(
-                f"{base}/v1/check", content=body, headers={"Content-Type": "application/json"}
-            )
+            with client.stream(
+                "POST", f"{base}/v1/check", content=body, headers={"Content-Type": "application/json"}
+            ) as response:
+                if response.status_code != 200:
+                    return RenderCheckUnavailable(reason=_status_reason(response.status_code))
+                content = bytearray()
+                for chunk in response.iter_bytes():
+                    content += chunk
+                    if len(content) > MAX_RESPONSE_BYTES:
+                        return RenderCheckUnavailable(
+                            reason="the render check's answer is over "
+                            f"{MAX_RESPONSE_BYTES // (1024 * 1024)} MB, more than anton reads"
+                        )
     except httpx.TimeoutException:
         return RenderCheckUnavailable(reason=f"the render check gave no answer within {timeout:.0f} s")
     except httpx.HTTPError as exc:
         _log.warning("render check at %s could not be reached", base, exc_info=True)
         return RenderCheckUnavailable(reason=f"the render-check service could not be reached ({type(exc).__name__})")
-    if response.status_code != 200:
-        return RenderCheckUnavailable(reason=_status_reason(response.status_code))
     try:
-        result = RenderCheckResult.model_validate_json(response.content)
+        result = RenderCheckResult.model_validate_json(bytes(content))
     except ValidationError:
         _log.warning("render check at %s answered a body that does not parse", base, exc_info=True)
         return RenderCheckUnavailable(reason="the render-check service answered something that does not parse")
@@ -247,23 +275,30 @@ def check_file(
     """Read the page at `path` and ask the service to load it. Never raises.
 
     This process reads the file outside the sandbox, so under a policy it
-    reads only what the person's own cells may read: a link that leads out of
-    their files is refused, not followed.
+    reads only what the person's own cells may read. `allows_read` approves
+    the page's resolved path, and `read_bytes_nofollow` then opens that path
+    one folder at a time with O_NOFOLLOW, so the file read is the one
+    approved: agent code that swaps a link in after the check makes the read
+    fail instead of leading it out of the person's files. The read also
+    refuses a FIFO, a device or a file with another hard link, and reads no
+    more than the service accepts.
     """
     started = time.monotonic()
     try:
+        # Inside the try: resolving a name that agent code is swapping can
+        # itself fail.
         real = Path(os.path.realpath(path))
         if cell_sandbox is not None and not cell_sandbox.allows_read(real):
             return RenderCheckUnavailable(reason="the page is outside the files this conversation may read")
-        if real.stat().st_size > MAX_BODY_BYTES:
+        data = read_bytes_nofollow(real.anchor, real, limit=MAX_BODY_BYTES)
+    except OSError as exc:
+        if exc.errno == errno.EFBIG:
             return RenderCheckUnavailable(
                 reason=f"the page is over the render check's {MAX_BODY_BYTES // (1024 * 1024)} MB limit"
             )
-        html = real.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        return RenderCheckUnavailable(reason=f"the page could not be read ({type(exc).__name__})")
+        return RenderCheckUnavailable(reason=f"the page could not be read ({exc.strerror or type(exc).__name__})")
     remaining = timeout - (time.monotonic() - started)
-    return check_html(html, screenshot=screenshot, timeout=max(remaining, 1.0))
+    return check_html(data.decode("utf-8", errors="replace"), screenshot=screenshot, timeout=max(remaining, 1.0))
 
 
 # Opens the caption beside every render screenshot in a tool result, so

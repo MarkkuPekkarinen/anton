@@ -225,15 +225,18 @@ Pages are still loaded in a browser under a policy when the host sets
 (`anton/core/artifacts/render_check.py`) runs Chromium in its own container
 and loads the page the way the app preview does, and only the page's text
 leaves this process. The server reads the page only where the person's own
-cells may read (`CellSandbox.allows_read`), and the variable is not on the
-cell environment's allowlist. `generate_artifact`'s browser step
+cells may read (`CellSandbox.allows_read`), and through
+`nofollow.read_bytes_nofollow`, so a link agent code swaps in after that
+check is refused, never followed. The variable is not on the cell
+environment's allowlist. `generate_artifact`'s browser step
 (`verify_frontend_live`) and the check after every scratchpad cell that
 changes an artifact's `.html` (`tool_handlers._check_pages`) both use it.
 Without the variable, `verify_frontend_live` reports the page as unverified
 and the cell's result says the page was not checked in a browser. Either
-way, a sandboxed turn whose page did not pass its last check ends with a
-line anton writes itself, naming the artifact
-(`ChatSession._unverified_page_lines`).
+way, a sandboxed turn with a page that did not pass its last check ends
+with a line anton writes itself, naming the artifact
+(`ChatSession._unverified_page_lines`). Each page keeps its own latest
+result, so a later pass of one page never clears another page's failure.
 
 `ScratchpadManager` refuses at construction a runtime factory that does not
 name a `cell_sandbox` parameter (a bare `**kwargs` is refused), and refuses

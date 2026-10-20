@@ -488,9 +488,13 @@ def _render_verdict(findings: list[RenderFinding]) -> VerifyResult:
     Every literal below is a `.append(...)` on purpose: the contract lock
     reads them from this file and requires each in the generator prompts.
     `timeout` never gets here: a check that ran out of time is unverified.
+    Past `render_check.MAX_FINDINGS_SHOWN` distinct findings, the rest are
+    counted in one line, so a page that logs one error per data row cannot
+    fill the retry prompt.
     """
     errors: list[str] = []
-    for kind, detail, where in render_check.grouped_findings(findings):
+    grouped = render_check.grouped_findings(findings)
+    for kind, detail, where in grouped.shown:
         if kind == "csp_violation":
             errors.append(
                 "Loaded in a headless browser, the page broke the app preview's content "
@@ -519,6 +523,11 @@ def _render_verdict(findings: list[RenderFinding]) -> VerifyResult:
             )
         elif kind == "crashed":
             errors.append("Loaded in a headless browser, the page crashed the renderer process.")
+    if grouped.more:
+        errors.append(
+            f"Loaded in a headless browser, the page had {grouped.more} more distinct problems, "
+            "not listed here: fix the ones above first."
+        )
     return VerifyResult(errors=errors)
 
 

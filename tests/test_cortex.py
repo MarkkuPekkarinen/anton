@@ -173,7 +173,7 @@ class TestGetScratchpadContext:
 
 class TestMemoryRead:
     """What the latest prompt and scratchpad description held from the learned
-    tiers, counted from the same reads as Engrams."""
+    tiers."""
 
     def test_none_before_the_memory_is_built(self, cortex):
         assert cortex.memory_read is None
@@ -193,13 +193,41 @@ class TestMemoryRead:
         )
         project_hc.encode_lesson("Scratchpad cells time out at 30s")
 
-        await cortex.build_memory_context()
+        # ChatSession builds its tools, and so the scratchpad description,
+        # before the system prompt.
         cortex.get_scratchpad_context()
+        await cortex.build_memory_context()
 
         assert cortex.memory_read == MemoryRead(
             learned=True, rules=2, lessons=3, profile_lines=2, scratchpad=2
         )
         assert cortex.memory_read.entries == 9
+
+    async def test_counts_only_the_rules_the_prompt_shows(self, cortex, dirs):
+        g, _ = dirs
+        (g / "rules.md").write_text("## Preferences\n- Prefer short answers\n\n## Always\n- Use httpx\n")
+
+        prompt = await cortex.build_memory_context()
+
+        assert "Use httpx" in prompt and "Prefer short answers" not in prompt
+        assert cortex.memory_read.rules == 1
+
+    async def test_counts_the_profile_lines_the_prompt_shows(self, cortex, dirs, monkeypatch):
+        g, _ = dirs
+        hc = Hippocampus(g)
+        hc.rewrite_identity(["Name: Ana"])
+        filter_rules = cortex._retrieve_relevant_rules
+
+        async def filter_while_another_turn_learns(engrams, user_message):
+            hc.rewrite_identity(["Name: Ana", "TZ: EST"])
+            return await filter_rules(engrams, user_message)
+
+        monkeypatch.setattr(cortex, "_retrieve_relevant_rules", filter_while_another_turn_learns)
+
+        prompt = await cortex.build_memory_context()
+
+        assert "Name: Ana" in prompt and "TZ: EST" not in prompt
+        assert cortex.memory_read.profile_lines == 1
 
     async def test_counts_only_the_lessons_the_budget_lets_in(self, cortex, dirs):
         g, _ = dirs
@@ -229,16 +257,18 @@ class TestMemoryRead:
         managed = tmp_path / "managed"
         managed.mkdir()
         Hippocampus(managed).encode_rule("Always cite the source", kind="always", confidence="high", source="user")
-        Hippocampus(managed).encode_lesson("Orders ship from Ottawa")
+        Hippocampus(managed).encode_lesson("Orders ship on Mondays")
+        Hippocampus(managed).encode_lesson("Scratchpad cells have pandas installed")
         cortex = Cortex(
             global_hc=Hippocampus(g), project_hc=Hippocampus(p), mode="copilot",
             managed_hc=Hippocampus(managed),
         )
 
         prompt = await cortex.build_memory_context()
-        cortex.get_scratchpad_context()
+        wisdom = cortex.get_scratchpad_context()
 
-        assert "Always cite the source" in prompt and "Orders ship from Ottawa" in prompt
+        assert "Always cite the source" in prompt and "Orders ship on Mondays" in prompt
+        assert "Scratchpad cells have pandas installed" in wisdom
         assert cortex.memory_read == MemoryRead(learned=True)
 
     @pytest.mark.parametrize("scope", ["off", "unavailable"])

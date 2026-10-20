@@ -49,6 +49,7 @@ async def test_memory_read_counts_the_memory_section_the_turn_built(tmp_path):
     global_dir, project_dir = tmp_path / "global", tmp_path / "project"
     Hippocampus(global_dir).encode_rule("Use httpx", kind="always", confidence="high", source="user")
     Hippocampus(project_dir).encode_lesson("Project fact")
+    Hippocampus(project_dir).encode_lesson("Scratchpad cells time out at 30s")
     cortex = Cortex(global_hc=Hippocampus(global_dir), project_hc=Hippocampus(project_dir), mode="off")
     session = ChatSession(ChatSessionConfig(llm_client=make_mock_llm(), cortex=cortex))
     session._llm.plan = AsyncMock(return_value=LLMResponse(content="done", stop_reason="end_turn"))
@@ -57,7 +58,7 @@ async def test_memory_read_counts_the_memory_section_the_turn_built(tmp_path):
     await run_turn(session, "hello")
 
     assert "Use httpx" in session._llm.plan.await_args_list[-1].kwargs["system"]
-    assert session.memory_read == MemoryRead(learned=True, rules=1, lessons=1)
+    assert session.memory_read == MemoryRead(learned=True, rules=1, lessons=1, scratchpad=1)
 
 
 def test_a_session_without_a_cortex_reads_no_memory():

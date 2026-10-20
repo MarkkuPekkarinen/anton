@@ -205,7 +205,15 @@ An index you leave out is deleted. Be conservative — when in doubt, keep the e
 # The `## ` headings of `rules.md`, in file order. `save_rules` writes exactly
 # these three and `get_rules` reads each entry's `kind` off them, so compaction
 # has to round-trip the same set. First one doubles as the fallback heading.
+# They are also the only sections the system prompt renders, so a rule under
+# any other heading is neither shown nor counted in memory_read.
 _RULE_SECTIONS = ("always", "never", "when")
+
+
+def _rule_section(engram: Engram) -> str:
+    """The section a rule engram renders under; a rule with no kind takes the
+    fallback heading."""
+    return (engram.kind or _RULE_SECTIONS[0]).lower()
 
 
 class Cortex:
@@ -364,8 +372,10 @@ Do NOT add, modify, or summarize rules — return them verbatim.
 
         # Identity (global only — identity is singular). Read before the rule
         # filters below await, as it always has been; it renders after the
-        # operator's sections.
+        # operator's sections. Its lines are counted here too, before the
+        # await gives another turn the chance to rewrite profile.md.
         identity = self.global_hc.recall_identities() if read_learned else ""
+        profile_lines = len(self.global_hc.get_identities()) if identity else 0
 
         # Rules (with smart retrieval) for the operator's layer, then global,
         # then project. get_rules(exclude_scratchpad_when=True) drops
@@ -454,17 +464,21 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         if minds_topic:
             sections.append(f"## Minds — Datasource Context\n{minds_topic}")
 
-        # The entries the sections above hold, counted from the same reads as
-        # Engrams. recall_lessons renders get_lessons with these arguments.
+        # The entries the sections above hold. Rules are counted from the
+        # engrams the sections rendered, and profile lines beside the identity
+        # read. Lessons are read again: get_lessons with the arguments
+        # recall_lessons took returns the entries it rendered.
         lessons = 0
         for text, hc in ((global_lessons, self.global_hc), (project_lessons, self.project_hc)):
             if text:
                 lessons += len(hc.get_lessons(token_budget=self._LESSONS_BUDGET_TOKENS, exclude_scratchpad=True))
         self._prompt_read = MemoryRead(
             learned=True,
-            rules=len(global_engrams) + len(project_engrams),
+            rules=sum(
+                1 for e in (*global_engrams, *project_engrams) if _rule_section(e) in _RULE_SECTIONS
+            ),
             lessons=lessons,
-            profile_lines=len(self.global_hc.get_identities()) if identity else 0,
+            profile_lines=profile_lines,
         )
 
         if not sections:
@@ -477,9 +491,9 @@ Do NOT add, modify, or summarize rules — return them verbatim.
         """Format rule engrams to section display format (## Always / Never / When)."""
         by_kind: dict[str, list[Engram]] = {}
         for e in engrams:
-            by_kind.setdefault((e.kind or "always").lower(), []).append(e)
+            by_kind.setdefault(_rule_section(e), []).append(e)
         parts: list[str] = []
-        for section in ("always", "never", "when"):
+        for section in _RULE_SECTIONS:
             items = by_kind.get(section, [])
             if items:
                 parts.append(f"## {section.capitalize()}")

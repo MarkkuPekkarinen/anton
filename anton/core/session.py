@@ -71,7 +71,9 @@ from anton.core.llm.provider import (
     TransientProviderError,
     context_window,
     damaged_tool_call_result,
+    log_background_done,
     provider_failure_kind,
+    usage_log_enabled,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
 from anton.core.llm.tracing import (
@@ -220,6 +222,17 @@ _LEGACY_FAILURE_MARKERS = ("[error]", "Task failed:", "failed", "timed out", "Re
 
 def _legacy_looks_like_failure(text: str) -> bool:
     return any(m in text for m in _LEGACY_FAILURE_MARKERS)
+
+
+# Strong references: asyncio keeps only a weak one to a task nothing else holds.
+_BACKGROUND_MARKERS: set[asyncio.Task] = set()
+
+
+async def _log_background_done_after(tasks: set[asyncio.Task], trace: TraceContext) -> None:
+    # `wait`, not `gather`: a failed task keeps its exception for asyncio to report.
+    if tasks:
+        await asyncio.wait(tasks)
+    log_background_done(trace)
 
 
 def _discarded_call_reason(tc: ToolCall) -> str:
@@ -5441,6 +5454,7 @@ class ChatSession:
         _calls_token = arm_turn_tracker(_turn_calls)
 
         _turn_exc: BaseException | None = None
+        _turn_raised = False
         # A wrap-up failure the retry-exhausted site has already booked, so
         # the finally keeps that terminal instead of filing it as "error".
         _booked_exc: BaseException | None = None
@@ -5875,6 +5889,7 @@ class ChatSession:
             # happens to be handling (#309 review). Covers GeneratorExit and
             # CancelledError too, both BaseException, both real turn endings.
             _turn_exc = None if _e is _booked_exc else _e
+            _turn_raised = True
             raise
         finally:
             self._turn_memory = None
@@ -5910,6 +5925,9 @@ class ChatSession:
             # guard passes the books this turn opened so a late finalizer
             # can't close a newer turn's.
             self._emit_turn_cost(expected=_turn_cost_books, exc=_turn_exc)
+            if _turn_raised and usage_log_enabled():
+                # A turn that raised starts no end-of-turn work, so it is done now.
+                log_background_done(_turn_trace)
             try:
                 reset_trace_context(_trace_token)
             except ValueError:
@@ -5917,17 +5935,39 @@ class ChatSession:
                 # task anyway, so there is nothing to restore.
                 pass
 
-        # Log assistant response to episodic memory
-        if self._episodic is not None and assistant_text_parts:
-            self._episodic.log_turn(
-                self._turn_count + 1,
-                "assistant",
-                "".join(assistant_text_parts)[:2000],
-            )
+        usage_log = usage_log_enabled()
+        # The passes keep no handle on the tasks they start, and nothing else can
+        # start one before the `finally` below: no await in between.
+        before = asyncio.all_tasks() if usage_log else set()
+        try:
+            # Log assistant response to episodic memory
+            if self._episodic is not None and assistant_text_parts:
+                self._episodic.log_turn(
+                    self._turn_count + 1,
+                    "assistant",
+                    "".join(assistant_text_parts)[:2000],
+                )
 
+            self._turn_count += 1
+            self._persist_history()
+            self._start_background_work(user_input, _turn_trace)
+        finally:
+            if usage_log:
+                # Also when a step above failed: the turn already wrote its turn_cost line.
+                marker = asyncio.create_task(
+                    _log_background_done_after(asyncio.all_tasks() - before, _turn_trace)
+                )
+                _BACKGROUND_MARKERS.add(marker)
+                marker.add_done_callback(_BACKGROUND_MARKERS.discard)
+
+        # The books are closed, so ended_by is final. A clean exit can still book
+        # "cancelled" (the CLI's cancel flag); that is a Stop, not a hand-back.
+        if _turn_cost_books.ended_by not in ("completed", "cancelled", "error"):
+            yield StreamTurnEnded(ended_by=_turn_cost_books.ended_by)
+
+    def _start_background_work(self, user_input: str | list[dict], trace: TraceContext) -> None:
+        """Schedule the end-of-turn memory passes of the turn `trace` names; none blocks the reply."""
         # Identity extraction (Default Mode Network — every 5 turns)
-        self._turn_count += 1
-        self._persist_history()
         if self._background_memory_active:
             if self._turn_count % 5 == 0 and isinstance(user_input, str):
                 if self._episodic:
@@ -5940,21 +5980,16 @@ class ChatSession:
                 else:
                     messages_str = user_input
 
-                self._spawn_background(self._cortex.maybe_update_identity(messages_str), _turn_trace)
+                self._spawn_background(self._cortex.maybe_update_identity(messages_str), trace)
             # Periodic memory vacuum (Systems Consolidation). Its compaction
             # task is started inside, so it runs in the background context.
-            self._background_context(_turn_trace).run(self._cortex.maybe_vacuum)
+            self._background_context(trace).run(self._cortex.maybe_vacuum)
 
         # Cerebellar consolidation — same fire-and-forget contract as
         # the non-streaming turn. Lets the user-facing stream finish
         # immediately while supervised error learning runs in the background.
-        self._schedule_cerebellum_flush(_turn_trace)
+        self._schedule_cerebellum_flush(trace)
         self._schedule_acc_flush()
-
-        # The books are closed, so ended_by is final. A clean exit can still book
-        # "cancelled" (the CLI's cancel flag); that is a Stop, not a hand-back.
-        if _turn_cost_books.ended_by not in ("completed", "cancelled", "error"):
-            yield StreamTurnEnded(ended_by=_turn_cost_books.ended_by)
 
     def _turn_max_tokens(self) -> int:
         """Output-token budget the turn's planning calls actually run with.

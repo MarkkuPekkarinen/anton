@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import json
+import logging
 import os
 import hashlib
 import re
@@ -37,6 +38,14 @@ from anton.core.backends.wire import (
     RESULT_START,
     STDOUT_CHUNK_MARKER,
     STDOUT_SCRUB_MARGIN,
+    USAGE_MARKER,
+    USAGE_MARKER_ENV,
+)
+from anton.core.llm.provider import (
+    USAGE_LOG_ENV,
+    log_usage_record,
+    scratchpad_usage_record,
+    usage_log_enabled,
 )
 from anton.core.llm.tracing import get_trace_context, trace_context_to_json
 from anton.core.settings import CoreSettings
@@ -53,6 +62,8 @@ from anton.utils.nofollow import (
     unlink_matching_nofollow,
     write_text_nofollow,
 )
+
+logger = logging.getLogger(__name__)
 
 _BOOT_SCRIPT_PATH = Path(__file__).parent / "scratchpad_boot.py"
 
@@ -1019,6 +1030,13 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
             overlay = {k: v for k, v in overlay.items() if overlay_key_allowed(k)}
         # Before the DS_* strip, so a project .env cannot smuggle a credential.
         overlaid = _apply_workspace_overlay(env, overlay)
+        # The pad's log is the cell output the model reads, so its calls send
+        # their usage over the wire for this process to log instead.
+        env.pop(USAGE_LOG_ENV, None)
+        if usage_log_enabled():
+            env[USAGE_MARKER_ENV] = "1"
+        else:
+            env.pop(USAGE_MARKER_ENV, None)
         if self._scratchpad_ds_env is not None or policy is not None:
             # Never trust inherited DS_* values — strip them, then overlay
             # exactly what this pad should see. Under a policy a pad with no
@@ -1749,6 +1767,20 @@ class LocalScratchpadRuntime(ScratchpadRuntime):
                     last_output = elapsed
                     if _add_salvage_chunk(self._salvage, chunk):
                         self._salvage_dropped = True
+                continue
+
+            if line.startswith(USAGE_MARKER) and usage_log_enabled():
+                # Logged as it arrives, so a cell killed later keeps the calls it made.
+                # Off, the pad was not asked to send usage, so a line like this is cell output.
+                try:
+                    record = scratchpad_usage_record(json.loads(line[len(USAGE_MARKER) :]))
+                except json.JSONDecodeError:
+                    record = None
+                if record is None:
+                    # Length only: the line is raw cell output and may hold a secret.
+                    logger.warning("unreadable scratchpad usage line (%d chars)", len(line))
+                else:
+                    log_usage_record(record)
                 continue
 
             if line.startswith(PROGRESS_MARKER):

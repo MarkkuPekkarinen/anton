@@ -1,16 +1,91 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import weakref
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from .tracing import TraceContext, get_call_role, get_trace_context
+
 if TYPE_CHECKING:
     from anton.core.interaction.elicit import AskAnswer, AskRequest
+
+
+# Turns on one `llm_usage` log line per model call, for an eval that reads the
+# host's log instead of Langfuse. Off by default: production logs nothing new.
+USAGE_LOG_ENV = "ANTON_USAGE_LOG"
+_usage_logger = logging.getLogger("anton.usage")
+
+
+def usage_log_enabled() -> bool:
+    return os.environ.get(USAGE_LOG_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def log_usage_record(record: dict) -> None:
+    # default=str: an odd value from a host or an SDK must not fail the call.
+    _usage_logger.info("llm_usage %s", json.dumps(record, separators=(",", ":"), default=str))
+
+
+def log_background_done(trace: TraceContext) -> None:
+    """Mark that a turn's end-of-turn work has finished, so an eval stops waiting for its usage.
+
+    One line per turn that wrote a `turn_cost` line. The trace is passed in, not
+    read: a late finalizer of an abandoned turn runs in another context.
+    """
+    record = {"conversation": trace.session_id, "turn": (trace.metadata or {}).get("turn")}
+    _usage_logger.info("usage_background_done %s", json.dumps(record, separators=(",", ":"), default=str))
+
+
+def _usage_record(*, role: str | None, model: str | None, served_model: str | None,
+                  input_tokens: int, output_tokens: int, cache_read: int,
+                  cache_creation: int) -> dict:
+    """One call's usage, named by the conversation, turn and tags of the current trace."""
+    ctx = get_trace_context()
+    metadata = (ctx.metadata or {}) if ctx else {}
+    return {
+        # End-of-turn work runs detached from the session, its conversation in the metadata.
+        "conversation": (ctx.session_id or metadata.get("conversation_id")) if ctx else None,
+        "turn": metadata.get("turn"),
+        "tags": list(ctx.tags) if ctx else [],
+        "role": role,
+        "model": model,
+        "served_model": served_model,
+        "input": input_tokens,
+        "output": output_tokens,
+        "cache_read": cache_read,
+        "cache_creation": cache_creation,
+    }
+
+
+def scratchpad_usage_record(sent: object) -> dict | None:
+    """The record for a usage line a scratchpad sent, or None when it is not a JSON object.
+
+    The pad runs cell code, so the host names the conversation, turn and tags from
+    its own trace and keeps only counts, models and role from what the pad sent.
+    """
+    if not isinstance(sent, dict):
+        return None
+
+    def count(key: str) -> int:
+        value = sent.get(key)
+        valid = isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        return value if valid else 0
+
+    def text(key: str) -> str | None:
+        value = sent.get(key)
+        return value if isinstance(value, str) else None
+
+    return _usage_record(
+        role=text("role"), model=text("model"), served_model=text("served_model"),
+        input_tokens=count("input"), output_tokens=count("output"),
+        cache_read=count("cache_read"), cache_creation=count("cache_creation"),
+    )
 
 
 # Providers hold an HTTP pool. Unclosed, httpx2 prints a traceback when the
@@ -2259,6 +2334,27 @@ class LLMProvider(ABC):
     # Role reported for a call made on this provider outside LLMClient, such
     # as cowork-server's route gate. LLMClient sets it.
     trace_role: str | None = None
+    # Receives each call's usage record instead of the log. A scratchpad sets
+    # it to send the record to its host.
+    usage_sink: Callable[[dict], None] | None = None
+
+    def log_usage(self, *, model: str, usage: Usage, served_model: str | None) -> None:
+        """Report one call's usage to `usage_sink`, or log it when `ANTON_USAGE_LOG` is on.
+
+        Called where the usage is first known, before any check on the reply
+        can raise, so a billed call that then fails is still counted.
+        """
+        if self.usage_sink is None and not usage_log_enabled():
+            return
+        record = _usage_record(
+            role=get_call_role() or self.trace_role, model=model, served_model=served_model,
+            input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+            cache_read=usage.cache_read_tokens, cache_creation=usage.cache_creation_tokens,
+        )
+        if self.usage_sink is not None:
+            self.usage_sink(record)
+        else:
+            log_usage_record(record)
 
     def native_web_tools(self) -> set[str]:
         """Subset of {"web_search", "web_fetch"} this provider executes server-side.

@@ -112,6 +112,7 @@ from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
+    fill_in_scratchpad_action,
     scratchpad_action,
 )
 from anton.core.utils.write_check import parse_http_write_rules
@@ -6368,6 +6369,9 @@ class ChatSession:
 
                 # Build assistant message with content blocks
                 self._ensure_replayable_calls(llm_response)
+                for tc in llm_response.tool_calls:
+                    if tc.name == "scratchpad" and isinstance(tc.input, dict):
+                        fill_in_scratchpad_action(tc.input)
                 assistant_content: list[dict] = []
                 if llm_response.content:
                     assistant_content.append(

@@ -53,6 +53,16 @@ def scratchpad_action(tc_input: dict) -> str:
     return action if isinstance(action, str) else ""
 
 
+def fill_in_scratchpad_action(tc_input: dict) -> None:
+    """Write the `exec` that `scratchpad_action` reads into a call that left
+    `action` out, before the call is stored in history. A reader of the
+    stored call then sees the action that ran: cowork-server rebuilds an
+    earlier turn's cells from these rows and counts a step as a cell only
+    when its `action` is `exec`."""
+    if not tc_input.get("action") and scratchpad_action(tc_input) == "exec":
+        tc_input["action"] = "exec"
+
+
 RefusalCause = Literal["cancelled", "timeout", "unavailable", "error", "unanswered_earlier"]
 # What a logged decision says came of a held cell: "stopped" when the turn
 # ended while its card waited, so no refusal went back to the model.

@@ -332,13 +332,14 @@ def _primary_name(store, slug: str) -> str | None:
 
 
 def _check_pages(
-    store, pages: list[_ChangedPage], *, cell_sandbox: CellSandbox | None
+    store, pages: list[_ChangedPage], *, cell_sandbox: CellSandbox | None, screenshot: bool
 ) -> ArtifactLint:
     """Load the changed artifacts' pages in a browser.
 
     With the render-check service configured: only the pages this cell
     edited, each artifact's primary first, within one budget per cell; the
-    first screenshot is kept. Otherwise the local Electron browser loads
+    first screenshot is kept, unless `screenshot` is False, when the service
+    is asked for none. Otherwise the local Electron browser loads
     every page of a changed artifact (`lint_html`), and a sandbox policy,
     which starts no browser, says so on each page.
 
@@ -352,8 +353,8 @@ def _check_pages(
 
     messages: list[str] = []
     page_checks: "dict[PageKey, RenderStatus]" = {}
-    screenshot = None
-    screenshot_page = ""
+    shot = None
+    shot_page = ""
 
     if render_check.configured_url() is None:
         for page in pages:
@@ -402,12 +403,12 @@ def _check_pages(
             )
         else:
             outcome = render_check.check_file(
-                page.path, cell_sandbox=cell_sandbox, screenshot=screenshot is None,
+                page.path, cell_sandbox=cell_sandbox, screenshot=screenshot and shot is None,
                 timeout=min(render_check.TIMEOUT_SECONDS, remaining),
             )
         page_checks[page.key(store)] = outcome.status
-        if outcome.screenshot is not None and screenshot is None:
-            screenshot, screenshot_page = outcome.screenshot, label
+        if outcome.screenshot is not None and shot is None:
+            shot, shot_page = outcome.screenshot, label
         if outcome.status == "unverified":
             messages.append(f"{label} — not checked in a browser: {outcome.unverified_reason}")
         elif outcome.status == "passed":
@@ -417,13 +418,11 @@ def _check_pages(
             messages += [f"{label} — {group.kind} ({group.viewports}): {group.detail}" for group in grouped.shown]
             if grouped.more:
                 messages.append(f"{label} — and {grouped.more} more distinct findings, not listed")
-    return ArtifactLint(
-        messages=messages, screenshot=screenshot, screenshot_page=screenshot_page, page_checks=page_checks
-    )
+    return ArtifactLint(messages=messages, screenshot=shot, screenshot_page=shot_page, page_checks=page_checks)
 
 
 def lint_changed_artifact_files(
-    store, before: dict[str, float], *, cell_sandbox: CellSandbox | None = None
+    store, before: dict[str, float], *, cell_sandbox: CellSandbox | None = None, screenshot: bool = True
 ) -> ArtifactLint:
     """Run the format-appropriate checker on artifact folders this cell
     edited (mtime moved since `before`), so findings reach the agent as
@@ -432,7 +431,8 @@ def lint_changed_artifact_files(
     Under a sandbox policy the checks that start a browser or LibreOffice
     locally are skipped: they would run the agent's file outside the
     sandbox. The render-check service still loads pages there: only the
-    page's text leaves this process (`_check_pages`).
+    page's text leaves this process (`_check_pages`). `screenshot=False`
+    asks it for no screenshot.
     """
     from anton.core.artifacts.store import iter_content_files
 
@@ -465,7 +465,7 @@ def lint_changed_artifact_files(
             for message in file_messages:
                 messages.append(f"{slug}/{path.name} — {message}")
 
-    checked = _check_pages(store, pages, cell_sandbox=cell_sandbox)
+    checked = _check_pages(store, pages, cell_sandbox=cell_sandbox, screenshot=screenshot)
     return ArtifactLint(
         messages=messages + checked.messages,
         screenshot=checked.screenshot,
@@ -490,9 +490,10 @@ def record_page_checks(session: "ChatSession", checks: "dict[PageKey, RenderStat
 
 def render_screenshots_refused(session: "ChatSession") -> bool:
     """Whether the model refused a request carrying a render-check screenshot
-    in this session (`ChatSession._drop_render_screenshots`), so the checks'
-    findings go to the agent without one. A test double without the flag
-    gets screenshots."""
+    in this session and took it without one
+    (`ChatSession._confirm_render_screenshots_refused`), so checks ask the
+    service for none and the findings go to the agent without one. A test
+    double without the flag gets screenshots."""
     return getattr(session, "_render_screenshots_refused", False) is True
 
 
@@ -544,18 +545,20 @@ async def check_cell_artifacts(session: "ChatSession", store, before: dict[str, 
     import asyncio
 
     track_edits_since(session, store, before)
+    refused = render_screenshots_refused(session)
     try:
         # The checkers take seconds; run them off the event loop.
         lint = await asyncio.to_thread(
             lint_changed_artifact_files, store, before,
-            cell_sandbox=cell_sandbox_of(getattr(session, "_scratchpads", None)),
+            cell_sandbox=cell_sandbox_of(getattr(session, "_scratchpads", None)), screenshot=not refused,
         )
     except Exception:
         # Best-effort: a lint crash must never fail the cell's own result.
         _log.warning("artifact lint failed for this cell", exc_info=True)
         return ArtifactLint()
     record_page_checks(session, lint.page_checks)
-    if render_screenshots_refused(session):
+    if refused:
+        # A service that sends a screenshot it was not asked for.
         return replace(lint, screenshot=None, screenshot_page="")
     return lint
 

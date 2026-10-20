@@ -489,6 +489,14 @@ def test_an_unverified_answer_is_a_skip_with_its_reason_not_an_error(service, tm
     assert check.verdict.errors == []
 
 
+def test_the_generators_check_can_ask_for_no_screenshot(service, tmp_path):
+    page = tmp_path / "index.html"
+    page.write_text(_PAGE)
+    verifiers.verify_frontend_live(page, cell_sandbox=None)
+    verifiers.verify_frontend_live(page, cell_sandbox=None, screenshot=False)
+    assert [r["body"]["screenshot"] for r in service.requests] == [True, False]
+
+
 def _gen_state(tmp_path: Path, policy=None) -> GenState:
     session = SimpleNamespace(_scratchpads=SimpleNamespace(cell_sandbox=policy), _page_checks={})
     return GenState(
@@ -1353,9 +1361,11 @@ async def test_a_model_that_refuses_images_still_gets_the_findings_in_the_same_t
     assert finding in retried
     assert render_check.DROPPED_SCREENSHOT_PLACEHOLDER in retried
     assert render_check.REFUSED_SCREENSHOT_PLACEHOLDER not in retried
-    # The resend went through, so the note says the model refused it.
+    # The resend went through, so the note says the model refused it, and
+    # the second check asked the service for no screenshot.
     assert after_second_cell.count(finding) == 2
     assert render_check.REFUSED_SCREENSHOT_PLACEHOLDER in after_second_cell
+    assert [r["body"]["screenshot"] for r in service.requests] == [True, False]
     assert session._render_screenshots_refused is True
     history = json.dumps(session.history)
     assert "An error interrupted execution" not in history
@@ -1510,6 +1520,7 @@ async def test_a_session_seeded_with_a_refused_screenshot_attaches_none(service,
     await _final_text(session)
 
     assert len(service.requests) == 1, "the page was still checked"
+    assert service.requests[0]["body"]["screenshot"] is False
     result = _tool_results(session)[-1]["content"]
     assert isinstance(result, str) and f"{slug}/index.html — loaded in a browser" in result
     assert session._render_screenshots_refused is True

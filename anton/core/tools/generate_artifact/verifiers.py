@@ -430,7 +430,7 @@ def verify_frontend(
     return VerifyResult(errors=errors, warnings=warnings)
 
 
-def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None) -> BrowserCheck:
+def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True) -> BrowserCheck:
     """Load the written page once in a browser.
 
     The class of defects the text checks above cannot see: a script that
@@ -445,7 +445,8 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None) -> Br
     page the way the app preview does, sandbox policy or not: the browser
     runs in its own container and only the page's text leaves this process.
     Otherwise the local Electron browser loads it (`html_lint`), which a
-    sandbox policy refuses.
+    sandbox policy refuses. `screenshot=False` asks the service for no
+    screenshot.
 
     `unverified` when no browser loaded the page or the check could not
     vouch for it (no browser configured, a timeout, a library the check
@@ -462,7 +463,7 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None) -> Br
     app directory, not the cwd.
     """
     if render_check.configured_url() is not None:
-        outcome = render_check.check_file(entry.resolve(), cell_sandbox=cell_sandbox)
+        outcome = render_check.check_file(entry.resolve(), cell_sandbox=cell_sandbox, screenshot=screenshot)
         if outcome.status == "unverified":
             return BrowserCheck(
                 status="unverified", reason=f"unverified: {outcome.unverified_reason}",

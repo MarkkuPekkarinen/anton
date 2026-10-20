@@ -249,7 +249,7 @@ with a note, keeps the findings beside it, and sends the request once more
 an image over the size limit, does not count. Only when that request goes
 through without the screenshots does the note say the model refused them
 (`ChatSession._confirm_render_screenshots_refused`). From then on, later
-checks in that session attach no screenshot. If the request
+checks in that session ask the service for no screenshot. If the request
 is refused again, the screenshots were not the cause, and later checks keep
 theirs. A session seeded with the confirmed note, as cowork-server builds
 one for every turn, starts without screenshots too.

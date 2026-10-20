@@ -806,11 +806,14 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
                 # single-file page — see `verify_frontend_live` for why not the
                 # fullstack frontend. In a thread: the browser subprocess or
                 # the render-check request blocks for seconds.
+                from anton.core.tools.tool_handlers import render_screenshots_refused
+
                 policy = _cell_sandbox(state)
                 if verifiers.browser_can_load(sandboxed=policy is not None):
                     state.step_started("browser_check", attempt=attempt)
                 live = await asyncio.to_thread(
-                    verifiers.verify_frontend_live, entry_file, cell_sandbox=policy
+                    verifiers.verify_frontend_live, entry_file, cell_sandbox=policy,
+                    screenshot=not render_screenshots_refused(state.session),
                 )
                 state.browser_status = live.status
                 state.browser_screenshot = live.screenshot

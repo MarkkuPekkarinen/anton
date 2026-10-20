@@ -5,7 +5,7 @@ import logging
 import os
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, NamedTuple
 
@@ -488,6 +488,14 @@ def record_page_checks(session: "ChatSession", checks: "dict[PageKey, RenderStat
         record.update(checks)
 
 
+def render_screenshots_refused(session: "ChatSession") -> bool:
+    """Whether the model refused a request carrying a render-check screenshot
+    in this session (`ChatSession._drop_render_screenshots`), so the checks'
+    findings go to the agent without one. A test double without the flag
+    gets screenshots."""
+    return getattr(session, "_render_screenshots_refused", False) is True
+
+
 def page_check_lines(store, checks: "dict[PageKey, RenderStatus]") -> list[str]:
     """One line for each artifact with a page that did not pass its last
     browser check, naming the artifact, for the end of the agent's final
@@ -547,6 +555,8 @@ async def check_cell_artifacts(session: "ChatSession", store, before: dict[str, 
         _log.warning("artifact lint failed for this cell", exc_info=True)
         return ArtifactLint()
     record_page_checks(session, lint.page_checks)
+    if render_screenshots_refused(session):
+        return replace(lint, screenshot=None, screenshot_page="")
     return lint
 
 
@@ -1103,8 +1113,11 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     if status != "cancelled":
         _track_artifact(session, store, slug, summary="Generated artifact files")
     # The render check's view of the page travels beside the text, as an
-    # image the agent can look at, never inside the JSON.
+    # image the agent can look at, never inside the JSON, unless the model
+    # refused one earlier in the session.
     screenshot = result.pop("screenshot", None)
+    if render_screenshots_refused(session):
+        screenshot = None
     instruction_key = status
     if status == "generated" and not result.get("verified_in_browser"):
         instruction_key = "generated_unverified"

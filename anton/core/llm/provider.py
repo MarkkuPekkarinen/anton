@@ -1844,6 +1844,34 @@ def classify_content_rejection(
     return None
 
 
+# Words a provider's refusal of an image part uses: OpenAI names the part
+# ("image_url is only supported by certain models"), and servers for
+# text-only models name what the model lacks ("not a multimodal model").
+_IMAGE_REFUSAL_WORDS = ("image", "vision", "multimodal", "multi-modal")
+
+
+def is_image_refusal(exc: BaseException) -> bool:
+    """Whether the provider refused a request over an image part in it.
+
+    True for a ``ContentValidationError``, which the classifiers above raise
+    for an image the provider could not take, and for a 400 or 422 whose
+    error names an image. The second is how an OpenAI-compatible API refuses
+    an image sent to a model that takes no image input: OpenAI answers
+    chat.completions with "Invalid content type. image_url is only
+    supported by certain models." ``classify_content_rejection`` leaves that
+    400 unnamed on purpose, because its remedy removes every image in the
+    conversation. A caller of this function removes only images it added
+    itself, so a 400 that merely mentions an image costs it one resend and
+    those images.
+    """
+    if isinstance(exc, ContentValidationError):
+        return True
+    if getattr(exc, "status_code", None) not in (400, 422):
+        return False
+    text = f"{exc} {getattr(exc, 'body', '')}".lower()
+    return any(word in text for word in _IMAGE_REFUSAL_WORDS)
+
+
 # The sentence OpenAI and Azure send when chat.completions refuses function
 # tools for a model that reasons by default, whether or not the request set an
 # effort. Azure documents only this sentence, not the body's `param`.

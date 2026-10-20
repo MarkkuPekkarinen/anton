@@ -71,6 +71,7 @@ from anton.core.llm.provider import (
     TransientProviderError,
     context_window,
     damaged_tool_call_result,
+    is_image_refusal,
     provider_failure_kind,
 )
 from anton.core.llm.structured import looks_truncated, truncation_verdict, usable_tool_call
@@ -130,7 +131,12 @@ from anton.core.tools.tool_handlers import (
     resolve_artifact_store,
     snapshot_existing_artifact_mtimes,
 )
-from anton.core.artifacts.render_check import RenderStatus, drop_older_screenshots
+from anton.core.artifacts.render_check import (
+    RenderStatus,
+    drop_older_screenshots,
+    drop_refused_screenshots,
+    screenshots_refused,
+)
 
 from anton.explainability import ExplainabilityCollector, ExplainabilityStore
 
@@ -2066,6 +2072,11 @@ class ChatSession:
         # ends with a line for each artifact with a page that did not pass.
         # Reset every turn.
         self._page_checks: dict[PageKey, RenderStatus] = {}
+        # Set once the model refused a request carrying a render-check
+        # screenshot (`_drop_render_screenshots`). From then on the checks'
+        # findings reach the agent without a screenshot, for the rest of the
+        # session; `tool_handlers.render_screenshots_refused` reads it.
+        self._render_screenshots_refused = False
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
         # call at end-of-turn, and encodes lessons via cortex.encode(),
@@ -3578,6 +3589,21 @@ class ChatSession:
             new_content, changed = _strip(msg.get("content"))
             if changed:
                 msg["content"] = new_content
+        return removed
+
+    def _drop_render_screenshots(self) -> int:
+        """Replace every render-check screenshot in history with a note that
+        the model refused it, and attach none for the rest of the session;
+        return how many went.
+
+        For a model that takes no image input. Unlike
+        `_strip_image_blocks_from_history`, this removes only images anton
+        added itself: the findings beside each screenshot stay, and an image
+        the person attached is left for that repair to judge.
+        """
+        removed = drop_refused_screenshots(self._history)
+        if removed:
+            self._render_screenshots_refused = True
         return removed
 
     def _seal_dangling_tool_uses(self, reason: str = "interrupted") -> int:
@@ -5374,6 +5400,10 @@ class ChatSession:
         self._append_history({"role": "user", "content": stamped_input})
         # A host may seed history with earlier turns' render screenshots.
         drop_older_screenshots(self._history)
+        # A host that builds a session per turn seeds the note that says the
+        # model refused a screenshot in an earlier turn.
+        if screenshots_refused(self._history):
+            self._render_screenshots_refused = True
 
         # Log user input to episodic memory
         if self._episodic is not None:
@@ -5390,6 +5420,9 @@ class ChatSession:
         assistant_text_parts: list[str] = []
         _max_auto_retries = 2
         _retry_count = 0
+        # The one resend this turn allows after the model refused a request
+        # over a render-check screenshot (see the handler below).
+        _screenshots_dropped = False
         # One-time cap grace, reset once per turn_stream() call rather than in
         # `_stream_and_handle_tools`, which retries re-enter and would re-arm.
         self._spend_ceiling_grace_used = False
@@ -5620,6 +5653,27 @@ class ChatSession:
                             provider=getattr(_agent_exc, "provider", "") or "",
                             model=_model,
                         ) from _agent_exc
+
+                    # A model that takes no image input refuses every request
+                    # carrying a render-check screenshot, and the request is
+                    # rebuilt from history, so a plain resend fails the same
+                    # way. The screenshot is anton's own addition: drop it,
+                    # keep the findings beside it, and send the request once
+                    # more within this turn, with no recovery note, since the
+                    # agent did nothing wrong. Before the count below, which
+                    # is for resends of an unchanged request. Sealed first, as
+                    # every resend here is.
+                    if not _screenshots_dropped and is_image_refusal(_agent_exc):
+                        self._seal_dangling_tool_uses("interrupted by error")
+                        _dropped = self._drop_render_screenshots()
+                        if _dropped:
+                            _screenshots_dropped = True
+                            logger.info(
+                                "the model refused a request with %d render-check "
+                                "screenshot(s); sending it again without them",
+                                _dropped,
+                            )
+                            continue
 
                     _retry_count += 1
                     # Anthropic's API rejects any history where the

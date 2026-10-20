@@ -16,6 +16,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from typing import NamedTuple
 
 import pytest
 
@@ -684,7 +685,7 @@ async def test_generate_records_how_it_left_the_page(tmp_path, monkeypatch):
 # ── generate_artifact's result ───────────────────────────────────────────────
 
 
-async def _handler_result(tmp_path: Path, monkeypatch, result: dict):
+async def _handler_result(tmp_path: Path, monkeypatch, result: dict, *, screenshots_refused: bool = False):
     from anton.core.tools import generate_artifact as gen_pkg
 
     store = ArtifactStore(tmp_path / "artifacts")
@@ -694,7 +695,10 @@ async def _handler_result(tmp_path: Path, monkeypatch, result: dict):
         return dict(result)
 
     monkeypatch.setattr(gen_pkg, "generate", fake_generate)
-    session = SimpleNamespace(_workspace=SimpleNamespace(artifacts_dir=tmp_path / "artifacts"))
+    session = SimpleNamespace(
+        _workspace=SimpleNamespace(artifacts_dir=tmp_path / "artifacts"),
+        _render_screenshots_refused=screenshots_refused,
+    )
     out = None
     async for item in tool_handlers.handle_generate_artifact(
         session, {"slug": slug, "user_request": "a map", "agent_understanding": "a map"}
@@ -1138,6 +1142,323 @@ async def test_the_line_after_an_unspent_continuation_is_marked_as_no_replacemen
     line = next(i for i, e in enumerate(events) if isinstance(e, StreamTextDelta) and e.text == _LINE)
     assert any(p == "continuation" for _, p in phases)
     assert events[line - 1] == StreamTaskProgress(phase="handback", message="")
+
+
+# ── A model that takes no image input ────────────────────────────────────────
+
+# What OpenAI answers on chat.completions when a request carries an image
+# part and the model takes no image input. Its `param` points into the
+# content array in a form `classify_content_rejection` does not read, so the
+# SDK's own BadRequestError reaches the session.
+_NO_IMAGES_CHAT = {"error": {
+    "message": "Invalid content type. image_url is only supported by certain models.",
+    "type": "invalid_request_error", "param": "messages.[3].content.[1].type", "code": None,
+}}
+# The same refusal with the `param` spelling the Responses API uses
+# (`input[N].content[M].type`), which `classify_content_rejection` reads as
+# content: a ContentValidationError reaches the session.
+_NO_IMAGES_RESPONSES = {"error": {
+    "message": "Invalid content type. input_image is only supported by certain models.",
+    "type": "invalid_request_error", "param": "input[4].content[1].type", "code": "invalid_value",
+}}
+# A refusal that names no content path at all, as a gateway in front of a
+# text-only model sends it.
+_NO_IMAGES_PLAIN = {"error": {
+    "message": "This model does not support image input.",
+    "type": "invalid_request_error", "param": None, "code": None,
+}}
+_EXCEPTION = "TypeError: Cannot read properties of undefined (reading 'kind')"
+_FAILED_WITH_SHOT = _answer(
+    "failed", findings=[{"kind": "uncaught_exception", "viewport": "desktop", "detail": _EXCEPTION}],
+)
+
+
+def _image_parts(body: dict) -> int:
+    """Image parts in a chat.completions or Responses request body."""
+    items = body.get("messages") or body.get("input") or []
+    return sum(
+        1
+        for item in items if isinstance(item, dict) and isinstance(item.get("content"), list)
+        for part in item["content"] if isinstance(part, dict) and part.get("type") in ("image_url", "input_image")
+    )
+
+
+def _chat_sse(reply: "str | dict") -> bytes:
+    def chunk(delta: dict, finish: str | None = None, usage: dict | None = None) -> dict:
+        choices = [] if usage else [{"index": 0, "delta": delta, "finish_reason": finish}]
+        return {"id": "c1", "object": "chat.completion.chunk", "created": 0, "model": "gpt-test",
+                "choices": choices, **({"usage": usage} if usage else {})}
+
+    if isinstance(reply, str):
+        chunks = [chunk({"role": "assistant", "content": reply}), chunk({}, "stop")]
+    else:
+        call = {"index": 0, "id": reply["id"], "type": "function",
+                "function": {"name": "scratchpad", "arguments": json.dumps(reply["input"])}}
+        chunks = [chunk({"role": "assistant", "tool_calls": [call]}), chunk({}, "tool_calls")]
+    chunks.append(chunk({}, usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}))
+    return ("".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + "data: [DONE]\n\n").encode()
+
+
+def _responses_sse(reply: "str | dict") -> bytes:
+    usage = {"input_tokens": 10, "input_tokens_details": {"cached_tokens": 0}, "output_tokens": 5,
+             "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 15}
+
+    def response(status: str) -> dict:
+        return {"id": "resp_1", "object": "response", "created_at": 0, "model": "gpt-test", "status": status,
+                "output": [], "usage": usage, "parallel_tool_calls": True, "tool_choice": "auto", "tools": []}
+
+    events: list[dict] = [{"type": "response.created", "response": {**response("in_progress"), "usage": None}}]
+    if isinstance(reply, str):
+        events += [
+            {"type": "response.output_item.added", "output_index": 0,
+             "item": {"type": "message", "id": "msg_1", "role": "assistant", "status": "in_progress", "content": []}},
+            {"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 0, "content_index": 0,
+             "delta": reply, "logprobs": []},
+        ]
+    else:
+        arguments = json.dumps(reply["input"])
+        events += [
+            {"type": "response.output_item.added", "output_index": 0,
+             "item": {"type": "function_call", "id": "fc_1", "call_id": reply["id"], "name": "scratchpad",
+                      "arguments": "", "status": "in_progress"}},
+            {"type": "response.function_call_arguments.delta", "item_id": "fc_1", "output_index": 0,
+             "delta": arguments},
+            {"type": "response.function_call_arguments.done", "item_id": "fc_1", "output_index": 0,
+             "arguments": arguments},
+        ]
+    events.append({"type": "response.completed", "response": response("completed")})
+    return "".join(
+        f"event: {e['type']}\ndata: {json.dumps({'sequence_number': i, **e})}\n\n" for i, e in enumerate(events)
+    ).encode()
+
+
+class _TextOnlyModel:
+    """An OpenAI-compatible API for a model that takes no image input.
+
+    Real HTTP, so the real SDK and anton's real provider are in the path. A
+    request carrying an image part gets the 400 `refusal`; any other gets the
+    next scripted reply: a scratchpad call (a dict) or an answer (a str).
+    """
+
+    def __init__(self, refusal: dict, replies: list) -> None:
+        self.refusal, self.replies, self.requests = refusal, list(replies), []
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):  # noqa: N802 - the stdlib's name
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                owner.requests.append(body)
+                if _image_parts(body):
+                    code, kind, data = 400, "application/json", json.dumps(owner.refusal).encode()
+                else:
+                    sse = _responses_sse if self.path.endswith("/responses") else _chat_sse
+                    code, kind, data = 200, "text/event-stream", sse(owner.replies.pop(0))
+                self.send_response(code)
+                self.send_header("Content-Type", kind)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+
+    def provider(self, flavor: str):
+        from anton.core.llm.openai import OpenAIProvider
+
+        return OpenAIProvider(
+            api_key="k", base_url=f"http://127.0.0.1:{self.server.server_port}/v1", flavor=flavor,
+        )
+
+
+def _cell(tool_id: str) -> dict:
+    return {"id": tool_id, "input": {"action": "exec", "name": "main", "code": "write_page()",
+                                     "one_line_description": "write the page",
+                                     "estimated_execution_time_seconds": 1}}
+
+
+def _on_model(session, model: _TextOnlyModel, flavor: str) -> None:
+    """Route the session's planning calls to `model` through anton's real provider."""
+    provider = model.provider(flavor)
+    # `_session_for`'s workspace is a MagicMock; its project context would
+    # reach the wire as a mock the SDK cannot serialize.
+    session._workspace.build_anton_md_context.return_value = ""
+
+    def plan_stream(*, system, messages, tools=None, max_tokens=None, native_web_tools=None):
+        return provider.stream(model="gpt-test", system=system, messages=messages, tools=tools,
+                               max_tokens=max_tokens or 1024)
+
+    session._llm.plan_stream = plan_stream
+
+
+class _Refusal(NamedTuple):
+    """A transport, a refusal it can get, and how a turn whose request carries
+    no render screenshot ends on it, as it did before screenshots were
+    dropped: the error that ends the turn and how many requests it sent."""
+
+    flavor: str
+    body: dict
+    terminal: str
+    attempts: int
+
+
+_REFUSALS = {
+    "chat.completions": _Refusal("openai-compatible-generic", _NO_IMAGES_CHAT, "BadRequestError", 4),
+    "responses-content-param": _Refusal("openai", _NO_IMAGES_RESPONSES, "ContentValidationError", 1),
+    "responses-no-param": _Refusal("openai", _NO_IMAGES_PLAIN, "BadRequestError", 4),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_REFUSALS))
+async def test_a_model_that_refuses_images_still_gets_the_findings_in_the_same_turn(service, project, case):
+    """The render check attaches a screenshot; a model that takes no image
+    input refuses the next request with a 400. The turn drops the screenshot,
+    keeps the findings beside it, sends the request once more and ends with
+    the model's answer. The next cell's check sends no screenshot."""
+    refusal = _REFUSALS[case]
+    service.answer((200, _FAILED_WITH_SHOT, 0.0))
+    model = _TextOnlyModel(refusal.body, [_cell("call_1"), _cell("call_2"), "The map works now."])
+    session, pad, slug = _session_for(project, [])
+    _on_model(session, model, refusal.flavor)
+    try:
+        streamed, _ = await _final_text(session)
+    finally:
+        model.server.shutdown()
+
+    assert streamed.endswith("The map works now.")
+    assert len(pad.ran) == 2 and len(service.requests) == 2, "both cells ran and both pages were checked"
+    # The first cell's result with its screenshot, refused once; the same
+    # request without it; the second cell's result, which carries none.
+    assert [_image_parts(body) for body in model.requests] == [0, 1, 0, 0]
+    retried, after_second_cell = (json.dumps(body, ensure_ascii=False) for body in model.requests[2:])
+    finding = f"{slug}/index.html — uncaught_exception (desktop): {_EXCEPTION}"
+    assert finding in retried
+    assert render_check.REFUSED_SCREENSHOT_PLACEHOLDER in retried
+    assert after_second_cell.count(finding) == 2
+    history = json.dumps(session.history)
+    assert "An error interrupted execution" not in history
+    assert "The task has failed" not in history
+
+
+@pytest.mark.parametrize("case", sorted(_REFUSALS))
+async def test_a_refusal_with_no_screenshot_in_the_request_ends_the_turn_as_before(service, project, case):
+    """A screenshot is anton's own addition; an image the person attached is
+    not. With no render screenshot to drop, the refusal takes the path it
+    took before: the same error ends the turn after the same requests."""
+    refusal = _REFUSALS[case]
+    model = _TextOnlyModel(refusal.body, [])
+    session, _, _ = _session_for(project, [])
+    _on_model(session, model, refusal.flavor)
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}}
+    try:
+        with pytest.raises(Exception) as refused:
+            async for _ in session.turn_stream([{"type": "text", "text": "what is this?"}, image]):
+                pass
+    finally:
+        await session.close()
+        model.server.shutdown()
+
+    assert type(refused.value).__name__ == refusal.terminal
+    assert len(model.requests) == refusal.attempts
+    assert session._render_screenshots_refused is False
+
+
+def _shot_round(tool_use_id: str) -> list[dict]:
+    """A scratchpad call and its result with a render screenshot, as history holds them."""
+    call = {"role": "assistant", "content": [{
+        "type": "tool_use", "id": tool_use_id, "name": "scratchpad",
+        "input": {"action": "exec", "name": "main", "code": "write_page()"},
+    }]}
+    return [call, _result_with_shot(tool_use_id, _SHOT)]
+
+
+async def test_the_screenshot_is_dropped_once_then_the_refusal_takes_its_old_path(project):
+    """When the request still fails without the screenshot, as it does for an
+    image the person attached, the turn resends once and then ends the way
+    it did before: here the content repair and the error the host shows."""
+    from anton.core.llm.provider import ContentValidationError
+
+    session, _, _ = _session_for(project, [])
+    session._history.extend(_shot_round("t1"))
+    calls: list[str] = []
+
+    async def refuse(user_msg):
+        calls.append(user_msg)
+        raise ContentValidationError("refused")
+        yield  # pragma: no cover - makes this an async generator
+
+    session._stream_and_handle_tools = refuse
+    try:
+        with pytest.raises(ContentValidationError):
+            async for _ in session.turn_stream("check the page again"):
+                pass
+    finally:
+        await session.close()
+
+    assert len(calls) == 2
+    shot_result = _tool_results(session)[0]["content"]
+    assert {"type": "text", "text": render_check.REFUSED_SCREENSHOT_PLACEHOLDER} in shot_result
+    assert shot_result[0]["text"] == "[output]\n", "the text beside the screenshot stays"
+    assert session._render_screenshots_refused is True
+
+
+async def test_a_session_seeded_with_a_refused_screenshot_attaches_none(service, project):
+    """cowork-server builds a session for every turn and seeds it with the
+    conversation's earlier tool results, cut by anton's own row splitter. The
+    note the refusal left tells the new session the model takes no image
+    input, so its first check costs no refused request."""
+    from anton.cloud_turn.history_rows import split_turn_into_rows
+
+    earlier = _shot_round("t0")
+    render_check.drop_refused_screenshots(earlier)
+    session, _, slug = _session_for(project, [
+        _llm_response("Writing.", {"action": "exec", "name": "main", "code": "write_page()"}),
+        _llm_response("Done."),
+    ])
+    session._history.extend(split_turn_into_rows(earlier))
+
+    await _final_text(session)
+
+    assert len(service.requests) == 1, "the page was still checked"
+    result = _tool_results(session)[-1]["content"]
+    assert isinstance(result, str) and f"{slug}/index.html — loaded in a browser" in result
+    assert session._render_screenshots_refused is True
+
+
+async def test_generate_artifact_attaches_no_screenshot_once_the_model_refused_one(tmp_path, monkeypatch):
+    shot = render_check.RenderScreenshot(media_type="image/jpeg", data=_SHOT)
+    _, out = await _handler_result(tmp_path, monkeypatch, {
+        "status": "generated", "files_written": ["index.html"], "warnings": [], "checks_skipped": [],
+        "verified_in_browser": True, "screenshot": shot,
+    }, screenshots_refused=True)
+
+    assert out.ok is True and isinstance(out.content, str)
+    payload = json.loads(out.content)
+    assert payload["verified_in_browser"] is True and "screenshot" not in payload
+
+
+def test_a_refused_screenshot_leaves_a_note_and_the_text_beside_it():
+    read_image = {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "img", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+        ]}],
+    }
+    history = [_result_with_shot("t1", _SHOT), read_image, _result_with_shot("t2", _SHOT)]
+    assert not render_check.screenshots_refused(history)
+
+    assert render_check.drop_refused_screenshots(history) == 2
+
+    for message in (history[0], history[2]):
+        text, caption, note = message["content"][0]["content"]
+        assert text == {"type": "text", "text": "[output]\n"}
+        assert caption["text"].startswith(render_check.SCREENSHOT_CAPTION)
+        assert note == {"type": "text", "text": render_check.REFUSED_SCREENSHOT_PLACEHOLDER}
+    assert history[1] == read_image, "an image the agent read itself is not anton's to drop"
+    assert render_check.screenshots_refused(history)
+    assert render_check.drop_refused_screenshots(history) == 0
 
 
 # ── What the generator and the skill tell the model ──────────────────────────

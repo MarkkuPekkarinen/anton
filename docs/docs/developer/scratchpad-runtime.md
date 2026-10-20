@@ -238,6 +238,17 @@ with a line anton writes itself, naming the artifact
 (`ChatSession._unverified_page_lines`). Each page keeps its own latest
 result, so a later pass of one page never clears another page's failure.
 
+The service also sends a screenshot of the page, which reaches the agent as
+an image beside the check's text. History keeps only the newest one
+(`render_check.drop_older_screenshots`). When the model refuses a request
+over an image part (`provider.is_image_refusal`: a content rejection, or a
+400 or 422 that names an image, which is what a model with no image input
+gets), the turn replaces every render screenshot with a note, keeps the
+findings beside it, and sends the request once more
+(`ChatSession._drop_render_screenshots`). Later checks in that session
+attach no screenshot. A session seeded with the note, as cowork-server
+builds one for every turn, starts that way too.
+
 `ScratchpadManager` refuses at construction a runtime factory that does not
 name a `cell_sandbox` parameter (a bare `**kwargs` is refused), and refuses
 to start a runtime whose `cell_sandbox` property reports another policy, so

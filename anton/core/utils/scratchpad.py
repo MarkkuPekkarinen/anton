@@ -17,6 +17,7 @@ from anton.core.tools.registry import ToolOutcome
 from anton.core.utils.write_check import (
     CellWrites,
     FileChange,
+    HttpWrite,
     HttpWriteRule,
     ProjectSnapshot,
     find_cell_writes,
@@ -189,9 +190,27 @@ def _describe_calls(writes: CellWrites) -> list[str]:
 def _describe_requests(writes: CellWrites) -> list[str]:
     """The first held requests, for the refusal: the method and the URL.
     The card names every one."""
-    out = [f"send {write.method} to {_code_span(_shown_path(write.url))}" for write in writes.http[:_REFUSAL_PATHS]]
+    out = [_request_summary(write) for write in writes.http[:_REFUSAL_PATHS]]
     more = len(writes.http) - _REFUSAL_PATHS
     return out + ([f"send {more} more such requests"] if more > 0 else [])
+
+
+def _run_time_from(code: str) -> str:
+    """`, from <code>`, naming the code that decides a value when the step
+    runs, or nothing when the check cannot show that code."""
+    return f", from {_code_span(_inert(code))}" if code else ""
+
+
+def _request_summary(write: HttpWrite) -> str:
+    """One request for the refusal, in words where the code decides a part."""
+    method = write.method if write.method_code is None else "a request"
+    if write.url_code is not None:
+        text = f"send {method} to an address the code decides when it runs{_run_time_from(write.url_code)}"
+    else:
+        text = f"send {method} to {_code_span(_shown_path(write.url))}"
+    if write.method_code is not None:
+        text += f" (the code decides its method when it runs{_run_time_from(write.method_code)})"
+    return text
 
 
 def _describe_files(writes: CellWrites) -> list[str]:
@@ -237,10 +256,19 @@ def _file_lines(change: FileChange, *, lead: str) -> list[str]:
     return lines
 
 
-def _http_method(method: str) -> str:
-    """A request's method as the card's prose names it: as it is, or as code
-    when the code picks it when it runs."""
-    return method if method.isalpha() else _code_span(_inert(method))
+def _request_lines(request: HttpWrite) -> list[str]:
+    """One request on the card. A method or an address the code decides when
+    it runs is said in words, with the code that decides it, never shown as a
+    bare `{placeholder}` where the method or the address would stand."""
+    method = request.method if request.method_code is None else "a request"
+    if request.url_code is not None:
+        lead = f"This step would send {method} to an address the code decides when it runs{_run_time_from(request.url_code)}:"
+        lines = [lead, "", _fence(request.call), ""]
+    else:
+        lines = [f"This step would send {method} to:", "", _fence(_shown_path(request.url)), "", _fence(request.call), ""]
+    if request.method_code is not None:
+        lines += [f"The code decides the request's method when it runs{_run_time_from(request.method_code)}.", ""]
+    return lines
 
 
 def _card_prompt(writes: CellWrites) -> str:
@@ -265,8 +293,7 @@ def _card_prompt(writes: CellWrites) -> str:
         also = "append to" if change.action == "append" else change.action
         lines += _file_lines(change, lead=f"This step would also {also}")
     for request in writes.http:
-        lines += [f"This step would send {_http_method(request.method)} to:", "", _fence(_shown_path(request.url)), "",
-                  _fence(request.call), ""]
+        lines += _request_lines(request)
     if any(r.run_time_parts for r in writes.http) and not any(w.run_time_parts for w in writes.sql):
         lines += ["A part in braces, `{...}`, is the code that fills in that value when the step runs.", ""]
     shown = [*(p for change in writes.files for p in change.paths), *(r.url for r in writes.http)]

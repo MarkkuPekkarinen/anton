@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -13,6 +15,12 @@ from anton.core.tools.generate_artifact.verifiers import (
     verify_app_live,
     verify_frontend_live,
 )
+
+
+def quoted_hosts(warning: str) -> set[str]:
+    """The host of each address a verifier warning quotes."""
+    return {urlparse(url).hostname for url in re.findall(r"'(https?://[^']+)'", warning)}
+
 
 GOOD = """<!doctype html><html><head>
 <meta charset="utf-8">
@@ -76,7 +84,7 @@ def test_absolute_href_and_img_src_never_fail_the_step():
         external = [w for w in r.warnings if w.startswith("External resource the app preview does not load")]
         assert len(external) == 1
         assert "images.example.com/upload_files/a.png" in external[0]
-        assert "fonts.googleapis.com" in external[0]
+        assert {"images.example.com", "fonts.googleapis.com"} <= quoted_hosts(external[0])
         assert "example.com/articles" not in external[0]
 
 
@@ -304,7 +312,7 @@ def test_tailwind_from_its_own_cdn_is_flagged_because_the_preview_blocks_the_hos
     html = GOOD.replace("</head>", '<script src="https://cdn.tailwindcss.com"></script></head>')
     r = verify_frontend(html, is_fullstack=True)
     assert r.ok, r.errors
-    assert len(r.warnings) == 1 and "cdn.tailwindcss.com" in r.warnings[0]
+    assert len(r.warnings) == 1 and quoted_hosts(r.warnings[0]) == {"cdn.tailwindcss.com"}
 
 
 def test_other_library_cdn_is_still_a_warning():

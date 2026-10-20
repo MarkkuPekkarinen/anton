@@ -333,7 +333,10 @@ LIST_ARTIFACTS_TOOL = ToolDef(
             "fields": {
                 "type": "array",
                 "items": {"type": "string", "enum": list(ARTIFACT_LIST_FIELDS)},
-                "description": "Fields to return instead of the default set; `slug` is always included.",
+                "description": (
+                    "Fields to return instead of the default set. Every artifact is "
+                    "headed by its slug whatever you ask for, so the slug needs no field."
+                ),
             },
             "match": {
                 "type": "array",

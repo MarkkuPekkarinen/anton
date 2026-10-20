@@ -919,13 +919,14 @@ async def handle_list_artifacts(
                 content=f"Error: fields is empty. Valid fields: {valid}.",
                 ok=False, reason="invalid_fields",
             )
-        for field in requested:
-            if field not in FIELDS:
+        for name in requested:
+            if name not in FIELDS and name != "slug":
                 return ToolOutcome(
-                    content=f'Error: unknown field "{field}". Valid fields: {valid}.',
+                    content=f'Error: unknown field "{name}". Valid fields: {valid}.',
                     ok=False, reason="invalid_fields",
                 )
-        fields = requested
+        # Every entry is headed by its slug, so asking for it adds nothing.
+        fields = [name for name in requested if name != "slug"]
 
     if keys:
         artifacts, unmatched = store.find(keys)

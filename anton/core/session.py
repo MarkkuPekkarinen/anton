@@ -112,6 +112,7 @@ from anton.core.utils.scratchpad import (
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
+    scratchpad_action,
 )
 from anton.core.utils.write_check import parse_http_write_rules
 # Artifact-edit tracking + lint and the scratchpad observer hooks: shared with
@@ -241,7 +242,7 @@ def _known_scratchpad_action(tc: ToolCall) -> str | None:
     `StreamToolResult.action` as ours: `"message"`, for one, means a tool's
     message to the user.
     """
-    action = tc.input.get("action") if isinstance(tc.input, dict) else None
+    action = scratchpad_action(tc.input) if isinstance(tc.input, dict) else None
     allowed = SCRATCHPAD_TOOL.input_schema["properties"]["action"]["enum"]
     return action if action in allowed else None
 
@@ -6415,7 +6416,7 @@ class ChatSession:
                     # falls back to reading the clock itself. See the emit.
                     _tool_elapsed: float | None = None
                     try:
-                        if tc.name == "scratchpad" and tc.input.get("action") == "exec":
+                        if tc.name == "scratchpad" and scratchpad_action(tc.input) == "exec":
                             # Inline streaming exec — yields progress events
                             if self._write_gate is not None and self.emitter is not None:
                                 # Drained: the approval card prepare may raise

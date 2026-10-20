@@ -132,6 +132,8 @@ _SENTINEL_REASONS = {
     # The agent passed bad or missing arguments — it can fix these itself.
     "scratchpad_empty_code": (TIER_SELF, "empty_code"),
     "scratchpad_missing_name": (TIER_SELF, "missing_name"),
+    # No `action` and no `code`, or an action the tool does not have.
+    "scratchpad_unknown_action": (TIER_SELF, "invalid_argument"),
     "missing_name": (TIER_SELF, "missing_argument"),
     "missing_slug": (TIER_SELF, "missing_argument"),
     "missing_description": (TIER_SELF, "missing_argument"),

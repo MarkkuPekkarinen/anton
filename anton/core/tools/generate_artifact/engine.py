@@ -34,7 +34,7 @@ from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
 from anton.core.backends.sandbox import cell_sandbox_of
 from anton.utils.datasources import scrub_credentials
 from anton.core.llm.structured import looks_truncated
-from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS
+from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 
 from . import sub_tools
 from .debug_trace import NullTrace
@@ -1076,7 +1076,7 @@ async def _run_loop(
                 # A cell that never ran, such as a write the user didn't
                 # approve, is no data-access code for later steps to reuse.
                 ran = getattr(outcome, "reason", "") not in CELL_NOT_RUN_REASONS
-                if inp.get("action") == "exec" and ran:
+                if scratchpad_action(inp) == "exec" and ran:
                     scratchpad_execs.append(
                         {
                             "name": str(inp.get("name") or ""),

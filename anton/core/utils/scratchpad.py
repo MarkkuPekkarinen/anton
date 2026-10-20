@@ -35,6 +35,23 @@ logger = logging.getLogger(__name__)
 # hand-back report).
 CELL_NOT_RUN_REASONS = frozenset({"new_scratchpad_challenged", "write_not_approved"})
 
+# Every `action` the scratchpad tool takes, in the order its schema lists them.
+SCRATCHPAD_ACTIONS: tuple[str, ...] = ("exec", "view", "reset", "remove", "dump", "install")
+
+
+def scratchpad_action(tc_input: dict) -> str:
+    """The action a scratchpad call asks for.
+
+    Tools go to the model without strict schemas, so a call can leave out
+    `action`. One that carries `code` can only mean to run it, so it is an
+    `exec`; one with neither gets "", which no action matches.
+    """
+    action = tc_input.get("action")
+    if not action and tc_input.get("code"):
+        return "exec"
+    return action if isinstance(action, str) else ""
+
+
 RefusalCause = Literal["cancelled", "timeout", "unavailable", "error", "unanswered_earlier"]
 # What a logged decision says came of a held cell: "stopped" when the turn
 # ended while its card waited, so no refusal went back to the model.

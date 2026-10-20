@@ -12,6 +12,8 @@ from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.side_effect import SideEffectResult, now_iso
 from anton.core.utils.scratchpad import (
+    SCRATCHPAD_ACTIONS,
+    scratchpad_action,
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
@@ -1050,7 +1052,7 @@ async def handle_scratchpad(
     reading it (ENG-1276). The other actions still return plain strings
     (legacy substring classification).
     """
-    action = tc_input.get("action", "")
+    action = scratchpad_action(tc_input)
     name = tc_input.get("name", "")
 
     if not name:
@@ -1207,7 +1209,14 @@ async def handle_scratchpad(
         return result
 
     else:
-        return f"Unknown scratchpad action: {action}"
+        # Every call that reaches here was refused before doing anything, so
+        # it is a failure the error streak counts, not a result.
+        named = f"`{action}` is not a scratchpad action" if action else "No `action` given and no `code` to run"
+        return ToolOutcome(
+            content=f"{named}. Valid actions: {', '.join(SCRATCHPAD_ACTIONS)}.",
+            ok=False,
+            reason="scratchpad_unknown_action",
+        )
 
 
 async def handle_read_image(

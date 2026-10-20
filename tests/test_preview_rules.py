@@ -29,13 +29,16 @@ def test_the_verifier_contract_names_the_external_resource_warning():
 
 def test_a_caught_view_error_is_logged_where_the_browser_check_sees_it():
     """A per-view `try`/`catch` that only wrote "This view failed to load"
-    into the map panel passed every check while the map stayed broken: the
-    check counts console errors, and the catch logged none. The rule follows
-    the browser-gate bullet in both frontend prompts."""
+    into the map panel kept the error that broke the map out of the browser
+    check, which counts console errors: the catch logged none. The rule
+    follows the browser-gate bullet in both frontend prompts, and keeps the
+    storage helper, whose throw is expected in the preview frame, off
+    `console.error`."""
     for prompt in (
         prompts.build_subagent_system_prompt(Path("/tmp/a")),
         prompts.build_frontend_system_prompt(Path("/tmp/a")),
     ):
         gate = prompt.index("Where a headless browser is available")
         rule = prompt.index("catch (e) { console.error(e); el.textContent")
-        assert gate < rule < prompt.index("Not checked by the verifier")
+        storage = prompt.index("stays silent or uses `console.warn`")
+        assert gate < rule < storage < prompt.index("Not checked by the verifier")

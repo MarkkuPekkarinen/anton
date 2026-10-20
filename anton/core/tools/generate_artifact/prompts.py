@@ -260,14 +260,18 @@ _BROWSER_GATE_SERVED = """\
 
 
 # Follows either browser-gate bullet. The browser check counts console errors,
-# so a view whose error is caught and only written into the page passes it
-# while the view stays broken.
+# so an error a view catches and only writes into the page never reaches it,
+# and an expected failure that logs one fails a page that works.
 _CAUGHT_ERRORS = """\
 - A view you guard with `try`/`catch` logs what it caught as well as writing
   a short message into the view:
   `try { drawMap(el); } catch (e) { console.error(e); el.textContent = 'The map could not load.'; }`.
   A catch that only writes the message hides the error from the browser
-  check, so the broken view passes.\
+  check: at most the check reports the view as empty, and it cannot say what
+  broke it. Log with `console.error` only a view that failed to draw. An
+  expected failure stays silent or uses `console.warn`: the guarded storage
+  helper the browser storage note below asks for catches a throw on every
+  load in the preview frame, and a `console.error` there fails the check.\
 """
 
 

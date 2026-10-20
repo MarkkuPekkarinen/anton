@@ -53,7 +53,7 @@ def test_no_browser_configured_produces_no_messages(monkeypatch, store: _FakeSto
     (folder / "dash.html").write_text(_BROKEN_HTML)
     before = {"dash-abc12345": 0.0}
 
-    assert lint_changed_artifact_files(store, before) == []
+    assert lint_changed_artifact_files(store, before).messages == []
 
 
 @pytest.mark.skipif(shutil.which("true") is None, reason="no 'true' binary on PATH")
@@ -73,7 +73,7 @@ def test_a_configured_browser_that_fails_to_produce_output_is_silent(
     (folder / "dash.html").write_text(_BROKEN_HTML)
     before = {"dash-abc12345": 0.0}
 
-    assert lint_changed_artifact_files(store, before) == []
+    assert lint_changed_artifact_files(store, before).messages == []
 
 
 @requires_browser
@@ -82,7 +82,7 @@ def test_flags_a_changed_html_artifact(store: _FakeStore):
     (folder / "dash.html").write_text(_BROKEN_HTML)
     before = {"dash-abc12345": 0.0}
 
-    messages = lint_changed_artifact_files(store, before)
+    messages = lint_changed_artifact_files(store, before).messages
 
     assert any("dash-abc12345/dash.html" in m for m in messages)
 
@@ -97,4 +97,4 @@ def test_skips_artifacts_the_cell_did_not_touch(store: _FakeStore):
     current_mtime = page.stat().st_mtime
     before = {"dash-abc12345": current_mtime}
 
-    assert lint_changed_artifact_files(store, before) == []
+    assert lint_changed_artifact_files(store, before).messages == []

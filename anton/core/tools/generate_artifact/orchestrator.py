@@ -801,24 +801,26 @@ async def _gen_verify_frontend(state: GenState, extra_context: str = "") -> str 
             if verdict.ok and not state.is_fullstack:
                 # Second gate, only once the text checks pass and only for the
                 # single-file page — see `verify_frontend_live` for why not the
-                # fullstack frontend. In a thread: the browser subprocess
-                # blocks for up to its 8-second timeout. The sandbox starts
-                # no browser.
+                # fullstack frontend. In a thread: the browser subprocess or
+                # the render-check request blocks for seconds.
                 policy = _cell_sandbox(state)
+                if verifiers.browser_can_load(sandboxed=policy is not None):
+                    state.step_started("browser_check", attempt=attempt)
                 live = await asyncio.to_thread(
                     verifiers.verify_frontend_live, entry_file, cell_sandbox=policy
                 )
-                if live is None:
-                    reason = verifiers.browser_check_skip_reason(sandboxed=policy is not None)
-                    state.trace_log.node("verify_frontend", "browser_skipped", reason)
-                    _note_skipped(state, f"browser load of the page: {reason}")
+                state.browser_status = live.status
+                state.browser_screenshot = live.screenshot
+                if live.status == "unverified":
+                    state.trace_log.node("verify_frontend", "browser_skipped", live.reason)
+                    _note_skipped(state, f"browser load of the page: {live.reason}")
                 else:
                     # `extend`, not `append`: the contract lock keys on
                     # `.append(...)` / `VerifyResult(...)` literals, and these
                     # strings are registered where `verify_frontend_live`
                     # builds them.
-                    verdict.errors.extend(live.errors)
-                    verdict.warnings.extend(live.warnings)
+                    verdict.errors.extend(live.verdict.errors)
+                    verdict.warnings.extend(live.verdict.warnings)
             # The fullstack page is loaded later, from its running backend
             # (`_run_and_verify_app`): under file:// its `/api/*` fetches
             # cannot resolve.
@@ -1073,7 +1075,9 @@ async def _verify_app_in_browser(state: GenState) -> "str | None | object":
             reason = verifiers.browser_check_skip_reason(sandboxed=policy is not None)
             state.trace_log.node("verify_fullstack", "browser_skipped", reason)
             _note_skipped(state, f"browser load of {target} via the running backend: {reason}")
+            state.browser_status = "unverified"
             return None
+        state.browser_status = "passed" if live.ok else "failed"
         state.trace_log.verifier(
             node="verify_fullstack", ok=live.ok,
             errors=list(live.errors), warnings=list(live.warnings),
@@ -1147,6 +1151,9 @@ def _result_shell(state: GenState) -> dict:
         # only if the agent knows the key exists (S-03).
         "warnings": state.verify_warnings,
         "checks_skipped": state.checks_skipped,
+        # True only when a browser loaded the page and found nothing wrong.
+        # The handler picks the agent's instruction by it.
+        "verified_in_browser": state.browser_status == "passed",
         "summary": "; ".join(f"{s.node}:{s.outcome}" for s in state.trace),
         "trace": [{"node": s.node, "outcome": s.outcome, "detail": s.detail} for s in state.trace],
     }
@@ -1157,6 +1164,10 @@ def _result_shell(state: GenState) -> dict:
     if state.app_url:
         shell["url"] = state.app_url
         shell["port"] = state.app_port
+    # The model itself, not its JSON: the handler takes it out of the result
+    # and shows it to the agent as an image beside the text.
+    if state.browser_screenshot is not None:
+        shell["screenshot"] = state.browser_screenshot
     return shell
 
 

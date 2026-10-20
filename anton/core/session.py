@@ -121,12 +121,14 @@ from anton.core.utils.write_check import parse_http_write_rules
 from anton.core.tools.tool_handlers import (
     _fire_post_execute,
     _fire_pre_execute,
+    cell_content_with_lint,
+    check_cell_artifacts,
+    page_check_lines,
     preliminary_cell,
     resolve_artifact_store,
     snapshot_existing_artifact_mtimes,
-    track_edits_since,
-    lint_changed_artifact_files,
 )
+from anton.core.artifacts.render_check import RenderStatus, drop_older_screenshots
 
 from anton.explainability import ExplainabilityCollector, ExplainabilityStore
 
@@ -2056,6 +2058,11 @@ class ChatSession:
         # project-wide) directory can never be mistaken for this turn's work.
         # Reset at the top of every turn.
         self._artifacts_touched: set[str] = set()
+        # slug -> how that artifact's page last fared in a browser this turn
+        # (`passed`, `failed` or `unverified`), from generate_artifact and the
+        # checks after each cell. On a sandboxed deployment the turn ends
+        # with a line for each page that did not pass. Reset every turn.
+        self._page_checks: dict[str, RenderStatus] = {}
         # Cerebellum: supervised error learning over scratchpad cells.
         # Buffers errored/warning cells across the turn, runs one diff
         # call at end-of-turn, and encodes lessons via cortex.encode(),
@@ -2196,6 +2203,17 @@ class ChatSession:
         surface, and must not be able to mutate the session's own record.
         """
         return set(self._artifacts_touched)
+
+    def _unverified_page_lines(self) -> list[str]:
+        """The lines that end the turn's final message on a sandboxed
+        deployment: one per artifact whose page did not pass its last browser
+        check this turn. Written by anton, not the model, so the user hears it
+        whatever the reply claims. Empty without a sandbox: there the local
+        browser check (`tool_handlers._check_pages`) reports to the agent
+        after every edit and no service is involved."""
+        if not self._page_checks or cell_sandbox_of(self._scratchpads) is None:
+            return []
+        return page_check_lines(resolve_artifact_store(self), self._page_checks)
 
     @property
     def last_compaction(self) -> dict | None:
@@ -5292,6 +5310,7 @@ class ChatSession:
         # reports only what the CURRENT turn touched. Hosts that build a fresh
         # session per turn get the same result either way.
         self._artifacts_touched = set()
+        self._page_checks = {}
         # What the project held when this turn began: a cell may delete or
         # rename a file it wrote this turn without asking, not one from before.
         if self._write_gate is not None:
@@ -5350,6 +5369,8 @@ class ChatSession:
         # NOT be stamped.
         stamped_input = _stamp_user_content(user_input, datetime.now(timezone.utc))
         self._append_history({"role": "user", "content": stamped_input})
+        # A host may seed history with earlier turns' render screenshots.
+        drop_older_screenshots(self._history)
 
         # Log user input to episodic memory
         if self._episodic is not None:
@@ -5445,12 +5466,19 @@ class ChatSession:
         # A wrap-up failure the retry-exhausted site has already booked, so
         # the finally keeps that terminal instead of filing it as "error".
         _booked_exc: BaseException | None = None
+        # A continuation boundary no answer text has followed yet: a consumer
+        # takes the next text for the answer that replaces the one it showed.
+        _replacement_pending = False
         try:
             while True:
                 try:
                     async for event in self._stream_and_handle_tools(user_msg_str):
                         if isinstance(event, StreamTextDelta):
                             assistant_text_parts.append(event.text)
+                            if event.text.strip():
+                                _replacement_pending = False
+                        elif isinstance(event, StreamTaskProgress) and event.phase in ("continuation", "handback"):
+                            _replacement_pending = event.phase == "continuation"
                         yield event
                     break  # completed successfully
                 except Exception as _agent_exc:
@@ -5870,6 +5898,17 @@ class ChatSession:
                                 _booked_exc = e
                             raise
                         break
+            if not self._cancel_event.is_set():
+                page_lines = self._unverified_page_lines()
+                if page_lines:
+                    if _replacement_pending:
+                        # Not the replacement answer: without this a consumer
+                        # drops the answer the user read for these lines.
+                        yield StreamTaskProgress(phase="handback", message="")
+                    text = "\n".join(page_lines)
+                    assistant_text_parts.append(text)
+                    yield StreamTextDelta(text=text)
+                    self._append_history({"role": "assistant", "content": text})
         except BaseException as _e:
             # Capture, don't classify — the finally needs to know whether THIS
             # turn failed, rather than asking the interpreter what the thread
@@ -6518,31 +6557,16 @@ class ChatSession:
                                 )
                                 if cell is not None and artifact_store is not None:
                                     # handle_scratchpad's exec branch runs
-                                    # this same pair; this inline path is the
+                                    # this same check; this inline path is the
                                     # one the streaming product actually
                                     # takes, so it needs its own call.
-                                    track_edits_since(
+                                    lint = await check_cell_artifacts(
                                         self, artifact_store, before_artifact_mtimes
                                     )
-                                    try:
-                                        lint_messages = await asyncio.to_thread(
-                                            lint_changed_artifact_files,
-                                            artifact_store, before_artifact_mtimes,
-                                            cell_sandbox=cell_sandbox_of(self._scratchpads),
-                                        )
-                                    except Exception:
-                                        lint_messages = []
-                                        logger.warning(
-                                            "artifact lint failed for this cell",
-                                            exc_info=True,
-                                        )
-                                    if lint_messages:
-                                        # cowork-server's figure sources cut this
-                                        # block from a replayed cell's output.
-                                        result_text += (
-                                            "\n\n[artifact lint]\n"
-                                            + "\n".join(lint_messages)
-                                        )
+                                    result_text = cell_content_with_lint(
+                                        result_text, lint,
+                                        cell_ok=not (cell.error or "").strip(),
+                                    )
                                 # The runtime's verdict, not a text guess: a
                                 # cell with a raised error/timeout/kill failed;
                                 # stderr-only output (warnings) is not a
@@ -6891,6 +6915,9 @@ class ChatSession:
                 self._acc_maybe_nudge(tool_results)
 
                 self._append_history({"role": "user", "content": tool_results})
+                # Every model call resends the whole history: one render
+                # screenshot in it, the newest, is enough.
+                drop_older_screenshots(self._history)
 
                 # Rebuild: a tool this round (e.g. recall_skill) may have
                 # registered new tools the follow-up must see.

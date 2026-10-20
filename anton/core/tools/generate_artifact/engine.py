@@ -588,7 +588,22 @@ async def generate(
         trace.run_result(ok=False, error=result)
     else:
         trace.run_result(ok=True, result=result)
+    _record_page_check(session, state, result)
     return result
+
+
+def _record_page_check(session, state, result: dict | str) -> None:
+    """Tell the session how this run left the page: its last browser check,
+    or `unverified` when the run wrote a page no browser loaded. A run that
+    wrote no page (stopped at the brief, refused, cancelled) records nothing."""
+    from anton.core.tools.tool_handlers import record_page_checks
+
+    if isinstance(result, dict) and result.get("status") in ("cancelled", "needs_confirmation"):
+        return
+    wrote_page = any(name.endswith(".html") for name in state.files_written)
+    if state.browser_status is None and not wrote_page:
+        return
+    record_page_checks(session, {state.slug: state.browser_status or "unverified"})
 
 
 def _restore(state, stored) -> None:
@@ -1081,7 +1096,7 @@ async def _run_loop(
                         {
                             "name": str(inp.get("name") or ""),
                             "code": str(inp.get("code") or ""),
-                            "output": content if isinstance(content, str) else str(content),
+                            "output": sub_tools.result_text(content),
                         }
                     )
                 trace.scratchpad(node=node_label, input=inp, output=content)

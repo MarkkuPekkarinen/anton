@@ -216,7 +216,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
                     state.scratchpad_execs.append({
                         "name": inp.get("name"),
                         "code": inp.get("code"),
-                        "output": content if isinstance(content, str) else str(content),
+                        "output": protocol.result_text(content),
                     })
                 result_blocks.append(protocol.tool_result(tc.id, content))
             elif name in ("web_search", "web_fetch"):

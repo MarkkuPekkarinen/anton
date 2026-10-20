@@ -235,10 +235,17 @@ step and costs a regeneration, unless the item says it is only a warning:
 # speak of a fullstack app, and the failure it can see differs (a local file
 # under file://, a URL of the page's own origin over http).
 _BROWSER_GATE_HTML = """\
-- Where a headless browser is available, the page is also loaded once from
-  disk right after these checks: a console error, a crashed renderer or a
-  request for a local file that does not exist fails the step; a page with
-  no visible text or elements is a warning.\
+- Where a headless browser is available, the page is also loaded once right
+  after these checks, on a deployment that supports it the way the app
+  preview loads it: in a sandboxed frame under the preview's content security
+  policy, at a desktop and a phone width. A console error, an uncaught
+  exception, a
+  crashed renderer, a request for a local file that does not exist, a load
+  the preview's content security policy blocks, a separate file the page asks
+  for (the preview serves only the page itself), a chart, map or canvas that
+  stays blank, or a page wider than the screen fails the step; a page with no
+  visible text or elements is a warning. A library the check cannot load
+  leaves the page unverified, which does not fail the step.\
 """
 
 _BROWSER_GATE_SERVED = """\

@@ -69,7 +69,7 @@ def test_flags_circular_refs_in_a_changed_artifact(store: _FakeStore):
     )
     before = {"forecast-abc12345": 0.0}  # older than the mtime the write above just set
 
-    messages = lint_changed_artifact_files(store, before)
+    messages = lint_changed_artifact_files(store, before).messages
 
     assert len(messages) == 1
     assert "forecast-abc12345/forecast.xlsx" in messages[0]
@@ -92,7 +92,7 @@ def test_clean_workbook_produces_no_messages_from_the_structural_lint(store: _Fa
     )
     before = {"clean-abc12345": 0.0}
 
-    assert lint_changed_artifact_files(store, before) == []
+    assert lint_changed_artifact_files(store, before).messages == []
 
 
 def test_both_checkers_agree_a_clean_workbook_is_clean(monkeypatch, store: _FakeStore):
@@ -107,7 +107,7 @@ def test_both_checkers_agree_a_clean_workbook_is_clean(monkeypatch, store: _Fake
     _write_workbook(folder / "clean.xlsx", {"Sheet1": {"A1": "1+1"}})
     before = {"clean-abc12345": 0.0}
 
-    assert lint_changed_artifact_files(store, before) == []
+    assert lint_changed_artifact_files(store, before).messages == []
 
 
 def test_structural_message_wins_when_both_flag_the_same_cell(monkeypatch, store: _FakeStore):
@@ -133,7 +133,7 @@ def test_structural_message_wins_when_both_flag_the_same_cell(monkeypatch, store
     )
     before = {"forecast-abc12345": 0.0}
 
-    messages = lint_changed_artifact_files(store, before)
+    messages = lint_changed_artifact_files(store, before).messages
 
     assert len(messages) == 1
     assert "missing cross-sheet prefix" in messages[0]
@@ -156,7 +156,7 @@ def test_oracle_only_finding_still_surfaces(monkeypatch, store: _FakeStore):
     _write_workbook(folder / "clean.xlsx", {"Sheet1": {"A1": "1", "B2": "A1/0"}})
     before = {"clean-abc12345": 0.0}
 
-    messages = lint_changed_artifact_files(store, before)
+    messages = lint_changed_artifact_files(store, before).messages
 
     assert len(messages) == 1
     assert "#DIV/0!" in messages[0]
@@ -180,4 +180,4 @@ def test_skips_artifacts_the_cell_did_not_touch(store: _FakeStore):
     current_mtime = workbook.stat().st_mtime
     before = {"forecast-abc12345": current_mtime}
 
-    assert lint_changed_artifact_files(store, before) == []
+    assert lint_changed_artifact_files(store, before).messages == []

@@ -11,8 +11,21 @@ from anton.core.llm.provider import StreamComplete
 from anton.core.tools.generate_artifact import orchestrator
 from anton.core.tools.generate_artifact.discovery import checkpoint as cp
 from anton.core.tools.generate_artifact.state import (
-    FetchVerdict, GenState, RequiredData, RequiredDataItem, VerifyResult,
+    BrowserCheck, FetchVerdict, GenState, RequiredData, RequiredDataItem, VerifyResult,
 )
+
+
+def _no_browser(entry, *, cell_sandbox):
+    """`verify_frontend_live` where no browser can load the page."""
+    return BrowserCheck(
+        status="unverified",
+        reason=orchestrator.verifiers.browser_check_skip_reason(sandboxed=cell_sandbox is not None),
+    )
+
+
+def _loaded(verdict: VerifyResult) -> BrowserCheck:
+    """`verify_frontend_live` where a browser loaded the page and found `verdict`."""
+    return BrowserCheck(status="passed" if verdict.ok else "failed", verdict=verdict)
 
 
 async def _one_event_stream(response):
@@ -659,7 +672,7 @@ async def test_frontend_retry_removes_what_the_failed_attempt_wrote(tmp_path: Pa
     st = _state(tmp_path, artifact_type="html-app", is_fullstack=False)
     st.primary = None
     monkeypatch.setattr(tool_handlers, "resolve_artifact_store", lambda session: None)
-    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox: None)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", _no_browser)
     calls = {"n": 0}
     seen_before_second: dict = {}
 
@@ -694,7 +707,7 @@ async def test_primary_follows_the_verified_entry_not_the_first_html(tmp_path: P
     st.primary = "report.html"
     store = Mock()
     monkeypatch.setattr(tool_handlers, "resolve_artifact_store", lambda session: store)
-    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox: None)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", _no_browser)
 
     async def fake_loop(**kw):
         (tmp_path / "partials.html").write_text("<div>fragment</div>")
@@ -1034,7 +1047,7 @@ async def test_frontend_browser_findings_trigger_a_regeneration_with_the_message
     ])
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
     monkeypatch.setattr(
-        orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox: next(live_verdicts)
+        orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox: _loaded(next(live_verdicts))
     )
 
     err = await orchestrator._gen_verify_frontend(st)
@@ -1061,7 +1074,7 @@ async def test_frontend_browser_skip_leaves_the_static_verdict_and_is_traced(
         return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
-    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox: None)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", _no_browser)
 
     err = await orchestrator._gen_verify_frontend(st)
 
@@ -1110,7 +1123,7 @@ async def test_frontend_browser_check_waits_for_the_static_checks_to_pass(
 
     def fake_live(entry, *, cell_sandbox):
         calls["live"] += 1
-        return VerifyResult()
+        return _loaded(VerifyResult())
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
     monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", fake_live)
@@ -1241,7 +1254,7 @@ async def test_browser_skip_is_reported_as_a_skipped_check(tmp_path: Path, monke
         return {"files_written": ["index.html"], "rounds_used": 1, "summary": "s"}
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
-    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox: None)
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", _no_browser)
 
     assert await orchestrator._gen_verify_frontend(st) is None
     assert st.checks_skipped == [
@@ -1270,7 +1283,7 @@ async def test_warnings_of_the_accepted_frontend_attempt_reach_the_result(tmp_pa
 
     monkeypatch.setattr(orchestrator.engine, "_run_loop", fake_loop)
     monkeypatch.setattr(orchestrator.verifiers, "verify_frontend", fake_verify)
-    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox: VerifyResult(errors=[]))
+    monkeypatch.setattr(orchestrator.verifiers, "verify_frontend_live", lambda entry, *, cell_sandbox: _loaded(VerifyResult()))
 
     assert await orchestrator._gen_verify_frontend(st) is None
     assert st.verify_warnings == ["frontend: Significant blocks have no stable `id` attributes."]

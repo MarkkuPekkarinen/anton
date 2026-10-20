@@ -15,13 +15,14 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from anton.core.artifacts import html_lint
+from anton.core.artifacts import html_lint, render_check
 from anton.core.artifacts.html_lint import lint_html, lint_url
+from anton.core.artifacts.render_check import RenderFinding
 from anton.core.backends.sandbox import CellSandbox, SandboxedSpawn, cell_sandbox_of
 from anton.core.utils.scratchpad import install_call_failed
 from anton.utils.datasources import scrub_output
 
-from .state import VerifyResult
+from .state import BrowserCheck, VerifyResult
 
 _FETCH_CALL = re.compile(r"""fetch\s*\(\s*(?:api\s*\(\s*)?['"]([^'"]+)['"]""")
 # Every literal `fetch()` target, template literals included: the `api()`
@@ -429,21 +430,27 @@ def verify_frontend(
     return VerifyResult(errors=errors, warnings=warnings)
 
 
-def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None) -> VerifyResult | None:
-    """Load the written page once in a headless browser (`html_lint`).
+def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None) -> BrowserCheck:
+    """Load the written page once in a browser.
 
     The class of defects the text checks above cannot see: a script that
-    throws on load, a reference to a missing local file, a renderer crash,
-    a body that renders nothing. Findings become verifier errors with the
-    same fixed prefixes the contract lock registers, so the retry kickoff
-    carries the browser's own message (`Uncaught ReferenceError: state is
-    not defined (line 4)`), which is exactly what the generator needs.
+    throws on load, a library the preview's content security policy blocks,
+    a separate file the preview never serves, a chart that stays blank, a
+    renderer crash. Findings become verifier errors with the fixed prefixes
+    the contract lock registers, so the retry kickoff carries the browser's
+    own message (`Uncaught ReferenceError: state is not defined (line 4)`),
+    which is exactly what the generator needs.
 
-    Returns `None` when the page could not be checked at all — no browser
-    configured (`ANTON_HTML_LINT_BROWSER` unset: the cloud, a bare CLI),
-    a timeout, malformed runner output — as distinct from an empty verdict,
-    which means it loaded cleanly. The caller then rests on the static
-    verdict alone and notes the skip in the trace.
+    With `ANTON_RENDER_CHECK_URL` set, the render-check service loads the
+    page the way the app preview does, sandbox policy or not: the browser
+    runs in its own container and only the page's text leaves this process.
+    Otherwise the local Electron browser loads it (`html_lint`), which a
+    sandbox policy refuses.
+
+    `unverified` when no browser loaded the page or the check could not
+    vouch for it (no browser configured, a timeout, a library the check
+    cannot load); `reason` says why and the caller rests on the static
+    verdict. Never a pass in that case.
 
     Single-file `html-app` pages only: `lint_html` loads through `file://`,
     where a fullstack frontend's relative `/api/*` fetches cannot resolve and
@@ -452,13 +459,67 @@ def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None) -> Ve
     page gets the same check from `verify_app_live`, through its running
     backend, after `run_app`. The path is resolved here as well as in
     `lint_html`: Electron's `loadFile` reads a relative path against its own
-    app directory, not the cwd. Under a sandbox policy it returns `None`
-    without starting the browser.
+    app directory, not the cwd.
     """
+    if render_check.configured_url() is not None:
+        outcome = render_check.check_file(entry.resolve(), cell_sandbox=cell_sandbox)
+        if outcome.status == "unverified":
+            return BrowserCheck(
+                status="unverified", reason=f"unverified: {outcome.unverified_reason}",
+                screenshot=outcome.screenshot,
+            )
+        verdict = _render_verdict(outcome.findings)
+        return BrowserCheck(
+            status="passed" if verdict.ok else "failed", verdict=verdict, screenshot=outcome.screenshot
+        )
     findings = lint_html(entry.resolve(), cell_sandbox=cell_sandbox)
     if findings is None:
-        return None
-    return _browser_verdict(findings, served=False)
+        return BrowserCheck(
+            status="unverified", reason=browser_check_skip_reason(sandboxed=cell_sandbox is not None)
+        )
+    verdict = _browser_verdict(findings, served=False)
+    return BrowserCheck(status="passed" if verdict.ok else "failed", verdict=verdict)
+
+
+def _render_verdict(findings: list[RenderFinding]) -> VerifyResult:
+    """The render check's findings as verifier errors, each named once with
+    the viewports it was seen in.
+
+    Every literal below is a `.append(...)` on purpose: the contract lock
+    reads them from this file and requires each in the generator prompts.
+    `timeout` never gets here: a check that ran out of time is unverified.
+    """
+    errors: list[str] = []
+    for kind, detail, where in render_check.grouped_findings(findings):
+        if kind == "csp_violation":
+            errors.append(
+                "Loaded in a headless browser, the page broke the app preview's content "
+                f"security policy ({where}): {detail}"
+            )
+        elif kind == "separate_file":
+            errors.append(
+                "Loaded in a headless browser, the page asked for a separate file, which the "
+                f"app preview never serves ({where}): {detail}"
+            )
+        elif kind == "console_error":
+            errors.append(
+                f"Loaded in a headless browser, the page logged a console error: {detail} ({where})"
+            )
+        elif kind == "uncaught_exception":
+            errors.append(
+                f"Loaded in a headless browser, the page threw an uncaught exception: {detail} ({where})"
+            )
+        elif kind == "blank_view":
+            errors.append(
+                f"Loaded in a headless browser, a chart, map or canvas stayed blank: {detail} ({where})"
+            )
+        elif kind == "overflow":
+            errors.append(
+                f"Loaded in a headless browser, the page is wider than the screen: {detail} ({where})"
+            )
+        elif kind == "crashed":
+            errors.append("Loaded in a headless browser, the page crashed the renderer process.")
+    return VerifyResult(errors=errors)
 
 
 def verify_app_live(url: str, *, cell_sandbox: CellSandbox | None) -> VerifyResult | None:
@@ -515,8 +576,19 @@ def _browser_verdict(findings, *, served: bool) -> VerifyResult:
     return VerifyResult(errors=errors, warnings=warnings)
 
 
+def browser_can_load(*, sandboxed: bool) -> bool:
+    """Whether `verify_frontend_live` will try to load the page in a browser:
+    the render check is configured, or a local browser is and no sandbox
+    policy refuses it. Decides only the progress line; the check itself
+    still reports `unverified` when the load produces nothing."""
+    if render_check.configured_url() is not None:
+        return True
+    return not sandboxed and html_lint.discover_browser() is not None
+
+
 def browser_check_skip_reason(*, sandboxed: bool = False) -> str:
-    """Why `verify_frontend_live` returned None, for the trace.
+    """Why the local browser (`lint_html`) loaded nothing, for the trace and
+    the result's `checks_skipped`.
 
     `sandboxed` says the check never ran because agent code runs in a sandbox
     on this host, which starts no browser.

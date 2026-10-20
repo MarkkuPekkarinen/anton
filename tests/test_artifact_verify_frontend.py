@@ -194,18 +194,28 @@ def test_balanced_script_blocks_pass():
 
 # ── verify_frontend_live: the headless-browser gate (html_lint) ──────────────
 
-def test_live_check_is_skipped_when_no_browser_can_run(monkeypatch):
+@pytest.fixture(autouse=True)
+def _no_render_check_service(monkeypatch):
+    """These tests cover the local browser; the service has its own tests."""
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
+
+
+def test_live_check_is_unverified_when_no_browser_can_run(monkeypatch):
     """`None` from lint_html (no ANTON_HTML_LINT_BROWSER, timeout, garbage
     output) is "could not check", not "clean" — the caller must be able to
-    tell the two apart, so it stays None here too."""
+    tell the two apart, so it comes back `unverified` with the reason."""
     monkeypatch.setattr(verifiers, "lint_html", lambda path, *, cell_sandbox: None)
-    assert verify_frontend_live(Path("/tmp/x/index.html"), cell_sandbox=None) is None
+    monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
+    check = verify_frontend_live(Path("/tmp/x/index.html"), cell_sandbox=None)
+    assert check.status == "unverified"
+    assert check.reason == "no headless browser configured (ANTON_HTML_LINT_BROWSER unset)"
+    assert check.verdict.errors == [] and check.screenshot is None
 
 
 def test_live_check_clean_page_is_an_empty_verdict(monkeypatch):
     monkeypatch.setattr(verifiers, "lint_html", lambda path, *, cell_sandbox: [])
-    verdict = verify_frontend_live(Path("/tmp/x/index.html"), cell_sandbox=None)
-    assert verdict is not None and verdict.ok and verdict.warnings == []
+    check = verify_frontend_live(Path("/tmp/x/index.html"), cell_sandbox=None)
+    assert check.status == "passed" and check.verdict.ok and check.verdict.warnings == []
 
 
 def test_live_check_maps_findings_to_errors_and_a_warning(monkeypatch):
@@ -217,8 +227,10 @@ def test_live_check_maps_findings_to_errors_and_a_warning(monkeypatch):
         HtmlFinding(kind="crashed", detail="renderer process crashed while loading the page"),
         HtmlFinding(kind="empty_page", detail="page rendered with no visible text or elements"),
     ])
-    verdict = verify_frontend_live(Path("/tmp/x/index.html"), cell_sandbox=None)
-    assert verdict is not None and not verdict.ok
+    check = verify_frontend_live(Path("/tmp/x/index.html"), cell_sandbox=None)
+    assert check.status == "failed"
+    verdict = check.verdict
+    assert not verdict.ok
     assert verdict.errors == [
         "Loaded in a headless browser, the page logged a console error: "
         "Uncaught ReferenceError: state is not defined (line 4)",

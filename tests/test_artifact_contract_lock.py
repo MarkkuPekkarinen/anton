@@ -326,7 +326,7 @@ def test_squash_does_not_truncate_but_normalize_does():
 
 _VERIFIER_FUNCS = (
     "verify_frontend", "verify_frontend_live", "verify_app_live", "_browser_verdict",
-    "evaluate_backend", "verify_backend",
+    "_render_verdict", "evaluate_backend", "verify_backend",
 )
 _ORCHESTRATOR_FUNCS = ("_gen_verify_backend", "_gen_verify_frontend")
 
@@ -410,6 +410,18 @@ RULES: tuple[Rule, ...] = (
          (("frontend", "a URL that failed"),)),
     Rule("warnings", "Loaded in a headless browser, the page rendered no visible text or elements.",
          _both(_FRONT_BOTH, "no visible text")),
+    # ── _render_verdict: the render-check service loads the html-app page the
+    # way the app preview does (srcdoc frame, preview CSP, two viewports). ──
+    Rule("errors", "Loaded in a headless browser, the page broke the app preview's content ",
+         (("html", "content security policy blocks"),)),
+    Rule("errors", "Loaded in a headless browser, the page asked for a separate file, which the ",
+         (("html", "separate file the page asks"),)),
+    Rule("errors", "Loaded in a headless browser, the page threw an uncaught exception: ",
+         (("html", "uncaught exception"),)),
+    Rule("errors", "Loaded in a headless browser, a chart, map or canvas stayed blank: ",
+         (("html", "stays blank"),)),
+    Rule("errors", "Loaded in a headless browser, the page is wider than the screen: ",
+         (("html", "wider than the screen"),)),
     # ── verify_frontend, fullstack only ──
     Rule("errors", 'Missing <meta name="api-base" content=""> (required for fullstack frontends).',
          (("frontend", 'name="api-base"'),)),

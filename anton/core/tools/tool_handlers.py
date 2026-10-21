@@ -380,30 +380,34 @@ def _check_pages(
     """Load the changed artifacts' pages in a browser.
 
     With the render-check service configured: the pages this cell edited,
-    and the primary page of a changed artifact other than a fullstack app
+    and the main page of a changed artifact other than a fullstack app
     whose pages the cell left alone (it rewrote only a file the page loads,
-    say, or deleted one), each artifact's primary first, within one budget
-    per cell. The screenshot kept is the first failed page's, or the first
-    page's when none failed; with `screenshot` False the service is asked
-    for none. A fullstack app's page is not sent: it calls its backend,
-    which the service does not run, and the service fails every request to
-    the page's own origin. generate_artifact loads that page through its
-    running backend instead (`verifiers.verify_app_live`). Otherwise the
-    local Electron browser loads every page of a changed artifact
-    (`lint_html`), and a sandbox policy, which starts no browser, says so
-    on each page.
+    say, or deleted one), each artifact's main page first, within one budget
+    per cell. An artifact's main page is its primary, else its
+    `index.html`, else its first page by name. The screenshot kept is the
+    first failed page's, or the first page's when none failed; with
+    `screenshot` False the service is asked for none. A fullstack app's
+    page is not sent: it calls its backend, which the service does not
+    run, and the service fails every request to the page's own origin.
+    generate_artifact loads that page through its running backend instead
+    (`verifiers.verify_app_live`). Otherwise the local Electron browser
+    loads the same pages (`lint_html`), and a sandbox policy, which starts
+    no browser, says so on each of them.
 
-    Every page checked gets a line: its findings, that it passed, or that it
-    was not checked in a browser and why (no browser here, a sandbox, a
-    fullstack app, the service could not vouch for it, the budget ran out,
-    the page is too large), with what an unverified check still found.
-    Silence never stands for a pass. Those findings are listed only for a
-    page not in `findings_listed_earlier`, the pages whose findings an
-    earlier unverified check this turn already listed, so the agent fixes
-    them once and does not edit a page no check can vouch for again on
-    every cell. A check that listed nothing (the service was busy, the
-    cell's time ran out) leaves the next one free to list. The pages this
-    call lists findings for come back in `findings_listed`.
+    Every page checked gets a line: its findings, that the service passed
+    it, or that it was not checked in a browser and why (no browser here, a
+    sandbox, a fullstack app, the service could not vouch for it, the budget
+    ran out, the page is too large), with what an unverified check still
+    found. The local browser adds no line for a page that passed: the
+    result stays in history and is resent on every model call, and a page
+    it could not load still gets a line, so silence there means a pass.
+    Those findings are listed only for a page not in
+    `findings_listed_earlier`, the pages whose findings an earlier
+    unverified check this turn already listed, so the agent fixes them once
+    and does not edit a page no check can vouch for again on every cell. A
+    check that listed nothing (the service was busy, the cell's time ran
+    out) leaves the next one free to list. The pages this call lists
+    findings for come back in `findings_listed`.
     """
     from anton.core.artifacts import render_check
     from anton.core.artifacts.html_lint import discover_browser, lint_html
@@ -414,8 +418,36 @@ def _check_pages(
     shot = None
     shot_page = ""
 
+    # `read_metadata`, not `open`: `open` reconciles the file list and may
+    # rewrite the metadata, which a check must not do.
+    metadata = {slug: store.read_metadata(slug) for slug in {page.slug for page in pages}}
+
+    def _type(page: _ChangedPage) -> str | None:
+        return metadata[page.slug].type if metadata[page.slug] is not None else None
+
+    def _primary(page: _ChangedPage) -> str | None:
+        return metadata[page.slug].primary if metadata[page.slug] is not None else None
+
+    def _order(page: _ChangedPage) -> tuple:
+        rel = page.key(store).page
+        return (rel != _primary(page), rel != "index.html", rel)
+
+    edited_slugs = {page.slug for page in pages if page.edited}
+    # Each artifact's main page, its first by `_order`: its primary, else
+    # `index.html`, else its first page by name.
+    main_page: dict[str, _ChangedPage] = {}
+    for page in sorted(pages, key=_order):
+        main_page.setdefault(page.slug, page)
+    to_check = sorted((
+        page for page in pages
+        if page.edited or (
+            page.slug not in edited_slugs and _type(page) not in _FULLSTACK_TYPES
+            and page == main_page[page.slug]
+        )
+    ), key=_order)
+
     if render_check.configured_url() is None:
-        for page in pages:
+        for page in to_check:
             label = f"{page.slug}/{page.path.name}"
             if cell_sandbox is not None:
                 messages.append(f"{label} — {_SANDBOX_BROWSER_SKIP}")
@@ -437,40 +469,15 @@ def _check_pages(
                 messages.append(f"{label} — not checked in a browser: {reason}")
                 page_checks[page.key(store)] = "unverified"
                 continue
-            if findings:
-                messages += [f"{label} — {f.message()}" for f in findings]
-            else:
-                messages.append(f"{label} — loaded in a local browser from disk: no problems found")
+            messages += [f"{label} — {f.message()}" for f in findings]
             page_checks[page.key(store)] = "failed" if findings else "passed"
         return ArtifactLint(messages=messages, page_checks=page_checks)
 
-    # `read_metadata`, not `open`: `open` reconciles the file list and may
-    # rewrite the metadata, which a check must not do.
-    metadata = {slug: store.read_metadata(slug) for slug in {page.slug for page in pages}}
-
-    def _type(page: _ChangedPage) -> str | None:
-        return metadata[page.slug].type if metadata[page.slug] is not None else None
-
-    def _primary(page: _ChangedPage) -> str | None:
-        return metadata[page.slug].primary if metadata[page.slug] is not None else None
-
-    def _order(page: _ChangedPage) -> tuple:
-        rel = page.key(store).page
-        return (rel != _primary(page), rel != "index.html", rel)
-
-    edited_slugs = {page.slug for page in pages if page.edited}
-    to_check = [
-        page for page in pages
-        if page.edited or (
-            page.slug not in edited_slugs and _type(page) not in _FULLSTACK_TYPES
-            and page.key(store).page == (_primary(page) or "index.html")
-        )
-    ]
     # Whether `shot` is a failed page's: until one is, every page is asked
     # for a screenshot, so the agent sees the page it has to fix.
     shot_failed = False
     deadline = time.monotonic() + _RENDER_CHECK_CELL_BUDGET_SECONDS
-    for page in sorted(to_check, key=_order):
+    for page in to_check:
         label = f"{page.slug}/{page.path.name}"
         if _type(page) in _FULLSTACK_TYPES:
             messages.append(f"{label} — {_FULLSTACK_PAGE_SKIP}")

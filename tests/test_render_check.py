@@ -2092,7 +2092,10 @@ _LINE = "“Shipments map” was not verified in a browser, so it may not displa
 
 async def test_a_sandboxed_turn_ends_with_a_line_for_an_unverified_page(service, project, policy):
     """The model can claim the page works whatever the checks said; this line
-    is anton's own, appended after the reply, and stays in history."""
+    is anton's own, appended after the reply as a paragraph of its own, and
+    stays in history and in the turn's explainability record."""
+    from anton.explainability import ExplainabilityStore
+
     service.answer((503, {"error": "busy"}, 0.0))
     session, _, _ = _session_for(project, [
         _llm_response("Writing.", {"action": "exec", "name": "main", "code": "write_page()"}),
@@ -2102,11 +2105,28 @@ async def test_a_sandboxed_turn_ends_with_a_line_for_an_unverified_page(service,
 
     streamed, _ = await _final_text(session)
 
-    assert streamed == "Writing.The map is ready and works." + _LINE
+    assert streamed == "Writing.The map is ready and works.\n\n" + _LINE
+    assert ExplainabilityStore(project).load_latest().answer_text == streamed
     last = session.history[-1]
     assert last["role"] == "assistant"
     texts = last["content"] if isinstance(last["content"], str) else "".join(b["text"] for b in last["content"])
     assert texts.endswith(_LINE)
+
+
+@pytest.mark.parametrize("reply", ["", "\n"])
+async def test_a_turn_with_no_reply_text_ends_with_only_the_line(service, project, policy, reply):
+    """With no reply before it, or one of only whitespace, the line opens
+    the message: no blank line goes first."""
+    service.answer((503, {"error": "busy"}, 0.0))
+    session, _, _ = _session_for(project, [
+        _llm_response("", {"action": "exec", "name": "main", "code": "write_page()"}),
+        _llm_response(reply),
+    ])
+    session._scratchpads._cell_sandbox = policy
+
+    streamed, _ = await _final_text(session)
+
+    assert streamed == reply + _LINE
 
 
 async def test_a_page_that_passed_gets_no_line(service, project, policy):
@@ -2154,7 +2174,7 @@ async def test_the_line_after_an_unspent_continuation_is_marked_as_no_replacemen
     _, events = await _final_text(session)
 
     phases = [(i, e.phase) for i, e in enumerate(events) if isinstance(e, StreamTaskProgress)]
-    line = next(i for i, e in enumerate(events) if isinstance(e, StreamTextDelta) and e.text == _LINE)
+    line = next(i for i, e in enumerate(events) if isinstance(e, StreamTextDelta) and e.text == "\n\n" + _LINE)
     assert any(p == "continuation" for _, p in phases)
     assert events[line - 1] == StreamTaskProgress(phase="handback", message="")
 

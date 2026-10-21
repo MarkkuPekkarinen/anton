@@ -564,6 +564,9 @@ class _Store:
     def __init__(self, root: Path) -> None:
         self.root = root
 
+    def read_metadata(self, slug: str) -> None:
+        return None
+
 
 def _artifact(root: Path, slug: str, filename: str, content: bytes) -> dict[str, tool_handlers.ArtifactFiles]:
     folder = root / slug

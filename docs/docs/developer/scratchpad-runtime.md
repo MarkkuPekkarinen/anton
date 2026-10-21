@@ -236,7 +236,8 @@ any of its content files: each file is compared by its mtime and size
 (`tool_handlers.ArtifactFiles`). The cell check loads the pages the cell
 edited. When an artifact other than a fullstack app changed but none of
 its pages did (the cell rewrote only a data file the page loads, say), it
-loads the artifact's primary page. It sends no page of a fullstack app:
+loads the artifact's main page: its primary, else its `index.html`, else
+its first page by name. It sends no page of a fullstack app:
 that page calls its backend, which the service does not run, so the cell's
 result names the page as not checked. Without the variable,
 `verify_frontend_live` reports the page as unverified and the cell's result

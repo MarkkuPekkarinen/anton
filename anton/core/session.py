@@ -2242,9 +2242,9 @@ class ChatSession:
         """The lines that end the turn's final message on a sandboxed
         deployment: one per artifact with a page that did not pass its last
         browser check this turn. Written by anton, not the model, so the user
-        hears it whatever the reply claims. Empty without a sandbox: there the local
-        browser check (`tool_handlers._check_pages`) reports to the agent
-        after every edit and no service is involved."""
+        hears it whatever the reply claims. Empty without a sandbox: there
+        each cell's check (`tool_handlers._check_pages`) already tells the
+        agent which page failed or was not checked in a browser."""
         if not self._page_checks or cell_sandbox_of(self._scratchpads) is None:
             return []
         return page_check_lines(resolve_artifact_store(self), checks=self._page_checks)
@@ -6051,6 +6051,10 @@ class ChatSession:
                         # drops the answer the user read for these lines.
                         yield StreamTaskProgress(phase="handback", message="")
                     text = "\n".join(page_lines)
+                    if any(part.strip() for part in assistant_text_parts):
+                        # A paragraph of its own, since the reply before it
+                        # may end without a line break.
+                        text = "\n\n" + text
                     assistant_text_parts.append(text)
                     yield StreamTextDelta(text=text)
                     self._append_history({"role": "assistant", "content": text})

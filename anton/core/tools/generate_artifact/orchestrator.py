@@ -1157,7 +1157,9 @@ def _stage_attachments(state: GenState) -> None:
     artifact type (`static/` for fullstack), which `write_prd` settles, and
     a cancelled run must not leave copies behind. Deterministic on purpose —
     the generators are told the relative names and never touch the bytes.
-    The copies are artifact files, so they join `files_written`.
+    The copies are artifact files, so they join `files_written`. An asset
+    that staging skips goes into the result's `warnings`, so the user hears
+    that their file is not on the page.
     """
     if not state.attachments:
         return
@@ -1168,6 +1170,7 @@ def _stage_attachments(state: GenState) -> None:
         if rel not in state.files_written:
             state.files_written.append(rel)
     skipped = [f"{a.name}: {a.skipped}" for a in state.attachments if a.skipped]
+    state.verify_warnings.extend(f"attached file not on the page: {s}" for s in skipped)
     if written or skipped:
         state.record(
             "stage_attachments", "done" if written else "skipped",

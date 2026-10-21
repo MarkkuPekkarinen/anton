@@ -32,6 +32,10 @@ class _FakeStore:
     def __init__(self, root: Path) -> None:
         self.root = root
 
+    def read_metadata(self, slug: str) -> None:
+        # The real store's answer for this file's `{}` metadata.json.
+        return None
+
 
 @pytest.fixture
 def store(tmp_path: Path) -> _FakeStore:
@@ -84,9 +88,9 @@ def test_a_configured_browser_that_fails_to_produce_output_says_so(
     ]
 
 
-def test_a_clean_load_in_the_local_browser_says_it_passed(monkeypatch, store: _FakeStore):
-    """A pass gets a line too, so the agent can tell a checked page from one
-    no browser loaded."""
+def test_a_clean_load_in_the_local_browser_adds_no_line(monkeypatch, store: _FakeStore):
+    """A pass adds no line: a page no browser loaded still gets one, so
+    silence means a pass. The record still says it passed."""
     from anton.core.tools import tool_handlers
 
     monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
@@ -96,7 +100,7 @@ def test_a_clean_load_in_the_local_browser_says_it_passed(monkeypatch, store: _F
 
     lint = tool_handlers.lint_changed_artifact_files(store, {"dash-abc12345": ArtifactFiles()})
 
-    assert lint.messages == ["dash-abc12345/dash.html — loaded in a local browser from disk: no problems found"]
+    assert lint.messages == []
     assert lint.page_checks == {("dash-abc12345", "dash.html"): "passed"}
 
 
@@ -142,3 +146,96 @@ def test_skips_artifacts_the_cell_did_not_touch(store: _FakeStore):
     before = snapshot_existing_artifacts(store)
 
     assert lint_changed_artifact_files(store, before).messages == []
+
+
+def _dashboard(
+    tmp_path: Path, *, primary: str | None = "index.html", pages: tuple[str, ...] = ("index.html", "details.html")
+):
+    """A dashboard whose `pages` read `data.csv`. By default its primary
+    `index.html` has a second page beside it."""
+    from anton.core.artifacts.store import ArtifactStore
+
+    store = ArtifactStore(tmp_path / "artifacts")
+    slug = store.create(name="Dash", description="d", type="html-app", primary=primary).slug
+    folder = store.root / slug
+    for name in pages:
+        (folder / name).write_text(f"<html><body>{name}</body></html>")
+    (folder / "data.csv").write_text("a,b\n1,2\n")
+    return store, slug
+
+
+@pytest.mark.parametrize(
+    ("primary", "pages", "cell", "loaded_pages"),
+    [
+        ("index.html", ("index.html", "details.html"), "data.csv", ["index.html"]),
+        ("index.html", ("index.html", "details.html"), "details.html", ["details.html"]),
+        (None, ("index.html", "details.html"), "data.csv", ["index.html"]),
+        (None, ("dashboard.html",), "data.csv", ["dashboard.html"]),
+        (None, ("summary.html", "details.html"), "data.csv", ["details.html"]),
+        ("summary.html", ("summary.html", "details.html"), "data.csv", ["summary.html"]),
+    ],
+)
+def test_the_local_browser_loads_only_the_edited_pages_and_says_nothing_on_a_pass(
+    monkeypatch, tmp_path: Path, primary: str | None, pages: tuple[str, ...], cell: str, loaded_pages: list[str]
+):
+    """Without the render-check service, the local browser loads the page
+    the cell edited, or the artifact's main page when the cell changed only
+    a file the page reads, the same pages the service would get. The main
+    page is the primary, else `index.html`, else the first page by name,
+    so an artifact created without a primary still gets one checked. A
+    clean page adds no line: the result stays in history and is resent on
+    every model call, and silence already means a pass, since a page the
+    browser could not load still gets a line."""
+    from anton.core.tools import tool_handlers
+
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
+    loaded: list[str] = []
+    monkeypatch.setattr(
+        "anton.core.artifacts.html_lint.lint_html",
+        lambda path, *, cell_sandbox: loaded.append(path.name) or [],
+    )
+    store, slug = _dashboard(tmp_path, primary=primary, pages=pages)
+    before = tool_handlers.snapshot_existing_artifacts(store)
+    (store.root / slug / cell).write_text("changed by this cell")
+
+    lint = tool_handlers.lint_changed_artifact_files(store, before)
+
+    assert loaded == loaded_pages
+    assert lint.messages == []
+    assert lint.page_checks == {(slug, page): "passed" for page in loaded_pages}
+
+
+def test_a_host_with_no_browser_names_only_the_page_the_cell_edited(monkeypatch, tmp_path: Path):
+    """A cell that edits one page of a two-page artifact, on a host with no
+    browser, gets one line, for that page, saying why it was not checked."""
+    from anton.core.tools import tool_handlers
+
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
+    monkeypatch.delenv("ANTON_HTML_LINT_BROWSER", raising=False)
+    store, slug = _dashboard(tmp_path)
+    before = tool_handlers.snapshot_existing_artifacts(store)
+    (store.root / slug / "details.html").write_text("<html><body>new details</body></html>")
+
+    lint = tool_handlers.lint_changed_artifact_files(store, before)
+
+    assert lint.messages == [f"{slug}/details.html — not checked in a browser: no browser on this deployment"]
+    assert lint.page_checks == {(slug, "details.html"): "unverified"}
+
+
+def test_a_finding_on_an_edited_page_still_reaches_the_agent(monkeypatch, tmp_path: Path):
+    from anton.core.artifacts.html_lint import HtmlFinding
+    from anton.core.tools import tool_handlers
+
+    monkeypatch.delenv("ANTON_RENDER_CHECK_URL", raising=False)
+    monkeypatch.setattr(
+        "anton.core.artifacts.html_lint.lint_html",
+        lambda path, *, cell_sandbox: [HtmlFinding(kind="console_error", detail="boom")],
+    )
+    store, slug = _dashboard(tmp_path)
+    before = tool_handlers.snapshot_existing_artifacts(store)
+    (store.root / slug / "index.html").write_text("<html><body><script>boom()</script></body></html>")
+
+    lint = tool_handlers.lint_changed_artifact_files(store, before)
+
+    assert lint.messages == [f"{slug}/index.html — console_error: boom"]
+    assert lint.page_checks == {(slug, "index.html"): "failed"}

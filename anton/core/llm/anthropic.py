@@ -14,7 +14,7 @@ from .provider import (
     ProviderAuthError,
     ProviderConnectionInfo,
     ProviderErrorBody,
-    STREAM_DROP_ERRORS,
+    STREAM_DROP_ERROR,
     StreamComplete,
     StreamEvent,
     StreamReasoningDelta,
@@ -29,7 +29,6 @@ from .provider import (
     classify_content_rejection,
     classify_markup_bad_request,
     classify_transient,
-    stream_drop_error,
     log_transient_provider_error,
     retry_after_seconds,
     compute_context_pressure,
@@ -497,7 +496,7 @@ class AnthropicProvider(LLMProvider):
             raise
         except anthropic.APIStatusError as exc:
             _raise_for_status_error(exc, model=model)
-        except anthropic.APIConnectionError as exc:
+        except (anthropic.APIConnectionError, STREAM_DROP_ERROR) as exc:
             # A connection error here is retryable. If it dropped mid-stream
             # (after the 200), the SDK never retried it → the session must back
             # off and retry. If it failed during request establishment, the SDK
@@ -508,10 +507,6 @@ class AnthropicProvider(LLMProvider):
                 else "Could not reach Anthropic — check your connection or try again in a moment.",
                 provider="Anthropic", code="connection_error",
                 session_backoff=stream_started, model=model,
-            ) from exc
-        except STREAM_DROP_ERRORS as exc:
-            raise stream_drop_error(
-                provider="Anthropic", target="Anthropic", model=model,
             ) from exc
         finally:
             usage = Usage(

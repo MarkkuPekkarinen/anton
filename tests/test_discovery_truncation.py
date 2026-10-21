@@ -7,11 +7,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-import httpx2
 import pytest
 
 from anton.core.llm.effort import TRUNCATION_RETRY_NOTE
-from anton.core.llm.provider import LLMResponse, ToolCall, Usage
+from anton.core.llm.provider import LLMResponse, ToolCall, TransientProviderError, Usage
 from anton.core.tools.generate_artifact.discovery import brief, engine, prd, prompts, sub_tools
 from anton.core.tools.generate_artifact.discovery.state import PrdState
 from anton.core.tools.generate_artifact.orchestrator import _needs_data_loop
@@ -117,7 +116,8 @@ async def test_retry_works_without_a_progress_channel():
 
 
 async def test_dropped_stream_in_discovery_is_retried_at_half_budget():
-    state, llm = _state(httpx2.RemoteProtocolError("peer closed connection"), _ok())
+    drop = TransientProviderError("lost", code="connection_error", session_backoff=True)
+    state, llm = _state(drop, _ok())
     await brief.draft_brief(state)
     assert [c["max_tokens"] for c in llm.stream_calls] == [BUDGET, BUDGET // 2]
 

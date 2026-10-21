@@ -12,13 +12,17 @@ import asyncio
 import json
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
-from anton.core.artifacts import html_lint
+from anton.core.artifacts import html_lint, render_check
 from anton.core.artifacts.html_lint import lint_html, lint_url
+from anton.core.artifacts.render_check import RenderFinding
+from anton.core.backends.sandbox import CellSandbox, SandboxedSpawn, cell_sandbox_of
 from anton.core.utils.scratchpad import install_call_failed
+from anton.utils.datasources import scrub_output
 
-from .state import VerifyResult
+from .state import BrowserCheck, VerifyResult
 
 _FETCH_CALL = re.compile(r"""fetch\s*\(\s*(?:api\s*\(\s*)?['"]([^'"]+)['"]""")
 # Every literal `fetch()` target, template literals included: the `api()`
@@ -94,12 +98,78 @@ def _fetch_path_key(raw: str) -> str | None:
         return None
     key = normalise_api_path(target)
     return None if key == _HEALTH_PATH else key
-_BARE_SCRIPT_SRC = re.compile(r"""<script[^>]*\bsrc\s*=\s*['"]([^'"]+)['"]""", re.I)
-# Libraries the design rules let a page load from the network. Matched as
-# substrings of the script URL so a different CDN host or version still
-# passes; anything else is advisory-flagged, since the prompt allows other
-# libraries only when the user asked for them.
-_ALLOWED_CDN_LIBRARIES = ("echarts", "tailwindcss")
+# The body of a tag, scanned for attributes in a second step so that every
+# `src`/`href` of one tag is seen. Two steps also keep it linear: a single
+# `<[a-z][^>]*?…(src|href)` pattern rescanned to the next `>` from every `<b`
+# of embedded data, which is quadratic in the page size.
+_TAG_BODY = re.compile(r"<[a-z][^>]*", re.I)
+# A `src`/`href` value that starts with exactly one `/`: a path from the root.
+# `(?<![\w-])` keeps `data-src`/`data-href` out; `(?![/\\])` lets `//host` and
+# `/\host` through (browsers read both as another host). Quoted or not, with
+# leading spaces the browser strips; `\\?` takes the escaped quote of HTML held
+# in a JS string (`"<a href=\"/x\">"`), which innerHTML makes a real link. The
+# quote and the spaces after it are one optional group, so a run of spaces
+# stays linear. `(?=[sh])` lets the engine skip to candidate letters.
+_ROOT_RELATIVE_ATTR = re.compile(
+    r"""(?=[sh])(?<![\w-])(?P<name>src|href)\s*=\s*(?:\\?['"]\s*)?(?P<value>/(?![/\\])[^\s'"<>\\]*)""",
+    re.I,
+)
+# What every `_ROOT_RELATIVE_ATTR` match contains, anchored on a literal so a
+# page without any such text skips the per-tag pass in a few milliseconds.
+_ROOT_RELATIVE_ATTR_GATE = re.compile(r"""=\s*(?:\\?['"]\s*)?/(?![/\\])""")
+_LINK_TAG = re.compile(r"<link\b", re.I)
+_LINK_REL = re.compile(
+    r"""(?<![\w-])rel\s*=\s*\\?(?:['"](?P<quoted>[^'"<>]*)|(?P<bare>[^\s'"<>\\]+))""",
+    re.I,
+)
+# The only `<link>` relations that load something into the page. Icons, the
+# manifest, canonical and alternate links are read for the top-level page or
+# not fetched at all, so a root-relative `href` on them breaks nothing.
+_LOADING_LINK_RELS = frozenset({"stylesheet", "preload", "modulepreload", "prefetch"})
+# A `fetch()` or `new EventSource()` whose first argument is a string literal
+# from the root, i.e. not wrapped in `api()`. The global is caught bare or as
+# `window.`/`self.`/`globalThis.`; `cache.fetch(` is some object's own method
+# and `prefetch(` another name. `(?=[wsgfE])` holds the first letters, so the
+# engine skips to candidates; `re.S` for multi-line template literals.
+_ROOT_RELATIVE_CALL = re.compile(
+    r"""(?=[wsgfE])(?<![\w$.])(?:(?:window|self|globalThis)\.)?"""
+    r"""(?P<name>fetch|EventSource)\s*\(\s*(?P<quote>['"`])(?P<value>/(?![/\\]).*?)(?P=quote)""",
+    re.S,
+)
+# The page gets one retry, so the message names enough paths for a page full
+# of copied links to be fixed in one go.
+_ROOT_RELATIVE_SHOWN = 20
+_ROOT_RELATIVE_VALUE_MAX = 80
+_HINT_RELATIVE = (
+    "Use a relative path for files and links, e.g. logo.png, "
+    "or a full https:// URL for an external page."
+)
+_HINT_STATIC = (
+    "A fullstack page is itself served from static/, "
+    "so a file in static/ is app.js, not static/app.js."
+)
+_HINT_API_ATTR = "Set an API address in an attribute from JS: a.href = api('/api/export')."
+_HINT_API_CALL = (
+    "Call the API through api(): fetch(api('/api/items')), "
+    "new EventSource(api('/api/stream'))."
+)
+_HINT_EMBED = "Embed the data in the page instead of fetching it."
+# The one host the app preview's content security policy lets a page load a
+# script from (cowork's web shell, `script-src`). Its `style-src` and
+# `img-src` name no host a page can use, so an external stylesheet or image
+# never loads there at all. Matched by host, not by library name, so a
+# library from another CDN is flagged whatever it is called.
+_PREVIEW_SCRIPT_HOST = "cdn.jsdelivr.net"
+_SCRIPT_TAG = re.compile(r"<script\b[^>]*>", re.I)
+_IMG_TAG = re.compile(r"<img\b[^>]*>", re.I)
+_SRC_ATTR = re.compile(r"""(?<![\w-])src\s*=\s*(?:['"](?P<quoted>[^'"]*)['"]|(?P<bare>[^\s'"<>]+))""", re.I)
+_HREF_ATTR = re.compile(r"""(?<![\w-])href\s*=\s*(?:['"](?P<quoted>[^'"]*)['"]|(?P<bare>[^\s'"<>]+))""", re.I)
+# `import x from 'https://…'`, `import 'https://…'` and `import('https://…')`
+# in a module script: loaded under the same `script-src`.
+_MODULE_IMPORT = re.compile(
+    r"""\bimport\s*(?:\(\s*|[\w*{}\s,$]*?\bfrom\s*|\s)['"](?P<url>(?:https?:)?//[^'"]+)['"]""", re.I
+)
+_EXTERNAL_SHOWN = 5
 
 _UNIVERSAL_IMPORTANT = re.compile(r"\*\s*\{[^}]*!important")
 # Media queries whose universal `!important` blocks are legitimate practice
@@ -133,6 +203,109 @@ def _exempt_media_spans(html: str) -> list[tuple[int, int]]:
             i += 1
         spans.append((m.start(), i))
     return spans
+
+
+def _shown_value(value: str) -> str:
+    """A value for the message: one line, at most `_ROOT_RELATIVE_VALUE_MAX`
+    characters, in single quotes whatever quote the page used."""
+    value = re.sub(r"\s+", " ", value)
+    if len(value) > _ROOT_RELATIVE_VALUE_MAX:
+        value = value[: _ROOT_RELATIVE_VALUE_MAX - 1] + "…"
+    return f"'{value}'"
+
+
+def _loads_nothing(tag: str) -> bool:
+    """A `<link>` with no relation in `_LOADING_LINK_RELS`."""
+    if not _LINK_TAG.match(tag):
+        return False
+    m = _LINK_REL.search(tag)
+    rels = (m["quoted"] or m["bare"] or "").lower().split() if m else []
+    return _LOADING_LINK_RELS.isdisjoint(rels)
+
+
+def _attr_value(pattern: re.Pattern[str], tag: str) -> str | None:
+    m = pattern.search(tag)
+    if m is None:
+        return None
+    return (m["quoted"] if m["quoted"] is not None else m["bare"]).strip()
+
+
+def _external_host(url: str) -> str | None:
+    """The host of an `http(s)://` or `//` URL, lower case, or None for any
+    other value (a relative path, `data:`, `blob:`)."""
+    m = re.match(r"(?:https?:)?//([^/?#\s:]+)", url.strip(), re.I)
+    return m.group(1).lower() if m else None
+
+
+def _resources_the_preview_blocks(html: str) -> list[str]:
+    """External scripts from a host other than `_PREVIEW_SCRIPT_HOST`, and
+    every external stylesheet and image, in page order without repeats."""
+    found: list[tuple[int, str]] = []
+    for tag in _SCRIPT_TAG.finditer(html):
+        src = _attr_value(_SRC_ATTR, tag.group())
+        host = _external_host(src) if src else None
+        if host is not None and host != _PREVIEW_SCRIPT_HOST:
+            found.append((tag.start(), src))
+    for m in _MODULE_IMPORT.finditer(html):
+        if _external_host(m["url"]) != _PREVIEW_SCRIPT_HOST:
+            found.append((m.start(), m["url"]))
+    for tag in _LINK_TAG.finditer(html):
+        body = _TAG_BODY.match(html, tag.start())
+        text = body.group() if body else ""
+        rel = _LINK_REL.search(text)
+        rels = (rel["quoted"] or rel["bare"] or "").lower().split() if rel else []
+        href = _attr_value(_HREF_ATTR, text)
+        if "stylesheet" in rels and href and _external_host(href) is not None:
+            found.append((tag.start(), href))
+    for tag in _IMG_TAG.finditer(html):
+        src = _attr_value(_SRC_ATTR, tag.group())
+        if src and _external_host(src) is not None:
+            found.append((tag.start(), src))
+    return list(dict.fromkeys(url for _, url in sorted(found)))
+
+
+def _root_relative_detail(html: str, *, is_fullstack: bool) -> str | None:
+    """The rest of rule 4a's message after its fixed head, or None when the
+    page has no root-relative path: every finding in page order without
+    repeats, then the hints that fit what was found and the page kind."""
+    hits = []
+    if _ROOT_RELATIVE_ATTR_GATE.search(html):
+        for tag in _TAG_BODY.finditer(html):
+            body = tag.group()
+            if not _loads_nothing(body):
+                hits += [
+                    (tag.start() + m.start(), True, m["name"].lower(), m["value"])
+                    for m in _ROOT_RELATIVE_ATTR.finditer(body)
+                ]
+    hits += [(m.start(), False, m["name"], m["value"]) for m in _ROOT_RELATIVE_CALL.finditer(html)]
+    if not hits:
+        return None
+    # Repeats are dropped by the full value: two long paths that differ only
+    # after the cut are still two findings.
+    found = list(dict.fromkeys(hit[1:] for hit in sorted(hits)))
+
+    listed = ", ".join(
+        f"{name}={_shown_value(value)}" if in_attr else f"{name}({_shown_value(value)})"
+        for in_attr, name, value in found[:_ROOT_RELATIVE_SHOWN]
+    )
+    if len(found) > _ROOT_RELATIVE_SHOWN:
+        listed += f" and {len(found) - _ROOT_RELATIVE_SHOWN} more"
+
+    attr_values = [value for in_attr, _, value in found if in_attr]
+    hints = []
+    if attr_values:
+        hints.append(_HINT_RELATIVE)
+    if is_fullstack and any(v.startswith("/static/") for v in attr_values):
+        hints.append(_HINT_STATIC)
+    if is_fullstack and any(v.startswith("/api/") for v in attr_values):
+        hints.append(_HINT_API_ATTR)
+    if any(not in_attr for in_attr, _, _ in found):
+        hints.append(_HINT_API_CALL if is_fullstack else _HINT_EMBED)
+    return (
+        f"{listed}. The page is served under a path prefix, in the app preview "
+        "and once published, and a path from the root drops it. " + " ".join(hints)
+        + " Moving the same root-relative path into a JS string does not fix it."
+    )
 
 
 def verify_frontend(
@@ -174,6 +347,18 @@ def verify_frontend(
     for m in re.finditer(r"""fetch\s*\(\s*(?:api\s*\(\s*)?['"]?https?://""", html, re.I):
         errors.append(f"Absolute URL is not allowed in fetch(): ...{html[m.start():m.start()+60]!r}")
         break
+
+    # 4a. No root-relative path in a `src`/`href` value or a literal `fetch()`
+    #     / `new EventSource()` target. The page is served under a path prefix
+    #     (the app preview's proxy route, the published host's `/_t/<…>/`) that
+    #     such a path drops, and `verify_app_live` loads the fullstack page from
+    #     the backend root, where it works, so only this check sees it. It does
+    #     not reopen rule 4's decision on ABSOLUTE URLs. Not seen: `srcset`,
+    #     `action`, CSS `url()`, an attribute after a `>` inside an earlier
+    #     quoted value, and most addresses built in JS.
+    root_relative = _root_relative_detail(html, is_fullstack=is_fullstack)
+    if root_relative:
+        errors.append("Root-relative path is not allowed: " + root_relative)
 
     # 5. All backend calls under /api/* (fullstack only).
     if is_fullstack:
@@ -228,30 +413,47 @@ def verify_frontend(
     block_tags = re.findall(r"<(?:div|section|table|main|article)\b", low)
     if block_tags and "id=" not in low:
         warnings.append("Significant blocks have no stable `id` attributes.")
-    # A library loaded from a CDN the design rules do not name.
-    for src in _BARE_SCRIPT_SRC.findall(html):
-        if src.startswith("http") and not any(lib in src.lower() for lib in _ALLOWED_CDN_LIBRARIES):
-            warnings.append(f"Library CDN other than ECharts or Tailwind detected: {src!r} (allowed only if the user asked).")
-            break
+    # A script, stylesheet or image the app preview's content security policy
+    # blocks. Advisory: the page works opened from disk or on the desktop,
+    # and the browser check reports what the preview really blocks.
+    blocked = _resources_the_preview_blocks(html)
+    if blocked:
+        listed = ", ".join(_shown_value(url) for url in blocked[:_EXTERNAL_SHOWN])
+        if len(blocked) > _EXTERNAL_SHOWN:
+            listed += f" and {len(blocked) - _EXTERNAL_SHOWN} more"
+        warnings.append(
+            f"External resource the app preview does not load: {listed}. The preview loads "
+            "scripts only from https://cdn.jsdelivr.net/npm/ and no external stylesheet or "
+            "image: put styles in a <style> block and embed images as data: URIs."
+        )
 
     return VerifyResult(errors=errors, warnings=warnings)
 
 
-def verify_frontend_live(entry: Path) -> VerifyResult | None:
-    """Load the written page once in a headless browser (`html_lint`).
+def verify_frontend_live(entry: Path, *, cell_sandbox: CellSandbox | None, screenshot: bool = True) -> BrowserCheck:
+    """Load the written page once in a browser.
 
     The class of defects the text checks above cannot see: a script that
-    throws on load, a reference to a missing local file, a renderer crash,
-    a body that renders nothing. Findings become verifier errors with the
-    same fixed prefixes the contract lock registers, so the retry kickoff
-    carries the browser's own message (`Uncaught ReferenceError: state is
-    not defined (line 4)`), which is exactly what the generator needs.
+    throws on load, a library the preview's content security policy blocks,
+    a separate file the preview never serves, a chart that stays blank, a
+    renderer crash. Findings become verifier errors with the fixed prefixes
+    the contract lock registers, so the retry kickoff carries the browser's
+    own message (`Uncaught ReferenceError: state is not defined (line 4)`),
+    which is exactly what the generator needs.
 
-    Returns `None` when the page could not be checked at all — no browser
-    configured (`ANTON_HTML_LINT_BROWSER` unset: the cloud, a bare CLI),
-    a timeout, malformed runner output — as distinct from an empty verdict,
-    which means it loaded cleanly. The caller then rests on the static
-    verdict alone and notes the skip in the trace.
+    With `ANTON_RENDER_CHECK_URL` set, the render-check service loads the
+    page the way the app preview does, sandbox policy or not: the browser
+    runs in its own container and only the page's text leaves this process.
+    Otherwise the local Electron browser loads it (`html_lint`), which a
+    sandbox policy refuses. `screenshot=False` asks the service for no
+    screenshot.
+
+    `unverified` when no browser loaded the page or the check could not
+    vouch for it (no browser configured, a timeout, a library the check
+    cannot load); `reason` says why and the caller rests on the static
+    verdict. Never a pass in that case. Below that line, `reason` lists what
+    the render check still found (`render_check.unverified_findings`), such
+    as a blank map measured before the deadline, so the agent can fix it.
 
     Single-file `html-app` pages only: `lint_html` loads through `file://`,
     where a fullstack frontend's relative `/api/*` fetches cannot resolve and
@@ -262,13 +464,95 @@ def verify_frontend_live(entry: Path) -> VerifyResult | None:
     `lint_html`: Electron's `loadFile` reads a relative path against its own
     app directory, not the cwd.
     """
-    findings = lint_html(entry.resolve())
+    if render_check.configured_url() is not None:
+        outcome = render_check.check_file(entry.resolve(), cell_sandbox=cell_sandbox, screenshot=screenshot)
+        if outcome.status == "unverified":
+            found = render_check.unverified_findings(outcome)
+            return BrowserCheck(
+                status="unverified", reason=_unverified_reason(outcome, found=found),
+                findings_listed=bool(found.lines), screenshot=outcome.screenshot,
+            )
+        verdict = _render_verdict(outcome.findings)
+        return BrowserCheck(
+            status="passed" if verdict.ok else "failed", verdict=verdict, screenshot=outcome.screenshot
+        )
+    findings = lint_html(entry.resolve(), cell_sandbox=cell_sandbox)
     if findings is None:
-        return None
-    return _browser_verdict(findings, served=False)
+        return BrowserCheck(
+            status="unverified", reason=browser_check_skip_reason(sandboxed=cell_sandbox is not None)
+        )
+    verdict = _browser_verdict(findings, served=False)
+    return BrowserCheck(status="passed" if verdict.ok else "failed", verdict=verdict)
 
 
-def verify_app_live(url: str) -> VerifyResult | None:
+def _unverified_reason(
+    outcome: render_check.RenderCheckOutcome, *, found: render_check.UnverifiedFindings
+) -> str:
+    """`unverified: <why>`, and under it one line per finding the check still
+    made (`found`), so the agent sees a problem the check found before it
+    gave up."""
+    lines = [f"unverified: {outcome.unverified_reason}"]
+    if found.lines:
+        lines.append(f"{found.lead.capitalize()}:")
+        lines += [f"- {line}" for line in found.lines]
+    if found.more:
+        lines.append(f"- and {found.more} more distinct findings, not listed")
+    return "\n".join(lines)
+
+
+def _render_verdict(findings: list[RenderFinding]) -> VerifyResult:
+    """The render check's findings as verifier errors, each named once with
+    the viewports it was seen in.
+
+    Every literal below is a `.append(...)` on purpose: the contract lock
+    reads them from this file and requires each in the generator prompts.
+    A `timeout` finding adds no error: it reaches here only beside a
+    finding that failed the page, which fails it with or without the
+    deadline.
+    Past `render_check.MAX_FINDINGS_SHOWN` distinct findings, the rest are
+    counted in one line, so a page that logs one error per data row cannot
+    fill the retry prompt.
+    """
+    errors: list[str] = []
+    grouped = render_check.grouped_findings(findings)
+    for kind, detail, where in grouped.shown:
+        if kind == "csp_violation":
+            errors.append(
+                "Loaded in a headless browser, the page broke the app preview's content "
+                f"security policy ({where}): {detail}"
+            )
+        elif kind == "separate_file":
+            errors.append(
+                "Loaded in a headless browser, the page asked for a separate file, which the "
+                f"app preview never serves ({where}): {detail}"
+            )
+        elif kind == "console_error":
+            errors.append(
+                f"Loaded in a headless browser, the page logged a console error: {detail} ({where})"
+            )
+        elif kind == "uncaught_exception":
+            errors.append(
+                f"Loaded in a headless browser, the page threw an uncaught exception: {detail} ({where})"
+            )
+        elif kind == "blank_view":
+            errors.append(
+                f"Loaded in a headless browser, a chart, map or canvas stayed blank: {detail} ({where})"
+            )
+        elif kind == "overflow":
+            errors.append(
+                f"Loaded in a headless browser, the page is wider than the screen: {detail} ({where})"
+            )
+        elif kind == "crashed":
+            errors.append("Loaded in a headless browser, the page crashed the renderer process.")
+    if grouped.more:
+        errors.append(
+            f"Loaded in a headless browser, the page had {grouped.more} more distinct problems, "
+            "not listed here: fix the ones above first."
+        )
+    return VerifyResult(errors=errors)
+
+
+def verify_app_live(url: str, *, cell_sandbox: CellSandbox | None) -> VerifyResult | None:
     """Load the fullstack page from its running backend in a headless browser.
 
     The counterpart of `verify_frontend_live` for `static/index.html`: served
@@ -276,9 +560,10 @@ def verify_app_live(url: str) -> VerifyResult | None:
     fetches resolve, so a console error is the page's own. A 4xx/5xx from the
     origin — an asset missing from `static/`, a `fetch()` to a route the
     backend does not serve — is reported as a failed request. Same `None`
-    contract as the file-based check (no browser, timeout, garbage output).
+    contract as the file-based check (no browser, timeout, garbage output,
+    a sandbox policy).
     """
-    findings = lint_url(url)
+    findings = lint_url(url, cell_sandbox=cell_sandbox)
     if findings is None:
         return None
     return _browser_verdict(findings, served=True)
@@ -321,8 +606,22 @@ def _browser_verdict(findings, *, served: bool) -> VerifyResult:
     return VerifyResult(errors=errors, warnings=warnings)
 
 
-def browser_check_skip_reason() -> str:
-    """Why `verify_frontend_live` returned None, for the trace.
+def browser_can_load(*, sandboxed: bool) -> bool:
+    """Whether `verify_frontend_live` will try to load the page in a browser:
+    the render check is configured, or a local browser is and no sandbox
+    policy refuses it. Decides only the progress line; the check itself
+    still reports `unverified` when the load produces nothing."""
+    if render_check.configured_url() is not None:
+        return True
+    return not sandboxed and html_lint.discover_browser() is not None
+
+
+def browser_check_skip_reason(*, sandboxed: bool = False) -> str:
+    """Why the local browser (`lint_html`) loaded nothing, for the trace and
+    the result's `checks_skipped`.
+
+    `sandboxed` says the check never ran because agent code runs in a sandbox
+    on this host, which starts no browser.
 
     `lint_html` folds every "could not check" into one None. A live trace
     said "ANTON_HTML_LINT_BROWSER unset" for what may
@@ -331,6 +630,8 @@ def browser_check_skip_reason() -> str:
     that changes between the check and this call could mislabel one run; the
     environment of a generation process does not change underneath it.
     """
+    if sandboxed:
+        return "skipped: agent code runs in a sandbox on this deployment, which starts no browser"
     configured = os.environ.get(html_lint.BROWSER_ENV_VAR)
     if not configured:
         return f"no headless browser configured ({html_lint.BROWSER_ENV_VAR} unset)"
@@ -483,7 +784,7 @@ def evaluate_backend(
     if not introspection.get("import_ok"):
         errors.append(
             "backend.py failed to import in the venv: "
-            + (introspection.get("import_error") or "unknown error")
+            + scrub_output(introspection.get("import_error") or "unknown error")
         )
         # Without a successful import, route/contract data is unreliable — stop here.
         return VerifyResult(errors=errors, warnings=warnings), _ds_keys(source)
@@ -657,6 +958,88 @@ print(json.dumps(result))
 '''
 
 
+# The syntax gate runs agent code too (`-m` with the artifact folder as cwd
+# imports an agent-written py_compile.py), so under a sandbox policy it gets a
+# bound like the import. Without a policy it waits as long as it takes.
+_COMPILE_TIMEOUT = 30.0
+
+
+@dataclass
+class _Check:
+    """One running verifier check, and its launch when it runs under a sandbox policy."""
+
+    proc: asyncio.subprocess.Process
+    launch: SandboxedSpawn | None = None
+
+
+async def _spawn_check(
+    *,
+    policy: CellSandbox | None,
+    argv: list[str],
+    cwd: Path,
+    env: dict[str, str] | None,
+) -> _Check:
+    """Start one verifier check, through the sandbox launcher when the pool has a policy.
+
+    With no policy the call is the verifier's original one: no `env` keyword
+    when `env` is None, so the child inherits the server's environment.
+    """
+    if policy is None:
+        return _Check(await asyncio.create_subprocess_exec(
+            *argv,
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            **({} if env is None else {"env": env}),
+        ))
+    launch = policy.launch(argv, env=policy.child_env(env or {}))
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *launch.argv,
+            cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=launch.env,
+            pass_fds=launch.pass_fds,
+        )
+    except BaseException:
+        launch.refusal()
+        raise
+    finally:
+        launch.close()
+    return _Check(proc, launch)
+
+
+async def _finish_check(check: _Check, *, timeout: float | None) -> tuple[bytes, bytes] | None:
+    """The check's output, or None after killing it at `timeout` (None waits unbounded).
+
+    Under a sandbox policy, raises the launcher's refusal, read from its
+    refusal pipe: the check's own exit code and stderr are agent code's.
+    """
+    proc = check.proc
+    try:
+        output = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        output = None
+    finally:
+        refusal = check.launch.refusal() if check.launch is not None else None
+    if refusal is not None:
+        raise refusal
+    return output
+
+
+def _sandboxed_check_env(ds_env: dict[str, str] | None) -> dict[str, str]:
+    """The import check's environment under a sandbox, before the allowlist.
+
+    The server's environment with its `DS_*` replaced by the artifact's own.
+    No `anton_state_pp` folder: `anton_state` imports from the server's
+    site-packages, which the venv's `_parent_venv.pth` already lists.
+    """
+    env = {k: v for k, v in os.environ.items() if not k.startswith("DS_")}
+    env.update(ds_env or {})
+    return env
+
+
 async def verify_backend(
     *,
     scratchpad_pool,
@@ -665,7 +1048,14 @@ async def verify_backend(
     import_timeout: float = 15.0,
     artifact_type: str = "",
     api_operations: set[str] | None = None,
+    ds_env: dict[str, str] | None = None,
 ) -> tuple[VerifyResult, list[str]]:
+    """Install the backend's requirements, compile it, then import it in its venv.
+
+    Under the pool's sandbox policy both checks run through the launcher, and
+    the import sees `ds_env` (the artifact's own `DS_*`) instead of the
+    server's.
+    """
     backend_py = artifact_path / "backend.py"
     if not backend_py.is_file():
         return VerifyResult(errors=["backend.py was not written."]), []
@@ -697,14 +1087,23 @@ async def verify_backend(
     if not venv_python:
         return VerifyResult(errors=["Scratchpad venv Python is unavailable (remote runtime?)."]), []
 
-    # py_compile first (fast syntax gate).
-    proc = await asyncio.create_subprocess_exec(
-        venv_python, "-m", "py_compile", "backend.py",
-        cwd=str(artifact_path),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    policy = cell_sandbox_of(scratchpad_pool)
+
+    # py_compile first (fast syntax gate). -P under the sandbox keeps the
+    # artifact folder off sys.path, so an agent-written py_compile.py there
+    # does not stand in for the standard library's.
+    compile_argv = (
+        [venv_python, "-m", "py_compile", "backend.py"]
+        if policy is None
+        else [venv_python, "-P", "-m", "py_compile", "backend.py"]
     )
-    _, cerr = await proc.communicate()
-    if proc.returncode != 0:
+    check = await _spawn_check(policy=policy, argv=compile_argv, cwd=artifact_path, env=None)
+    finished = await _finish_check(check, timeout=_COMPILE_TIMEOUT if policy is not None else None)
+    if finished is None:
+        return VerifyResult(errors=[f"backend.py compile timed out after {_COMPILE_TIMEOUT:.0f}s."]), \
+            _ds_keys(source)
+    _, cerr = finished
+    if check.proc.returncode != 0:
         return VerifyResult(errors=[f"backend.py failed to compile:\n{cerr.decode(errors='replace')}"]), \
             _ds_keys(source)
 
@@ -712,26 +1111,24 @@ async def verify_backend(
     # `build_backend_env` puts `anton_state` on PYTHONPATH exactly like the
     # launcher does for the real backend process — without it a correct
     # stateful backend fails right here on its own SDK import.
-    proc = await asyncio.create_subprocess_exec(
-        venv_python, "-c", _INTROSPECT_SCRIPT,
-        cwd=str(artifact_path),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        env=build_backend_env(None),
+    check = await _spawn_check(
+        policy=policy,
+        argv=[venv_python, "-c", _INTROSPECT_SCRIPT],
+        cwd=artifact_path,
+        env=build_backend_env(None) if policy is None else _sandboxed_check_env(ds_env),
     )
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=import_timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
+    finished = await _finish_check(check, timeout=import_timeout)
+    if finished is None:
         return VerifyResult(errors=[f"backend.py import timed out after {import_timeout}s."]), \
             _ds_keys(source)
+    out, err = finished
 
     line = (out.decode(errors="replace").strip().splitlines() or [""])[-1]
     try:
         introspection = json.loads(line)
     except json.JSONDecodeError:
         return VerifyResult(
-            errors=["backend introspection produced no JSON. stderr:\n" + err.decode(errors="replace")]
+            errors=["backend introspection produced no JSON. stderr:\n" + scrub_output(err.decode(errors="replace"))]
         ), _ds_keys(source)
 
     return evaluate_backend(

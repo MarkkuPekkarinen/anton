@@ -134,24 +134,58 @@ USING DATA:
 # (html-app and the fullstack `static/index.html`).
 _DESIGN_RULES = """\
 VISUAL DESIGN (for every HTML file you produce):
+- SCOPE: render ONLY what the request, the PRD, `spec.md` and the API
+  specification ask for. No invented brand or company names, logos,
+  taglines, marketing copy or intro paragraphs, status pills or badges,
+  footers or disclaimers unless asked. Requested content includes the
+  functional states (loading, empty, error and API error messages) and what
+  the rules below require: chart subtitles, units, estimated or converted
+  notes. The layout rules arrange that content; they never add other content.
 - Dark theme: background #0d1117, text #e6edf3.
   System sans-serif font stack, generous padding, responsive layout.
 - STYLING: Tailwind CSS is the recommended way to style the page. Load it
   once in `<head>` via CDN:
-  `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>`
+  `<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3"></script>`
   and use utility classes for layout, spacing, typography and colour
   (`bg-[#0d1117] text-[#e6edf3]` for the theme). Hand-written CSS in a
   `<style>` block stays allowed wherever utilities fall short — keyframes,
   chart containers, complex selectors — or when the page is too small to
   need a framework. No other CSS or JS library: the two CDN scripts named in
-  these rules (Tailwind, ECharts) are the ONLY external resources a page
-  may load. Both are fetched every time the page opens, so a page that must
-  work OFFLINE or without external resources (brief or PRD says so) skips
-  Tailwind and styles itself with hand-written CSS.
+  these rules (Tailwind, ECharts) and, for a map or globe, the recipe
+  packages under MAPS AND GLOBES, each at exactly the version shown, are the
+  ONLY external resources a page may load. They are fetched every time the
+  page opens, so a page that must work OFFLINE or without external resources
+  (brief or PRD says so) skips Tailwind and styles itself with hand-written
+  CSS.
 - ALWAYS use Apache ECharts for interactive charts via CDN:
-  `<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>`
+  `<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>`
   Initialise with `echarts.init(dom, 'dark')` and customise background to #0d1117.
   NEVER use Plotly, matplotlib, or other chart libraries unless explicitly asked.
+- MAPS AND GLOBES: ECharts ships no world outline, so a map or globe uses
+  one of these tested recipes, at exactly these versions. Load the world
+  atlas with d3@7.9.0 and topojson-client@3.1.0:
+  `<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>`
+  `<script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>`
+  `const WORLD_ATLAS = 'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json';`
+  `d3.json(WORLD_ATLAS).then((world) => { const countries = topojson.feature(world, world.objects.countries); /* draw */ });`
+  Load it with `d3.json`, never `fetch()`: the verifier fails an absolute
+  URL in `fetch()`. Then draw `countries` in one of three ways:
+  - d3 into an `<svg>` (`d3.geoNaturalEarth1().fitSize([w, h], countries)`,
+    `d3.geoPath`);
+  - ECharts: `echarts.registerMap('world', countries)`, then a `map` series
+    with `map: 'world'`;
+  - a globe: globe.gl@2.34.2
+    (`<script src="https://cdn.jsdelivr.net/npm/globe.gl@2.34.2/dist/globe.gl.min.js"></script>`)
+    with `.polygonsData(countries.features)`. It is heavy, so the browser
+    check may run out of time on it and leave the page unverified.
+  Never write GeoJSON into the page by hand: a world outline runs to hundreds
+  of KB. Leaflet, raster map tiles, MapLibre (it needs a web worker) and
+  echarts-gl (it needs `eval`) break the preview policy below.
+- PREVIEW POLICY: the web app preview runs the page in a sandboxed frame
+  under a content security policy that blocks what it does not allow. Build
+  to that policy so the page renders on every deployment: no external
+  stylesheet or web font, no external image or map tile (embed an image as a
+  `data:` URI), no `eval` or `new Function`, and no web workers.
 - Chart type by purpose: line for change over time, bar for comparing
   categories (horizontal when labels are long), stacked bar for composition
   across categories, scatter for the relation between two measures. Pie or
@@ -195,10 +229,18 @@ VISUAL DESIGN (for every HTML file you produce):
 
 _VERIFIER_CONTRACT = """\
 A static verifier checks each of these after `finish`; a violation fails the
-step and costs a regeneration:
+step and costs a regeneration, unless the item says it is only a warning:
 - A complete HTML document with an explicit `<body>`...`</body>`.
 - `<meta name="viewport" content="width=device-width, initial-scale=1.0">`.
 - No absolute URL in any `fetch()` call — relative paths only.
+- No root-relative path in `src`, `href`, `fetch()` or `new EventSource()`
+  (a value that starts with a single `/`, `/api/...` included): the page is
+  served under a path prefix, in the app preview and once published, and
+  such a path drops it, so the file, link or call fails. Use a relative
+  path for files and links (`logo.png`, or the relative name listed under
+  `## Attached files`); `https://`, `//`, `data:`, `blob:`, `#` and
+  `mailto:` values are fine. Moving the same root-relative path into a JS
+  string does not fix it.
 - The global name `window.__antonCommentsLayer` is never used; the host app
   reserves it.
 - Every opened `<script>` block must be closed with `</script>`.
@@ -206,13 +248,10 @@ step and costs a regeneration:
 - Every `z-index` is 1000 or below.
 - Significant block containers (`div`, `section`, `table`, `main`,
   `article`) carry stable `id` attributes — the host app attaches comments
-  to them.
-- BROWSER STORAGE (critical): `localStorage` / `sessionStorage` / `indexedDB`
-  / `document.cookie` may be unavailable — the in-app preview runs the page
-  in a sandboxed frame. Never touch them directly during top-level
-  initialisation: a throw there aborts the script before any listener is
-  bound, and the page renders with every control dead. Go through one
-  guarded helper with an in-memory fallback.\
+  to them. A missing `id` is only a warning.
+- A script from any host but `https://cdn.jsdelivr.net/npm/`, an external
+  stylesheet or an external image is only a warning, but the app preview
+  does not load it: keep styles in `<style>` and embed images as `data:` URIs.\
 """
 
 # The browser gate, one bullet per page kind: the html-app page is loaded
@@ -222,10 +261,19 @@ step and costs a regeneration:
 # speak of a fullstack app, and the failure it can see differs (a local file
 # under file://, a URL of the page's own origin over http).
 _BROWSER_GATE_HTML = """\
-- Where a headless browser is available, the page is also loaded once from
-  disk right after these checks: a console error, a crashed renderer or a
-  request for a local file that does not exist fails the step; a page with
-  no visible text or elements is a warning.\
+- Where a headless browser is available, the page is also loaded once right
+  after these checks, on a deployment that supports it the way the app
+  preview loads it: in a sandboxed frame under the preview's content security
+  policy, at a desktop and a phone width. A console error, an uncaught
+  exception, a
+  crashed renderer, a request for a local file that does not exist, a load
+  the preview's content security policy blocks, a separate file the page asks
+  for (the preview serves only the page itself), a chart, map or canvas that
+  stays blank, or a page wider than the screen fails the step; a page with no
+  visible text or elements is a warning. A library the check cannot load
+  leaves the page unverified, which does not fail the step. A page with
+  many findings gets the first ones listed and a count of more distinct
+  problems: fix the listed ones first.\
 """
 
 _BROWSER_GATE_SERVED = """\
@@ -237,10 +285,43 @@ _BROWSER_GATE_SERVED = """\
 """
 
 
+# Follows either browser-gate bullet. The browser check counts console errors,
+# so an error a view catches and only writes into the page never reaches it,
+# and an expected failure that logs one fails a page that works.
+_CAUGHT_ERRORS = """\
+- A view you guard with `try`/`catch` logs what it caught as well as writing
+  a short message into the view:
+  `try { drawMap(el); } catch (e) { console.error(e); el.textContent = 'The map could not load.'; }`.
+  A catch that only writes the message hides the error from the browser
+  check: at most the check reports the view as empty, and it cannot say what
+  broke it. Log with `console.error` only a view that failed to draw. An
+  expected failure stays silent or uses `console.warn`: the guarded storage
+  helper the browser storage note below asks for catches a throw on every
+  load in the preview frame, and a `console.error` there fails the check.\
+"""
+
+
+# Rules the verifier does not check, kept after the browser-gate bullet so the
+# list above holds only what is checked.
+_FRAME_NOTES = """\
+Not checked by the verifier, but the page breaks inside the frame without them:
+- BROWSER STORAGE (critical): `localStorage` / `sessionStorage` / `indexedDB`
+  / `document.cookie` may be unavailable — the in-app preview runs the page
+  in a sandboxed frame. Never touch them directly during top-level
+  initialisation: a throw there aborts the script before any listener is
+  bound, and the page renders with every control dead. Go through one
+  guarded helper with an in-memory fallback.
+- LINKS: the page runs inside a frame, in the app preview and on the
+  published link alike. `target="_top"` and `target="_parent"` do not work;
+  give a link to another artifact or an external site `target="_blank"`,
+  or it opens inside the frame.\
+"""
+
+
 def _verifier_contract(*, served: bool) -> str:
     return "## Verifier contract\n" + _VERIFIER_CONTRACT + "\n" + (
         _BROWSER_GATE_SERVED if served else _BROWSER_GATE_HTML
-    )
+    ) + "\n" + _CAUGHT_ERRORS + "\n\n" + _FRAME_NOTES
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +506,11 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
   items = await todos.list()
   n = await Collection(get_store(), "counters").increment("visits", field="n")
   ```
+  `Collection` stores its items under ITS OWN keys: `pk="_"` (unless you
+  pass `pk=`) and `sk="<name>#<key>"`. Data written through a `Collection`
+  is read back ONLY through the same `Collection` (`get`/`list`) — never
+  with raw `store.get(...)`/`store.query(...)` on your own pk/sk, which
+  finds nothing. Pick one style per piece of data and stick to it.
   Low-level `store` methods (all async; there is NO `scan()` and NO secondary
   indexes — `query` has no `index=` argument):
   * `await store.get(pk, sk=None)` → one item or `None`
@@ -436,6 +522,13 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
     do NOT hand-roll read-modify-write
   * `await store.update(pk, sk=None, *, set_fields=None, add_fields=None,
     if_version=None)` — atomic partial update
+- An item that `increment`/`update` CREATES carries NO `pk`/`sk` attributes
+  (and no `_key` via `Collection`): `query`/`list` return it without them,
+  so a listing must never read the key from such items. When a listing needs
+  the key, keep it as a plain field in the same atomic call —
+  `await store.update("counts", option, set_fields={"option": option},
+  add_fields={"count": 1})`. Never `put` a counter item before each
+  increment: `put` replaces the whole item and resets the count.
 - DESIGN KEYS AROUND ACCESS PATTERNS: every "list" endpoint must map to ONE
   `query(pk=...)` call (or `Collection.list()`). Never call the store in a
   loop to assemble a listing.
@@ -454,25 +547,33 @@ DURABLE STATE — this app persists data through the platform `STATE` store:
 # ---------------------------------------------------------------------------
 
 _FRONTEND_RULES = """\
-Three of these are verifier checks as well: a page without the api-base meta
-tag, one that calls the backend outside `/api/*`, or one whose `fetch()`
-names a path `openapi.json` does not define, fails the step.
+Four of these are verifier checks as well: a page without the api-base meta
+tag, one that calls the backend outside `/api/*`, one that calls it with a
+root-relative path instead of `api()`, or one whose `fetch()` names a path
+`openapi.json` does not define, fails the step.
 
 - Single self-contained HTML file: your own CSS in `<style>`, all JS in
   `<script>`. The only external resources are the CDN scripts named in the
-  design rules (Tailwind, ECharts).
+  design rules (Tailwind, ECharts) and, for a map or globe, the recipe
+  packages and world atlas named there.
 - Include the api-base meta tag in `<head>`:
   ```html
   <meta name="api-base" content="">
   ```
-  Empty `content` is the local default — fetch falls back to a relative path
-  and hits the same FastAPI process. At deploy time the publisher rewrites it.
+  Empty `content` is the local default: `api('/api/items')` is then
+  `/api/items` on the same FastAPI process. The publisher and the host
+  rewrite it.
 - Read the meta tag ONCE at startup and use the `api()` helper everywhere:
   ```js
   const API_BASE = document.querySelector('meta[name="api-base"]')?.content || "";
   const api = (path) => `${API_BASE}${path}`;
   // usage: fetch(api('/api/items'))
   ```
+- API addresses go ONLY through `api()`, with the path's leading `/` kept:
+  `api('/api/items')`. When one is needed in an attribute (a download link,
+  an `<img>`), set it from JS: `a.href = api('/api/export')`. Never write
+  `href="/api/export"` in the markup: a root-relative path fails the step
+  (see the verifier contract).
 - NEVER hardcode an absolute URL in the source.
 - Call ALL backend endpoints under the `/api/*` prefix. Never use bare paths.
 - Call ONLY the paths listed under `## API Specification`, spelled as the
@@ -480,7 +581,9 @@ names a path `openapi.json` does not define, fails the step.
   fails the step.
 - `static/` is the ONLY folder the backend serves. ANY additional frontend asset
   (separate CSS, JS, images, fonts, large data payloads) MUST live under
-  `static/` too — never at the artifact root, or it will 404 at runtime.\
+  `static/` too — never at the artifact root, or it will 404 at runtime.
+  The page itself is in `static/`, so reference such a file by its name
+  there: `app.js`, not `static/app.js` or `/static/app.js`.\
 """
 
 
@@ -507,7 +610,7 @@ HTML_APP_DEFAULT_PRIMARY = "index.html"
 _GEN_HTML_INPUTS = """\
 ## What you receive
 The user message carries these sections, in this order (some may be absent):
-- `## Product requirements` (prd.md) — reviewed and accepted by the user.
+- `## Product requirements` (prd.md) — written from the latest brief.
   This is the authoritative source; where anything else disagrees with it,
   the PRD wins. It ends at `{prd_footer}`.
 - `## Brief` — only when there is no PRD: the request as the calling agent
@@ -546,7 +649,8 @@ def _gen_html_task(target: str, *, fullstack: bool = False) -> str:
 Produce ONE self-contained HTML file named exactly `{target}`: the
 complete frontend of a fullstack app. Inline your own CSS and all JS; the
 only external resources allowed are the Tailwind and ECharts `<script>` tags
-from the CDNs named in the design rules. The backend is generated in parallel
+from the CDNs named in the design rules and, for a map or globe, the recipe
+packages and world atlas named there. The backend is generated in parallel
 and serves the endpoints listed under `## API Specification`: take exact
 paths and response shapes from there and call every one of them through the
 `api()` helper (see Fullstack rules). Embed no data — the page fetches it
@@ -558,9 +662,13 @@ the relative name given there."""
 Produce ONE self-contained HTML file named exactly `{target}`, at the root
 of the artifact folder. Inline your own CSS and all JS and embed all data in
 the file. Do not reference any other file of the artifact, except the assets
-listed under `## Attached files` (already in the folder, referenced by the
-relative name given there); the only external resources allowed are the
-Tailwind and ECharts `<script>` tags from the CDNs named in the design rules."""
+listed under `## Attached files`, by the relative name given there in quotes
+(`<img src="logo.png">`): once you have written the page, the pipeline
+replaces each such reference with the asset itself as a `data:` URI, since
+the app preview shows only the page. The only external resources allowed
+are the Tailwind and ECharts `<script>` tags from the CDNs named in the
+design rules and, for a map or globe, the recipe packages and world atlas
+named there."""
     return f"""\
 You are a single-purpose worker inside an artifact-generation pipeline. This
 step is `generate_frontend`.
@@ -644,8 +752,9 @@ every artifact fits, so the default is the whole file in a single body with
 `write_file(path, mode="w")`. Split ONLY a file that will clearly exceed it:
 - Each part costs a round; splitting a file that would have fit wastes it.
 - Continue exactly where the file now ends and append with `mode="a"`.
-  The `write_file` result reports the CHARACTERS and LINES added and the
-  file's new totals, so you know where the part landed without reading.
+  The `write_file` result reports the characters added,
+  the lines this part occupies and the file's new totals, so you know where
+  the part landed without reading.
 - If a reply is cut off before the closing marker, nothing is written and
   the tool result tells you what to send next. Follow it; never re-emit the
   whole file to "fix" something.
@@ -676,10 +785,13 @@ _GEN_TOOLS = """\
   them from `os.environ`, never from `data_vault` files. If a cell fails the
   same way twice, change strategy instead of re-running it.
 - `write_file(path, mode="w"|"a")` — writes the body of THIS reply.
-- `read_file(path)` — size, line count and tail of a file you wrote.
-  `read_file(path, full=true)` pulls the ENTIRE file into your context and
-  keeps it there for every remaining round. Use either only when you must
-  re-read content in order to keep WRITING — never to check finished work.
+- `read_text_file(path, start_line?, end_line?)` — read a file you wrote,
+  only when you must see it to keep writing; never to check finished work.
+  `path` is relative to the artifact folder. To see where your last part
+  ended, read the end: `start_line=-20`. To see one section, pass its line
+  range; `write_file` reports the lines each part occupies. `end_line=-1`
+  pulls the whole file into your context and keeps it there for every
+  remaining round.
 - `finish(summary)` — call exactly once, after the file is written.
 
 Python → JS: if you ever build file text inside a scratchpad cell, escape
@@ -1123,7 +1235,7 @@ _DATA_CONTEXT_HEADER = (
 
 
 PRD_SECTION_HEADER = (
-    "## Product requirements (prd.md — reviewed and accepted by the user; "
+    "## Product requirements (prd.md — written from the latest brief; "
     "this is the authoritative requirements source)"
 )
 PRD_SECTION_FOOTER = "--- end of prd.md ---"
@@ -1134,7 +1246,7 @@ def prd_section(state) -> str:
 
     The header states the document's standing rather than leaving the node to
     infer it from position: the same context carries `spec.md` and the data
-    record, and on any disagreement the accepted PRD wins. (The brief travels
+    record, and on any disagreement the PRD wins. (The brief travels
     only when there is no PRD — see `orchestrator._spec_context`.) One
     renderer for every node, so no node reads a differently-framed PRD.
 
@@ -1251,9 +1363,12 @@ any other stack. Describe behaviour, screens, data flow, and endpoints on top of
   an absolute URL anywhere in the spec.
 - Frontend: one self-contained HTML file (`static/index.html` for fullstack
   types) — vanilla JavaScript, Tailwind CSS via CDN for styling (hand-written
-  CSS where needed), Apache ECharts for charts. Both libraries need network
-  access when the page opens; when the PRD requires offline use, the spec
-  says so and the frontend is styled with hand-written CSS only.
+  CSS where needed), Apache ECharts for charts. A map or globe uses the
+  tested recipe: d3@7.9.0 and topojson-client@3.1.0 load world-atlas@2.0.2,
+  drawn with d3, with ECharts, or on a globe with globe.gl@2.34.2. These
+  libraries need network access when the page opens; when the PRD requires
+  offline use, the spec says so and the frontend is styled with hand-written
+  CSS only.
 - Durable state (`fullstack-stateful-app` ONLY): the platform STATE store — a
   document/key-value store keyed by (partition key, sort key) with named
   collections, no scan, no secondary indexes, atomic counters. The spec must

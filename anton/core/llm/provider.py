@@ -611,6 +611,8 @@ def damaged_tool_call_result(tc: ToolCall) -> dict | None:
             "body; if an argument was large, make it smaller or split the work "
             "across several calls."
         ),
+        # cowork-server's figure sources skip any history result marked
+        # is_error, since its text is anton's, not the tool's output.
         "is_error": True,
     }
 
@@ -831,7 +833,7 @@ class TransientProviderError(ConnectionError):
 
     Covers provider/infra-side hiccups — an ``overloaded_error``/``api_error``
     event (including the mid-stream case that arrives inside an HTTP-200 stream,
-    see ENG-673), a 5xx, a plain 429 (no quota detail), a dropped connection, or
+    see ENG-673), a 5xx, a 429 without a billing code, a dropped connection, or
     a truncated stream. The session loop backs off and retries these within a
     bounded budget; distinct from auth/quota/model-gate failures, which are
     permanent for the identical request and must fail fast.
@@ -945,8 +947,7 @@ class _BillingStopKind(NamedTuple):
 
 # The MindsHub authorization gate's billing deny codes:
 # ``wallet_empty`` rides a 402; ``included_allowance_exhausted`` and
-# ``free_air_daily_spend_fuse_exceeded`` ride a 429 (with NO FastAPI ``detail``,
-# so the legacy 429-quota branch never sees them). All three stop only an org
+# ``free_air_daily_spend_fuse_exceeded`` ride a 429. All three stop only an org
 # whose wallet cannot pay, and all three are permanent for the identical request
 # inside a turn: they belong on a billing card, never in the retry loop. The
 # fuse resets at the end of the UTC day, which no retry budget waits out. The
@@ -984,7 +985,7 @@ _MINDSHUB_BILLING_CTA = (
 # every environment and vanity host is a subdomain of one of them:
 # prod `api.mindshub.ai`, `api.staging.mindshub.ai`, `api.dev.mindshub.ai`,
 # per-PR envs `api-pr<N>.dev.mindshub.ai`, and the white-label surfaces
-# `llm.mdb.ai`, `llm.staging.mdb.ai`, `writer.mdb.ai`, `terabase.dev.mdb.ai`,
+# `llm.mdb.ai`, `llm.staging.mdb.ai`, vanity hosts under `*.mdb.ai` and `*.dev.mdb.ai`,
 # `view.mindshub.ai`. Terraform declares no other apex zone, and the wildcards
 # `*.mindshub.ai` / `*.mdb.ai` cover anything added later under them. The
 # positive cases are pinned in tests/test_status_error_mapper.py so this
@@ -1305,7 +1306,8 @@ def retry_after_seconds(exc: BaseException) -> float | None:
     """Seconds from a response's ``Retry-After`` header, or ``None`` (ENG-1537).
 
     The MindsHub gateway sends this on the velocity 429 (``rate_limited``,
-    `minds/inference/errors.py`) as integer seconds — the only form we act on.
+    `minds/inference/errors.py`) as integer seconds. Azure's ``retry-after-ms``
+    is read first when present, since it is the precise interval.
     The HTTP-date form is legal but nothing in use emits it, and mis-reading a
     date as a number would produce an absurd delay, so an unparseable value is
     treated as absent: the caller then falls back to its own backoff curve.
@@ -1321,18 +1323,21 @@ def retry_after_seconds(exc: BaseException) -> float | None:
     if headers is None:
         return None
     try:
+        raw_ms = headers.get("retry-after-ms") or headers.get("Retry-After-Ms")
         raw = headers.get("retry-after") or headers.get("Retry-After")
     except Exception:
         return None
-    if raw is None:
-        return None
-    try:
-        secs = float(str(raw).strip())
-    except (TypeError, ValueError):
-        return None  # HTTP-date form, or junk
-    if secs != secs or secs in (float("inf"), float("-inf")) or secs < 0:
-        return None
-    return secs
+    # Azure sends the precise interval in milliseconds next to a rounded-up Retry-After.
+    for value, scale in ((raw_ms, 1000), (raw, 1)):
+        if value is None:
+            continue
+        try:
+            secs = float(str(value).strip()) / scale
+        except (TypeError, ValueError):
+            continue  # HTTP-date form, or junk
+        if secs == secs and secs not in (float("inf"), float("-inf")) and secs >= 0:
+            return secs
+    return None
 
 
 def _rate_limited(
@@ -1375,7 +1380,8 @@ def classify_transient(
     the session waits the interval the server actually named (ENG-1537).
 
     ``velocity_confirmed`` says the caller POSITIVELY identified a velocity
-    limit — our gateway's ``rate_limited`` reason header or body code. Only then
+    limit — our gateway's ``rate_limited`` reason header or body code, or
+    Azure's ``retry-after-ms`` header. Only then
     does the 429 earn a session wait. The absence of billing carriers is not
     evidence of transience: both fail-fast guards below are string-exact, so a
     provider whose quota denial uses a different dialect (Gemini sends an
@@ -1413,13 +1419,15 @@ def classify_transient(
             provider=provider, code=f"http_{status_code}", session_backoff=False, model=model,
             status_code=status_code,
         )
-    if status_code == 429 and not parsed.top.detail:
+    if status_code == 429:
         # Plain rate-limit ("slow down"), NOT an out-of-quota 429. Quota 429s are
-        # mapped upstream (gateway dialect carries a `detail`, OpenAI's carries
-        # ``insufficient_quota``, the M3 gate's allowance and free-serving fuse
-        # 429s carry a billing code); the guards here are defense for direct
-        # callers, and for a mapper whose origin gate refused the code — a billing
-        # failure is permanent and must never enter the retry loop (ENG-1169).
+        # mapped upstream (OpenAI's carries ``insufficient_quota``, the M3 gate's
+        # allowance and free-serving fuse 429s carry a billing code). A body with
+        # only a FastAPI `detail` is a rate limit too: the MindsHub edge answers a
+        # request flood with one, and no MindsHub service sends a quota 429 in
+        # that shape. The guards here are defense for direct callers, and for a
+        # mapper whose origin gate refused the code — a billing failure is
+        # permanent and must never enter the retry loop (ENG-1169).
         if etype == "insufficient_quota":
             return None
         if wallet_denial_code(body):
@@ -1744,12 +1752,17 @@ def _image_too_large(message: object) -> ContentTooLargeError:
     )
 
 
-def _content_rejected() -> ContentValidationError:
-    """The shape refusal, shared by the 400 classifier and the Responses one."""
+def _content_rejected(*, code: str = "content_validation") -> ContentValidationError:
+    """The shape refusal, shared by the 400 classifier and the Responses one.
+
+    The Responses one passes the provider's image code, which names the one
+    image it could not use (`is_image_refusal` reads it).
+    """
     return ContentValidationError(
         "The model provider rejected part of this conversation's content "
         "(an attachment or image in an unsupported format). That content "
-        "will be removed automatically so the conversation can continue."
+        "will be removed automatically so the conversation can continue.",
+        code=code,
     )
 
 
@@ -1836,6 +1849,48 @@ def classify_content_rejection(
     return None
 
 
+# Words a provider's refusal of an image part uses: OpenAI names the part
+# ("image_url is only supported by certain models"), and servers for
+# text-only models name what the model lacks ("not a multimodal model").
+_IMAGE_REFUSAL_WORDS = ("image", "vision", "multimodal", "multi-modal")
+
+
+def is_image_refusal(exc: BaseException) -> bool:
+    """Whether the provider may have refused a request for carrying image
+    parts at all, as it does when the model takes no image input.
+
+    True for the shape rejection ``classify_content_rejection`` raises (a
+    ``ContentValidationError`` with its default code), and for a 400 or 422
+    whose error names an image. The second is how an OpenAI-compatible API
+    refuses an image sent to a model that takes no image input: OpenAI
+    answers chat.completions with "Invalid content type. image_url is only
+    supported by certain models." ``classify_content_rejection`` leaves that
+    400 unnamed on purpose, because its remedy removes every image in the
+    conversation.
+
+    False for a refusal of one image, which says nothing about images in
+    general: ``ContentTooLargeError`` (an image over the provider's size
+    limit), and a Responses API image code (``classify_responses_failure``
+    keeps it on the error), on the error or in a 400's body. False for a
+    ``TransientProviderError`` too, which is a provider fault whatever its
+    text mentions.
+
+    Only "may have": a 400 that merely mentions an image passes. So the
+    caller removes only images it added itself, and treats the refusal as
+    theirs only once the request goes through without them.
+    """
+    if isinstance(exc, (ContentTooLargeError, TransientProviderError)):
+        return False
+    if isinstance(exc, ContentValidationError):
+        return exc.code not in _RESPONSES_IMAGE_CODES
+    if getattr(exc, "status_code", None) not in (400, 422):
+        return False
+    if ProviderErrorBody.parse(getattr(exc, "body", None)).code in _RESPONSES_IMAGE_CODES:
+        return False
+    text = f"{exc} {getattr(exc, 'body', '')}".lower()
+    return any(word in text for word in _IMAGE_REFUSAL_WORDS)
+
+
 # The sentence OpenAI and Azure send when chat.completions refuses function
 # tools for a model that reasons by default, whether or not the request set an
 # effort. Azure documents only this sentence, not the body's `param`.
@@ -1898,6 +1953,8 @@ _RESPONSES_IMAGE_REJECTED_CODES = (
     "unsupported_image_media_type", "empty_image_file",
     "failed_to_download_image", "image_file_not_found",
 )
+# Each names one image the provider could not use (`is_image_refusal`).
+_RESPONSES_IMAGE_CODES = _RESPONSES_IMAGE_TOO_LARGE_CODES + _RESPONSES_IMAGE_REJECTED_CODES
 
 
 def classify_responses_failure(
@@ -1909,14 +1966,14 @@ def classify_responses_failure(
     In-band means a ``response.failed`` event, a stream ``error`` event, or a
     non-streamed response with status ``failed``: all arrive inside a 200. Each
     named code gets the typed error for its cause, so the session runs that
-    cause's handling: compaction for an overflow, the count-based retry for a
+    cause's handling: compaction for an overflow, the session wait for a
     rate limit, the history repair for an image, and a visible error for a
     refused prompt. ``None`` leaves any other code to the caller's transient
     handling.
 
-    A rate limit gets what an unconfirmed 429 gets, not the session wait. The
-    code does not say whether a per-minute or a per-day limit was hit, and only
-    a confirmed velocity limit earns the wait (see :func:`classify_transient`).
+    A rate limit gets the session wait. Its code names a rate limit, quotas and
+    spend caps have their own codes, and with no hint the wait runs the backoff
+    curve inside the rate-limit budget.
     """
     parsed = ProviderErrorBody.parse(body)
     code = parsed.code
@@ -1927,7 +1984,7 @@ def classify_responses_failure(
         return ContextOverflowError(message if isinstance(message, str) else code)
     if code == "rate_limit_exceeded":
         return _rate_limited(
-            provider=provider, model=model, velocity_confirmed=False,
+            provider=provider, model=model, velocity_confirmed=True,
             retry_after=None, status_code=None,
         )
     if code in _PROMPT_REFUSAL_CODES:
@@ -1935,7 +1992,7 @@ def classify_responses_failure(
     if code in _RESPONSES_IMAGE_TOO_LARGE_CODES:
         return _image_too_large(message)
     if code in _RESPONSES_IMAGE_REJECTED_CODES:
-        return _content_rejected()
+        return _content_rejected(code=code)
     return None
 
 
@@ -2000,6 +2057,34 @@ def classify_404(
     return EndpointConfigurationError(
         f"The model endpoint returned 404 — check the endpoint URL and model "
         f"configuration.{suffix}"
+    )
+
+
+def classify_markup_bad_request(body: object) -> "EndpointConfigurationError | None":
+    """Classify a 400 whose body is HTML or XML as a misrouted request.
+
+    Shared by the OpenAI-compatible and Anthropic 400 paths. Both SDKs keep a
+    body that is not JSON as the raw string, and use that string as the
+    exception's message too. A model API answers in JSON, so markup means the
+    request reached some other service, such as a web server, a proxy, a CDN
+    or a storage bucket.
+
+    The 400 path is the one that needs this. Its unclassified errors re-raise
+    the SDK error, raw body included. Other statuses go through
+    ``_raise_for_status_error``, which always ends in anton's own copy.
+
+    The identical request fails identically on a retry, and the raw body is
+    neither safe nor useful to show. So this returns curated copy that leaves
+    the body out, and the session fails the turn at once instead of spending
+    its retries. Returns None for any other body, so JSON 400s keep their
+    existing handling.
+    """
+    if not (isinstance(body, str) and body.lstrip().startswith("<")):
+        return None
+    return EndpointConfigurationError(
+        "The model endpoint returned 400 with a web page or other non-API "
+        "response, so the request likely reached the wrong service — check "
+        "the endpoint URL configuration."
     )
 
 

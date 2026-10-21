@@ -19,6 +19,7 @@ from .attachments import Attachment
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
+    from anton.core.artifacts.render_check import RenderScreenshot, RenderStatus
     from anton.utils.datasources import DatasourceCatalog
 
 # ── Budgets (see design spec) ────────────────────────────────────────────────
@@ -97,16 +98,18 @@ REPLY_BODY_CHARS: int = 30_000
 PHASE2_RESERVED_QUESTIONS = 3
 
 
-def gathering_question_budget(session: "ChatSession | Any") -> int:
+def gathering_question_budget(session: "ChatSession | Any", *, act_first: bool = False) -> int:
     """How many `ask_user` calls the gathering phase may make this time.
 
     Recomputed on every call rather than cached on the state, because
-    `session.question_count` keeps changing as questions are asked.
+    `session.question_count` keeps changing as questions are asked. In
+    act-first mode the brief is not confirmed, so nothing is reserved for it.
     """
     from anton.core.interaction.elicit import MAX_QUESTIONS_PER_TURN
 
     remaining = MAX_QUESTIONS_PER_TURN - getattr(session, "question_count", 0)
-    return max(0, remaining - PHASE2_RESERVED_QUESTIONS)
+    reserved = 0 if act_first else PHASE2_RESERVED_QUESTIONS
+    return max(0, remaining - reserved)
 
 
 # ── Verdict schemas for diamond nodes (generate_object) ──────────────────────
@@ -141,6 +144,25 @@ class VerifyResult:
         return not self.errors
 
 
+@dataclass(frozen=True)
+class BrowserCheck:
+    """One load of the page in a browser, or why the page was not loaded.
+
+    `status` is `passed` or `failed` when a browser loaded the page (`verdict`
+    holds its findings as verifier messages), `unverified` when none did or
+    the check could not vouch for it (`reason` says why; the verdict is
+    empty). `findings_listed` says whether `reason` also lists what an
+    unverified check still found. `screenshot` is the render check's
+    desktop view, when it sent one.
+    """
+
+    status: "RenderStatus"
+    verdict: VerifyResult = field(default_factory=VerifyResult)
+    reason: str = ""
+    findings_listed: bool = False
+    screenshot: "RenderScreenshot | None" = None
+
+
 # ── FSM state ────────────────────────────────────────────────────────────────
 @dataclass
 class StepResult:
@@ -155,7 +177,7 @@ class GenState:
     artifact_type: str
     artifact_path: Path
     slug: str
-    # The brief the user agreed to. Empty until phase B has drafted one —
+    # The brief shown to the user. Empty until phase B has drafted one —
     # which is most of a run's life now that the pipeline starts at gathering
     # rather than at a brief handed in by the caller.
     brief: str = ""
@@ -169,7 +191,7 @@ class GenState:
     primary: str | None = None
     # Body of `prd.md` when a previous run left one in the artifact folder.
     # This — not `brief` — is the requirements source on the normal path: it
-    # is the document the user actually reviewed and accepted, while `brief`
+    # is the document written from the latest brief, while `brief`
     # is assembled by the calling agent. Empty when there is no PRD, and every
     # reader treats empty as "fall back to brief".
     prd: str = ""
@@ -187,6 +209,22 @@ class GenState:
     # learn that a check was skipped rather than passed (S-03).
     verify_warnings: list[str] = field(default_factory=list)
     checks_skipped: list[str] = field(default_factory=list)
+    # The latest browser load of the page this run: `passed`, `failed`, or
+    # `unverified` when no browser loaded it or the check could not vouch for
+    # it. None until a browser step runs. The result reports whether it
+    # passed, and the session records it for the end-of-turn line.
+    browser_status: "RenderStatus | None" = None
+    # Whether the latest load was unverified and its `checks_skipped` line
+    # lists what the check still found. The session then lists those
+    # findings no second time this turn.
+    browser_findings_listed: bool = False
+    # The render check's desktop view of the latest load, when it sent one.
+    # Reaches the calling agent as an image beside the result.
+    browser_screenshot: "RenderScreenshot | None" = None
+    # The page the latest load checked, by its path inside the artifact
+    # folder (`index.html`); it captions the screenshot. The generator may
+    # have named it differently from the primary the run started with.
+    browser_page: str = ""
     # Files the user attached to the conversation, as the tool call named
     # them (S-01). Data files are read by the gathering step; assets are
     # copied into the artifact by `orchestrator._stage_attachments`.
@@ -217,7 +255,7 @@ class GenState:
     peek: LivePeek | None = None
 
     # ── Discovery phases (A-C) ───────────────────────────────────────────
-    # The tool's own inputs. `brief` above holds the confirmed brief markdown
+    # The tool's own inputs. `brief` above holds the brief markdown
     # once phase B has run; before that it is empty.
     user_request: str = ""
     agent_understanding: str = ""
@@ -271,6 +309,15 @@ class GenState:
     # `call_fingerprint`; decides whether the brief is redrawn or reused
     # verbatim. An optimization, never a confirmation signal.
     call_changed: bool = False
+    # The session's "act first, ask later" setting, read once by the entry
+    # point. True: ask only what blocks the build and show the brief without
+    # waiting for confirmation. False — also for a session double without the
+    # attribute — keeps the confirm flow.
+    act_first: bool = False
+    # Whether the user has seen the brief without being asked to confirm it:
+    # `announce_brief` sent it in this call, or (acting first) an earlier turn
+    # showed it — set by `orchestrator.run` from the entry. Not persisted.
+    brief_shown: bool = False
     # Installed by the entry point. None on the bench harness and in unit
     # tests that construct a state directly, so every read goes through
     # `winding_down()`.
@@ -316,7 +363,7 @@ class GenState:
         checkpoint is not enough: `is_fullstack`, the `stateless` switches in
         the spec and kickoff prompts and `verify_backend` all read THIS
         object, and a run whose state still says `html-app` skips the API
-        spec and the backend of the fullstack app it just agreed to build
+        spec and the backend of the fullstack app it just decided to build
         (I-40). The step plan is rebuilt too — the counter was created at the
         first `gathering` line, before the type was known — while the
         numbers already handed out stay as they are.

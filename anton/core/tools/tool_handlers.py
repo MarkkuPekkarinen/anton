@@ -3,28 +3,57 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import uuid
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Callable, NamedTuple
 
 from anton.core.backends.base import Cell
+from anton.core.backends.sandbox import CellSandbox, cell_sandbox_of
 from anton.core.tools.registry import ToolOutcome
 from anton.core.tools.side_effect import SideEffectResult, now_iso
 from anton.core.utils.scratchpad import (
+    SCRATCHPAD_ACTIONS,
+    scratchpad_action,
     prepare_scratchpad_exec,
     format_cell_result,
     observe_scratchpad_cell,
     cell_failure_reason,
     install_call_installed_something,
+    refuse_pad_name,
     reject_invalid_packages,
     send_package_install_event,
 )
 
 if TYPE_CHECKING:
     from anton.chat_session import ChatSession
+    from anton.core.artifacts.render_check import RenderScreenshot, RenderStatus
 
 
 _log = logging.getLogger(__name__)
+
+
+def preliminary_cell(
+    *,
+    code: str,
+    description: str,
+    estimated_time: str,
+    estimated_seconds: int,
+) -> Cell:
+    """The cell pre-execute observers see: the code and its intent, no output yet.
+
+    Both exec paths (`handle_scratchpad` and `ChatSession`'s inline streaming
+    exec) build it here, so observers get the same shape from either one.
+    """
+    return Cell(
+        code=code,
+        stdout="",
+        stderr="",
+        error=None,
+        description=description,
+        estimated_time=estimated_time or str(estimated_seconds),
+    )
 
 
 async def _fire_pre_execute(session: "ChatSession", cell: Cell) -> None:
@@ -85,7 +114,7 @@ def resolve_artifact_store(session: "ChatSession"):
 
 
 def _track_artifact(session: "ChatSession", store, slug: str, *, summary: str = "") -> None:
-    """Record that THIS turn created or opened `slug`.
+    """Record that THIS turn created, generated or updated `slug`.
 
     Two records, for two different readers:
 
@@ -127,44 +156,136 @@ def _track_artifact(session: "ChatSession", store, slug: str, *, summary: str = 
         _log.warning("could not record turn provenance for artifact %s", slug, exc_info=True)
 
 
-def _artifact_content_mtime(folder: Path) -> float:
-    """Max mtime across an artifact folder's content files, 0.0 if none."""
+class FileStamp(NamedTuple):
+    """When a content file last changed, in nanoseconds, and its size."""
+
+    mtime_ns: int
+    size: int
+
+
+@dataclass(frozen=True)
+class ArtifactFiles:
+    """An artifact folder's content files at one moment, each by its path
+    inside the folder (`index.html`, `static/app.js`).
+
+    Two snapshots differ when a cell wrote, replaced, renamed, copied in or
+    deleted a file. `os.replace` of an older draft onto `index.html` keeps
+    the draft's mtime, so the folder's newest mtime does not move, but the
+    stamp under `index.html` changes.
+    """
+
+    stamps: dict[str, FileStamp] = field(default_factory=dict)
+
+    def edited_since(self, *, before: "ArtifactFiles", rel: str) -> bool:
+        """Whether the file at `rel` is new, or changed, since `before`."""
+        return before.stamps.get(rel) != self.stamps.get(rel)
+
+
+def _artifact_files(folder: Path) -> ArtifactFiles:
+    """The stamps of an artifact folder's content files; empty if none."""
     from anton.core.artifacts.store import iter_content_files
 
-    return max((st.st_mtime for _, st in iter_content_files(folder)), default=0.0)
+    return ArtifactFiles(stamps={
+        path.relative_to(folder).as_posix(): FileStamp(mtime_ns=st.st_mtime_ns, size=st.st_size)
+        for path, st in iter_content_files(folder)
+    })
 
 
-def snapshot_existing_artifact_mtimes(store) -> dict[str, float]:
-    """slug -> content mtime, for every artifact folder that exists right now."""
+def snapshot_existing_artifacts(store) -> dict[str, ArtifactFiles]:
+    """slug -> its content files, for every artifact folder that exists right now."""
     root = store.root
     if not root.is_dir():
         return {}
-    mtimes: dict[str, float] = {}
+    snapshot: dict[str, ArtifactFiles] = {}
     for child in root.iterdir():
         if child.is_dir() and (child / "metadata.json").is_file():
-            mtimes[child.name] = _artifact_content_mtime(child)
-    return mtimes
+            snapshot[child.name] = _artifact_files(child)
+    return snapshot
 
 
 # Bounded: never lint a huge file inline on the agent's turn.
 _ARTIFACT_LINT_SIZE_CEILING = 10 * 1024 * 1024  # 10 MB
 
+# The render checks after one cell share this budget: the agent waits for
+# them before it sees the cell's result. A page that would start with less
+# than `_RENDER_CHECK_MIN_SECONDS` left is reported as not checked.
+_RENDER_CHECK_CELL_BUDGET_SECONDS = 45.0
+_RENDER_CHECK_MIN_SECONDS = 5.0
 
-def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
+
+# Said once per file when a check that would start a browser or LibreOffice
+# is skipped because agent code runs in a sandbox on this host.
+_SANDBOX_BROWSER_SKIP = (
+    "not checked in a browser: agent code runs in a sandbox on this deployment, "
+    "which starts no browser"
+)
+_SANDBOX_OFFICE_SKIP = "LibreOffice check skipped: agent code runs in a sandbox on this deployment"
+# Said on each page of a fullstack app a cell edits, which the render-check
+# service does not load (`_check_pages`).
+_FULLSTACK_TYPES = frozenset({"fullstack-stateless-app", "fullstack-stateful-app"})
+_FULLSTACK_PAGE_SKIP = (
+    "not checked in a browser: a fullstack app's page calls its backend, which "
+    "the render check does not run"
+)
+
+
+class PageKey(NamedTuple):
+    """One page of one artifact: its slug and its path inside the artifact
+    folder (`index.html`, `static/index.html`)."""
+
+    slug: str
+    page: str
+
+
+@dataclass(frozen=True)
+class ArtifactLint:
+    """What the checks after one cell found in the artifacts it changed."""
+
+    # `<slug>/<file> — <finding>` lines for the `[artifact lint]` block.
+    messages: list[str] = field(default_factory=list)
+    # The first page that failed the render check, or the first page it
+    # loaded when none failed, as the app preview shows it, and that page's
+    # `<slug>/<file>`.
+    screenshot: "RenderScreenshot | None" = None
+    screenshot_page: str = ""
+    # How each page this cell checked fared in a browser.
+    page_checks: "dict[PageKey, RenderStatus]" = field(default_factory=dict)
+    # The pages whose unverified check listed what it still found.
+    findings_listed: frozenset[PageKey] = frozenset()
+
+
+_STATUS_RANK = {"passed": 0, "unverified": 1, "failed": 2}
+
+
+def _worse(a: "RenderStatus | None", b: "RenderStatus") -> "RenderStatus":
+    return b if a is None or _STATUS_RANK[b] > _STATUS_RANK[a] else a
+
+
+def _artifact_linters(*, cell_sandbox: CellSandbox | None = None) -> dict[str, Callable[[Path], list[str] | None]]:
     """suffix -> checker. `None` means it could not run at all (e.g. no
-    headless browser); `[]` means it ran and found nothing; a non-empty
-    list is real findings — only that last case is ever appended to the
-    agent-facing message list.
+    LibreOffice); `[]` means it ran and found nothing; a non-empty list is
+    real findings — only that last case is ever appended to the agent-facing
+    message list.
 
-    Add a format by adding one entry here. Only `.xlsx`/`.html`/`.pptx`/
-    `.docx` are registered — every other extension is silently unchecked,
-    which is honest as-is: nothing ever claimed to validate a `.csv`.
+    Add a format by adding one entry here. Only `.xlsx`/`.pptx`/`.docx` are
+    registered here and `.html` has its own pass (`_check_pages`) — every
+    other extension is silently unchecked, which is honest as-is: nothing
+    ever claimed to validate a `.csv`.
+
+    A `cell_sandbox` policy skips the checks that start LibreOffice on the
+    agent's file (each of them also refuses under it); the in-process lints
+    still run. Where the skipped tool is installed, the result says the check
+    was skipped.
     """
-    from anton.core.artifacts.html_lint import lint_html
     from anton.core.artifacts.office_open_check import check_opens_via_office
     from anton.core.artifacts.ooxml_lint import lint_ooxml
     from anton.core.artifacts.xlsx_lint import lint_xlsx
-    from anton.core.artifacts.xlsx_office_check import check_xlsx_via_office
+    from anton.core.artifacts.xlsx_office_check import _discover_office, check_xlsx_via_office
+
+    sandboxed = cell_sandbox is not None
+
+    def _office_skip() -> list[str]:
+        return [_SANDBOX_OFFICE_SKIP] if _discover_office() is not None else []
 
     def _xlsx_linter(path: Path) -> list[str] | None:
         # Both always run — LibreOffice recalculates and catches any
@@ -173,7 +294,13 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
         # sheet prefix") where the oracle only names the symptom
         # ("#VALUE!"), and some cells only the oracle catches at all
         # (a genuine #REF!/#DIV/0! unrelated to same-sheet circularity).
-        office_findings = check_xlsx_via_office(path)
+        if sandboxed:
+            structural_findings = lint_xlsx(path)
+            skipped = _office_skip()
+            if structural_findings is None and not skipped:
+                return None
+            return [f.message() for f in (structural_findings or [])] + skipped
+        office_findings = check_xlsx_via_office(path, cell_sandbox=cell_sandbox)
         structural_findings = lint_xlsx(path)
 
         if office_findings is None and structural_findings is None:
@@ -192,12 +319,6 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
         ]
         return messages
 
-    def _html_linter(path: Path) -> list[str] | None:
-        findings = lint_html(path)
-        if findings is not None:
-            return [f.message() for f in findings]
-        return None
-
     def _ooxml_linter(kind: str) -> Callable[[Path], list[str] | None]:
         def _lint(path: Path) -> list[str] | None:
             # Structure first (ENG-2175): a truncated or hand-rolled package
@@ -207,7 +328,10 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
             structural_findings = lint_ooxml(path, kind)
             if structural_findings:
                 return [f.message() for f in structural_findings]
-            office_findings = check_opens_via_office(path)
+            if sandboxed:
+                skipped = _office_skip()
+                return skipped if structural_findings is not None or skipped else None
+            office_findings = check_opens_via_office(path, cell_sandbox=cell_sandbox)
             if structural_findings is None and office_findings is None:
                 return None
             return [f.message() for f in (office_findings or [])]
@@ -216,33 +340,235 @@ def _artifact_linters() -> dict[str, Callable[[Path], list[str] | None]]:
 
     return {
         ".xlsx": _xlsx_linter,
-        ".html": _html_linter,
         ".pptx": _ooxml_linter("pptx"),
         ".docx": _ooxml_linter("docx"),
     }
 
 
-def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
-    """Run the format-appropriate checker on artifact folders this cell
-    edited (mtime moved since `before`), so findings reach the agent as
-    tool-result text right away, not only via a later open()/list().
-    """
-    from anton.core.artifacts.store import iter_content_files
+@dataclass(frozen=True)
+class _ChangedPage:
+    """An `.html` content file of an artifact the cell changed."""
 
-    linters = _artifact_linters()
-    if not linters:
-        return []
-    after = snapshot_existing_artifact_mtimes(store)
+    slug: str
+    path: Path
+    # The cell wrote, replaced or added this file itself.
+    edited: bool
+    size: int
+
+    def key(self, store) -> PageKey:
+        return PageKey(slug=self.slug, page=self.path.relative_to(store.root / self.slug).as_posix())
+
+
+def _primary_name(store, slug: str) -> str | None:
+    """The artifact's primary file as its metadata names it, or None.
+
+    `read_metadata`, not `open`: `open` reconciles the file list and may
+    rewrite the metadata, which a check must not do.
+    """
+    metadata = store.read_metadata(slug)
+    return metadata.primary if metadata is not None else None
+
+
+def _check_pages(
+    store,
+    pages: list[_ChangedPage],
+    *,
+    cell_sandbox: CellSandbox | None,
+    screenshot: bool,
+    findings_listed_earlier: frozenset[PageKey] = frozenset(),
+) -> ArtifactLint:
+    """Load the changed artifacts' pages in a browser.
+
+    With the render-check service configured: the pages this cell edited,
+    and the main page of a changed artifact other than a fullstack app
+    whose pages the cell left alone (it rewrote only a file the page loads,
+    say, or deleted one), each artifact's main page first, within one budget
+    per cell. An artifact's main page is its primary, else its
+    `index.html`, else its first page by name. The screenshot kept is the
+    first failed page's, or the first page's when none failed; with
+    `screenshot` False the service is asked for none. A fullstack app's
+    page is not sent: it calls its backend, which the service does not
+    run, and the service fails every request to the page's own origin.
+    generate_artifact loads that page through its running backend instead
+    (`verifiers.verify_app_live`). Otherwise the local Electron browser
+    loads the same pages (`lint_html`), and a sandbox policy, which starts
+    no browser, says so on each of them.
+
+    Every page checked gets a line: its findings, that the service passed
+    it, or that it was not checked in a browser and why (no browser here, a
+    sandbox, a fullstack app, the service could not vouch for it, the budget
+    ran out, the page is too large), with what an unverified check still
+    found. The local browser adds no line for a page that passed: the
+    result stays in history and is resent on every model call, and a page
+    it could not load still gets a line, so silence there means a pass.
+    Those findings are listed only for a page not in
+    `findings_listed_earlier`, the pages whose findings an earlier
+    unverified check this turn already listed, so the agent fixes them once
+    and does not edit a page no check can vouch for again on every cell. A
+    check that listed nothing (the service was busy, the cell's time ran
+    out) leaves the next one free to list. The pages this call lists
+    findings for come back in `findings_listed`.
+    """
+    from anton.core.artifacts import render_check
+    from anton.core.artifacts.html_lint import discover_browser, lint_html
+
     messages: list[str] = []
-    for slug, prev_mtime in before.items():
-        current = after.get(slug)
-        if current is None or current <= prev_mtime:
+    page_checks: "dict[PageKey, RenderStatus]" = {}
+    findings_listed: set[PageKey] = set()
+    shot = None
+    shot_page = ""
+
+    # `read_metadata`, not `open`: `open` reconciles the file list and may
+    # rewrite the metadata, which a check must not do.
+    metadata = {slug: store.read_metadata(slug) for slug in {page.slug for page in pages}}
+
+    def _type(page: _ChangedPage) -> str | None:
+        return metadata[page.slug].type if metadata[page.slug] is not None else None
+
+    def _primary(page: _ChangedPage) -> str | None:
+        return metadata[page.slug].primary if metadata[page.slug] is not None else None
+
+    def _order(page: _ChangedPage) -> tuple:
+        rel = page.key(store).page
+        return (rel != _primary(page), rel != "index.html", rel)
+
+    edited_slugs = {page.slug for page in pages if page.edited}
+    # Each artifact's main page, its first by `_order`: its primary, else
+    # `index.html`, else its first page by name.
+    main_page: dict[str, _ChangedPage] = {}
+    for page in sorted(pages, key=_order):
+        main_page.setdefault(page.slug, page)
+    to_check = sorted((
+        page for page in pages
+        if page.edited or (
+            page.slug not in edited_slugs and _type(page) not in _FULLSTACK_TYPES
+            and page == main_page[page.slug]
+        )
+    ), key=_order)
+
+    if render_check.configured_url() is None:
+        for page in to_check:
+            label = f"{page.slug}/{page.path.name}"
+            if cell_sandbox is not None:
+                messages.append(f"{label} — {_SANDBOX_BROWSER_SKIP}")
+                page_checks[page.key(store)] = "unverified"
+                continue
+            if page.size > _ARTIFACT_LINT_SIZE_CEILING:
+                messages.append(
+                    f"{label} — not checked in a browser: the page is over "
+                    f"{_ARTIFACT_LINT_SIZE_CEILING // (1024 * 1024)} MB"
+                )
+                page_checks[page.key(store)] = "unverified"
+                continue
+            findings = lint_html(page.path, cell_sandbox=None)
+            if findings is None:
+                reason = (
+                    "no browser on this deployment" if discover_browser() is None
+                    else "the local browser check gave no answer"
+                )
+                messages.append(f"{label} — not checked in a browser: {reason}")
+                page_checks[page.key(store)] = "unverified"
+                continue
+            messages += [f"{label} — {f.message()}" for f in findings]
+            page_checks[page.key(store)] = "failed" if findings else "passed"
+        return ArtifactLint(messages=messages, page_checks=page_checks)
+
+    # Whether `shot` is a failed page's: until one is, every page is asked
+    # for a screenshot, so the agent sees the page it has to fix.
+    shot_failed = False
+    deadline = time.monotonic() + _RENDER_CHECK_CELL_BUDGET_SECONDS
+    for page in to_check:
+        label = f"{page.slug}/{page.path.name}"
+        if _type(page) in _FULLSTACK_TYPES:
+            messages.append(f"{label} — {_FULLSTACK_PAGE_SKIP}")
+            page_checks[page.key(store)] = "unverified"
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining < _RENDER_CHECK_MIN_SECONDS:
+            outcome = render_check.RenderCheckUnavailable(
+                reason="the browser checks after this cell ran out of time before this page"
+            )
+        else:
+            outcome = render_check.check_file(
+                page.path, cell_sandbox=cell_sandbox, screenshot=screenshot and not shot_failed,
+                timeout=min(render_check.TIMEOUT_SECONDS, remaining),
+            )
+        page_checks[page.key(store)] = outcome.status
+        failed = outcome.status == "failed"
+        if outcome.screenshot is not None and (shot is None or (failed and not shot_failed)):
+            shot, shot_page, shot_failed = outcome.screenshot, label, failed
+        if outcome.status == "passed":
+            messages.append(f"{label} — loaded in a browser the way the app preview loads it: no problems found")
+            continue
+        if outcome.status == "unverified":
+            messages.append(f"{label} — not checked in a browser: {outcome.unverified_reason}")
+            if page.key(store) in findings_listed_earlier:
+                # An earlier unverified check this turn already listed what
+                # it found on this page. They are not listed again: the page
+                # may already work, and listing them would send the agent
+                # back to edit it.
+                continue
+            # What the check saw before it gave up (a blank map measured
+            # before the deadline, say) is the agent's to fix once.
+            found = render_check.unverified_findings(outcome)
+            lines, more = [f"{found.lead} {line}" for line in found.lines], found.more
+            if lines:
+                findings_listed.add(page.key(store))
+        else:
+            grouped = render_check.grouped_findings(outcome.findings)
+            lines, more = [group.text for group in grouped.shown], grouped.more
+        messages += [f"{label} — {line}" for line in lines]
+        if more:
+            messages.append(f"{label} — and {more} more distinct findings, not listed")
+    return ArtifactLint(
+        messages=messages, screenshot=shot, screenshot_page=shot_page, page_checks=page_checks,
+        findings_listed=frozenset(findings_listed),
+    )
+
+
+def lint_changed_artifact_files(
+    store,
+    before: dict[str, ArtifactFiles],
+    *,
+    cell_sandbox: CellSandbox | None = None,
+    screenshot: bool = True,
+    findings_listed_earlier: frozenset[PageKey] = frozenset(),
+) -> ArtifactLint:
+    """Run the format-appropriate checker on artifact folders this cell
+    changed (any content file written, replaced, added or removed since
+    `before`), so findings reach the agent as tool-result text right away,
+    not only via a later open()/list().
+
+    Under a sandbox policy the checks that start a browser or LibreOffice
+    locally are skipped: they would run the agent's file outside the
+    sandbox. The render-check service still loads pages there: only the
+    page's text leaves this process (`_check_pages`). `screenshot=False`
+    asks it for no screenshot. An unverified check of a page in
+    `findings_listed_earlier` lists no findings (`_check_pages`).
+    """
+    linters = _artifact_linters(cell_sandbox=cell_sandbox)
+    after = snapshot_existing_artifacts(store)
+    messages: list[str] = []
+    pages: list[_ChangedPage] = []
+    for slug, files_before in before.items():
+        files = after.get(slug)
+        if files is None or files == files_before:
             continue
 
         artifact_dir = store.root / slug
-        for path, st in iter_content_files(artifact_dir):
+        for rel, stamp in files.stamps.items():
+            path = artifact_dir / rel
+            if path.suffix.lower() == ".html":
+                # Whatever its size: `_check_pages` says why a page too large
+                # to check was not checked.
+                pages.append(_ChangedPage(
+                    slug=slug, path=path, edited=files.edited_since(before=files_before, rel=rel), size=stamp.size,
+                ))
+                continue
+            if stamp.size > _ARTIFACT_LINT_SIZE_CEILING:
+                continue
             linter = linters.get(path.suffix.lower())
-            if linter is None or st.st_size > _ARTIFACT_LINT_SIZE_CEILING:
+            if linter is None:
                 continue
             file_messages = linter(path)
             if not file_messages:
@@ -252,33 +578,168 @@ def lint_changed_artifact_files(store, before: dict[str, float]) -> list[str]:
             for message in file_messages:
                 messages.append(f"{slug}/{path.name} — {message}")
 
-    return messages
+    checked = _check_pages(
+        store, pages, cell_sandbox=cell_sandbox, screenshot=screenshot,
+        findings_listed_earlier=findings_listed_earlier,
+    )
+    return ArtifactLint(
+        messages=messages + checked.messages,
+        screenshot=checked.screenshot,
+        screenshot_page=checked.screenshot_page,
+        page_checks=checked.page_checks,
+        findings_listed=checked.findings_listed,
+    )
 
 
-def track_edits_since(session: "ChatSession", store, before: dict[str, float]) -> None:
-    """Catch an artifact edit the agent made without calling `open_artifact`.
+def record_page_checks(
+    session: "ChatSession",
+    *,
+    checks: "dict[PageKey, RenderStatus]",
+    findings_listed: frozenset[PageKey] = frozenset(),
+) -> None:
+    """Remember, for this turn, how each page last fared in a browser, and
+    which pages an unverified check already listed findings for.
 
-    `open_artifact` is how attribution is SUPPOSED to work (see
-    `_track_artifact` above), but nothing forces the agent to call it again
-    once it already has an artifact's path from earlier in the conversation —
-    it can (and in practice does) just write straight into a remembered
-    folder via the scratchpad, skipping the tool call entirely. Without this,
-    that edit's `_artifacts_touched` stays empty and the host can never card
-    it, even though the file genuinely changed this turn (ENG-1933 follow-up).
+    Per page: a check of one page replaces that page's earlier result and
+    never another page's. The session reads it when the turn ends
+    (`ChatSession._unverified_page_lines`). A page stays in
+    `_unverified_findings_listed` for the rest of the turn, so a later
+    unverified check of it lists nothing (`check_cell_artifacts`).
+    Best-effort, like `_track_artifact`: a session without the record (a
+    test double) loses nothing else.
+    """
+    record = getattr(session, "_page_checks", None)
+    if isinstance(record, dict):
+        record.update(checks)
+    listed = getattr(session, "_unverified_findings_listed", None)
+    if isinstance(listed, set):
+        listed.update(findings_listed)
+
+
+def render_screenshots_refused(session: "ChatSession") -> bool:
+    """Whether the model refused a request carrying a render-check screenshot
+    in this session and took it without one
+    (`ChatSession._confirm_render_screenshots_refused`), so checks ask the
+    service for none and the findings go to the agent without one. A test
+    double without the flag gets screenshots."""
+    return getattr(session, "_render_screenshots_refused", False) is True
+
+
+def images_refused(session: "ChatSession") -> bool:
+    """Whether the model refused a request carrying an image a tool returned
+    in this session and took it without that image
+    (`ChatSession._confirm_tool_images_refused`), so `read_image` sends no
+    more images. Render screenshots follow their own refusal
+    (`render_screenshots_refused`): one corrupt file draws a
+    refusal from a model that takes images too. A test double without the
+    flag gets images."""
+    return getattr(session, "_images_refused", False) is True
+
+
+def record_render_screenshots_refused(session: "ChatSession") -> None:
+    """Remember that the model refused a request carrying a render-check
+    screenshot and took it without one, for a caller outside the session's
+    own turn loop (generate_artifact's retry). Later checks then ask for no
+    screenshot (`render_screenshots_refused`)."""
+    session._render_screenshots_refused = True
+
+
+def page_check_lines(store, *, checks: "dict[PageKey, RenderStatus]") -> list[str]:
+    """One line for each artifact with a page that did not pass its last
+    browser check, naming the artifact, for the end of the agent's final
+    message. A failed page wins over an unverified one."""
+    by_slug: "dict[str, RenderStatus]" = {}
+    for key, status in checks.items():
+        by_slug[key.slug] = _worse(by_slug.get(key.slug), status)
+    lines: list[str] = []
+    for slug, status in by_slug.items():
+        if status == "passed":
+            continue
+        metadata = store.read_metadata(slug) if store is not None else None
+        name = metadata.name if metadata is not None and metadata.name.strip() else slug
+        if status == "failed":
+            lines.append(f"“{name}” failed the browser check, so it may not display correctly in the preview.")
+        else:
+            lines.append(f"“{name}” was not verified in a browser, so it may not display correctly in the preview.")
+    return lines
+
+
+def cell_content_with_lint(text: str, lint: ArtifactLint, *, cell_ok: bool) -> "str | list[dict]":
+    """A cell's result with the checks' `[artifact lint]` block, and the
+    render screenshot after it when the cell succeeded.
+
+    Only a successful cell carries the image: a list result with a failure
+    verdict skips the error streak's nudge text (see `handle_read_image`).
+    """
+    from anton.core.artifacts import render_check
+
+    if lint.messages:
+        # [artifact lint] follows format_cell_result's own [output]/[error]
+        # labeling convention so the agent can tell the finding apart from
+        # its own code's output. cowork-server's figure sources cut this
+        # block from a replayed cell's output.
+        text += "\n\n[artifact lint]\n" + "\n".join(lint.messages)
+    if lint.screenshot is None or not cell_ok:
+        return text
+    return [{"type": "text", "text": text}, *render_check.screenshot_blocks(lint.screenshot, page=lint.screenshot_page)]
+
+
+async def check_cell_artifacts(
+    session: "ChatSession", *, store, before: dict[str, ArtifactFiles]
+) -> ArtifactLint:
+    """After an exec cell: attribute its artifact edits, check the changed
+    files and record how their pages fared. Both exec paths (`handle_scratchpad`
+    and `ChatSession`'s inline streaming exec) call this. Never raises.
+
+    What an unverified check still found reaches the agent once per page
+    per turn: once an earlier check this turn listed it (here, or in
+    generate_artifact's `checks_skipped`), the page gets only the line that
+    says it was not checked. A check that listed nothing does not count.
+    """
+    import asyncio
+
+    track_edits_since(session, store, before)
+    refused = render_screenshots_refused(session)
+    listed = getattr(session, "_unverified_findings_listed", None)
+    findings_listed_earlier = frozenset(listed) if isinstance(listed, set) else frozenset()
+    try:
+        # The checkers take seconds; run them off the event loop.
+        lint = await asyncio.to_thread(
+            lint_changed_artifact_files, store, before,
+            cell_sandbox=cell_sandbox_of(getattr(session, "_scratchpads", None)), screenshot=not refused,
+            findings_listed_earlier=findings_listed_earlier,
+        )
+    except Exception:
+        # Best-effort: a lint crash must never fail the cell's own result.
+        _log.warning("artifact lint failed for this cell", exc_info=True)
+        return ArtifactLint()
+    record_page_checks(session, checks=lint.page_checks, findings_listed=lint.findings_listed)
+    if refused:
+        # A service that sends a screenshot it was not asked for.
+        return replace(lint, screenshot=None, screenshot_page="")
+    return lint
+
+
+def track_edits_since(session: "ChatSession", store, before: dict[str, ArtifactFiles]) -> None:
+    """Attribute the artifact edits one scratchpad cell made.
+
+    The agent edits artifact files from scratchpad cells, which the tool layer
+    never sees, so this is how such an edit reaches `_artifacts_touched` and the
+    artifact's provenance. Without it the host could never card the edit, even
+    though the file genuinely changed this turn.
 
     Scoped to THIS cell's own execution window — the snapshot taken right
     before `pad.execute` vs. right after — rather than the whole turn, to
-    keep the diff-based race this reintroduces (a concurrent sibling
-    conversation happening to bump some other artifact's mtime) as narrow as
-    possible: seconds, not minutes. Narrower than the pre-ENG-1933 exposure,
-    not zero — the same trade-off `index_turn_artifacts` already accepts for
-    Hermes's edits.
+    keep the diff-based race (a concurrent sibling conversation happening to
+    bump some other artifact's mtime) as narrow as possible: seconds, not
+    minutes. Not zero — the same trade-off `index_turn_artifacts` already
+    accepts for Hermes's edits.
     """
     already_touched = getattr(session, "_artifacts_touched", None) or ()
-    after = snapshot_existing_artifact_mtimes(store)
-    for slug, prev_mtime in before.items():
-        current = after.get(slug)
-        if current is not None and current > prev_mtime and slug not in already_touched:
+    after = snapshot_existing_artifacts(store)
+    for slug, files_before in before.items():
+        files = after.get(slug)
+        if files is not None and files != files_before and slug not in already_touched:
             _track_artifact(session, store, slug, summary="Edited via scratchpad")
 
 
@@ -569,6 +1030,7 @@ async def _drain_progress(queue):
     describe steps that already finished.
     """
     from anton.core.tools.generate_artifact.progress import (
+        MESSAGE_PREFIX,
         PEEK_PREFIX,
         QUESTION_CLOSED,
         QUESTION_OPEN,
@@ -588,6 +1050,9 @@ async def _drain_progress(queue):
             # describes text that has long since moved on.
             if not depth:
                 yield ToolProgress(line[len(PEEK_PREFIX):], kind="peek")
+            continue
+        if line.startswith(MESSAGE_PREFIX):
+            yield ToolProgress(line[len(MESSAGE_PREFIX):], kind="message")
             continue
         if line == QUESTION_OPEN:
             # A counter, not a flag: `show_and_confirm` wraps a call that
@@ -622,21 +1087,46 @@ async def _generate_with_progress_close(coro, queue) -> "dict | str":
         queue.put_nowait(None)
 
 
+# What every `generated` instruction says after its opening, verified in a
+# browser or not.
+_GENERATED_REPORTING = (
+    "When the result carries `url`, the backend is running there and that URL "
+    "is the app's entry point: give the user the URL, not the path of "
+    "`static/index.html` — opened from disk the page cannot reach its "
+    "`/api/*`. Without `url` (html-app), the entry point is "
+    "`<path>/<primary>`. `checks_skipped` lists verifier checks that "
+    "could not run (for example, no headless browser to load the page) "
+    "and `warnings` what the verifier flagged without failing the step: "
+    "when either is non-empty, tell the user in one sentence what was "
+    "not checked or flagged — never present a skipped check as passed."
+    " When the result carries `brief_shown: true`, the user has already "
+    "seen the brief: do not repeat it. When it carries `brief_summary`, "
+    "the user has not seen it: sum up its assumptions in a sentence or two."
+)
+
 _STATUS_INSTRUCTIONS = {
     "generated": (
         "Every file listed was statically verified by the generation "
-        "pipeline. Do NOT re-read, re-parse or re-verify them, and do not "
+        "pipeline, and a browser loaded the page without finding a problem. "
+        "Do NOT re-read, re-parse or re-verify them, and do not "
         "open them looking for problems — report the result to the user and "
-        "act only on problems the user actually reports. When the result "
-        "carries `url`, the backend is running there and that URL is the "
-        "app's entry point: give the user the URL, not the path of "
-        "`static/index.html` — opened from disk the page cannot reach its "
-        "`/api/*`. Without `url` (html-app), the entry point is "
-        "`<path>/<primary>`. `checks_skipped` lists verifier checks that "
-        "could not run (for example, no headless browser to load the page) "
-        "and `warnings` what the verifier flagged without failing the step: "
-        "when either is non-empty, tell the user in one sentence what was "
-        "not checked or flagged — never present a skipped check as passed."
+        "act only on problems the user actually reports. "
+        + _GENERATED_REPORTING
+    ),
+    # `generated` when no browser check passed: `verified_in_browser` false.
+    "generated_unverified": (
+        "The files listed passed the pipeline's static checks, but no browser "
+        "verified the page: `checks_skipped` says why. When it also lists what "
+        "the check found (a blank view, an overflow, an exception), fix those "
+        "once; if a later check still cannot vouch for the page, report it as "
+        "unverified instead of editing it again. Reading the files again "
+        "cannot verify how they render, so do not open them looking for other "
+        "problems; report the result to the user and otherwise act only on "
+        "problems the user actually reports. Your reply MUST say, in those "
+        "words, that the page is unverified in a browser and may not display "
+        "correctly in the preview; never say it works, was tested or renders "
+        "correctly. "
+        + _GENERATED_REPORTING
     ),
     "cancelled": (
         "The user declined the brief. Do NOT write prd.md yourself and do "
@@ -654,11 +1144,13 @@ _STATUS_INSTRUCTIONS = {
     "stopped_over_budget": (
         "This turn reached its token budget and the pipeline stopped "
         "cleanly; what it had finished is on disk. Tell the user how far it "
-        "got and ask whether to continue. When the result carries a "
-        "non-empty `brief_summary`, show it to the user as part of that "
-        "question: the pipeline stopped before they could confirm it, and "
-        "the repeat call is taken as their agreement to that brief. If they "
-        "agree, call this tool again with the SAME `user_request` — it "
+        "got and ask whether to continue. When the result carries "
+        "`brief_shown: true`, the user already saw the brief and was not "
+        "asked to confirm it: do not show it again. Otherwise, when it "
+        "carries a non-empty `brief_summary`, show it to the user as part of "
+        "that question: the pipeline stopped before they could confirm it, "
+        "and the repeat call is taken as their agreement to that brief. If "
+        "they agree, call this tool again with the SAME `user_request` — it "
         "resumes rather than restarting. A requested change goes in "
         "`agent_understanding`, with `user_request` left as it was."
     ),
@@ -784,38 +1276,74 @@ async def handle_generate_artifact(session: "ChatSession", tc_input: dict):
     # leaving this one otherwise unattributed.
     if status != "cancelled":
         _track_artifact(session, store, slug, summary="Generated artifact files")
+    # The render check's view of the page travels beside the text, as an
+    # image the agent can look at, never inside the JSON, unless the model
+    # refused a render screenshot earlier in the session.
+    screenshot = result.pop("screenshot", None)
+    screenshot_page = result.pop("screenshot_page", "")
+    if render_screenshots_refused(session):
+        screenshot = None
+    instruction_key = status
+    if status == "generated" and not result.get("verified_in_browser"):
+        instruction_key = "generated_unverified"
+    text = json.dumps(
+        {
+            "slug": slug,
+            "path": str(folder),
+            **result,
+            "instruction": _STATUS_INSTRUCTIONS.get(
+                instruction_key, _STATUS_INSTRUCTIONS["generated_unverified"]
+            ),
+        },
+        indent=2,
+    )
     # I-03: an explicit verdict rather than the dispatcher substring-matching
     # the text. A successful run's `trace` legitimately contains the word
     # "failed" (e.g. "backend.py failed to import in venv" after a successful
     # retry), which the legacy classifier counted as an error and fed into the
     # per-tool error streak.
+    if screenshot is None:
+        yield ToolOutcome(content=text, ok=True)
+        return
+    from anton.core.artifacts import render_check
+
+    # The page the check loaded, which the generator may have named
+    # differently from the primary `artifact` held before the run.
+    page = f"{slug}/{screenshot_page or _primary_name(store, slug) or 'index.html'}"
     yield ToolOutcome(
-        content=json.dumps(
-            {
-                "slug": slug,
-                "path": str(folder),
-                **result,
-                "instruction": _STATUS_INSTRUCTIONS.get(
-                    status, _STATUS_INSTRUCTIONS["generated"]
-                ),
-            },
-            indent=2,
-        ),
+        content=[{"type": "text", "text": text}, *render_check.screenshot_blocks(screenshot, page=page)],
         ok=True,
     )
+
+
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def _field_names(value) -> list:
+    """`fields` as a list; a string may name several, separated by commas."""
+    names: list = []
+    for item in _as_list(value):
+        if isinstance(item, str):
+            names += [part.strip() for part in item.split(",") if part.strip()]
+        else:
+            names.append(item)
+    return names
 
 
 async def handle_list_artifacts(
     session: "ChatSession", tc_input: dict
 ) -> "str | ToolOutcome":
-    """List every artifact in the workspace, newest first.
+    """List artifacts as text, grouped by artifacts root, newest first.
 
-    Output is a JSON array of summaries — slug, name, type,
-    description, file count, last-update timestamp. The agent uses
-    this to decide whether to create a new artifact or modify an
-    existing one.
+    Without `match` the default fields are a summary for finding an artifact;
+    with `match` they are the full record for editing it.
     """
-    import json
+    from anton.core.artifacts.listing import FIELDS, SUMMARY_FIELDS, render_listing
 
     store = resolve_artifact_store(session)
     if store is None:
@@ -827,100 +1355,35 @@ async def handle_list_artifacts(
             ok=False, reason="store_unavailable",
         )
 
-    artifacts = store.list()
-    summaries = [
-        {
-            "slug": a.slug,
-            "name": a.name,
-            "type": a.type,
-            "description": a.description,
-            "file_count": len(a.files),
-            "updatedAt": a.updatedAt,
-        }
-        for a in artifacts
-    ]
-    # Tier 1: a listing was produced. An EMPTY list is still a success —
-    # "there are no artifacts" is the correct answer, not a failure.
-    return ToolOutcome(content=json.dumps(summaries, indent=2), ok=True)
+    keys = [str(key).strip() for key in _as_list(tc_input.get("match"))]
+    keys = [key for key in keys if key]
+    if tc_input.get("fields") is None:
+        fields = FIELDS if keys else SUMMARY_FIELDS
+    else:
+        requested = _field_names(tc_input.get("fields"))
+        valid = ", ".join(FIELDS)
+        if not requested:
+            return ToolOutcome(
+                content=f"Error: fields is empty. Valid fields: {valid}.",
+                ok=False, reason="invalid_fields",
+            )
+        for name in requested:
+            if name not in FIELDS and name != "slug":
+                return ToolOutcome(
+                    content=f'Error: unknown field "{name}". Valid fields: {valid}.',
+                    ok=False, reason="invalid_fields",
+                )
+        # Every entry is headed by its slug, so asking for it adds nothing.
+        fields = [name for name in requested if name != "slug"]
 
-
-async def handle_open_artifact(
-    session: "ChatSession", tc_input: dict
-) -> "str | ToolOutcome":
-    """Load an existing artifact's metadata + folder path.
-
-    Returns the same shape as `create_artifact` plus the file list
-    so the agent can decide what to edit. 404-shaped error when the
-    slug is unknown.
-    """
-    import json
-
-    store = resolve_artifact_store(session)
-    if store is None:
-        # Tier 2 (ENG-2248): the tool cannot operate at all, so a retry
-        # cannot help and repetition is thrash. Reuses the existing
-        # `store_unavailable` sentinel key (external_wall/service_unavailable).
-        return ToolOutcome(
-            content="Artifact store unavailable (no workspace bound to this session).",
-            ok=False, reason="store_unavailable",
-        )
-
-    slug = (tc_input.get("slug") or "").strip()
-    if not slug:
-        # Tier 2: a malformed call; retrying it unchanged cannot work.
-        return ToolOutcome(
-            content="Error: `slug` is required.",
-            ok=False, reason="missing_slug",
-        )
-    artifact = store.open(slug)
-    if artifact is None:
-        # Tier 3 (ENG-2248): deliberately left ok=None. Same shape as
-        # `recall_skill`'s NO MATCH — the store worked and the artifact simply
-        # does not exist. The model can list artifacts and pick a real slug, so
-        # this is arguably its own error; but it is also how a model discovers
-        # what exists, and ok=False would feed that exploration to the breaker.
-        # Needs its own decision, not a side effect of this pass.
-        return f"Error: no artifact found for slug `{slug}`."
-    folder = store.folder_for(artifact.slug)
-    # Opening is how the agent gets an artifact's path in order to write to
-    # it, so this is the turn's declaration of intent to modify. Tracked here
-    # rather than at write time because the writes themselves happen in
-    # scratchpad cells the tool layer never sees.
-    _track_artifact(session, store, artifact.slug, summary=f"Opened artifact: {artifact.name}")
-    # Tier 1: the artifact was opened and its descriptor returned.
-    return ToolOutcome(content=json.dumps({
-        "id": artifact.id,
-        "slug": artifact.slug,
-        "name": artifact.name,
-        "type": artifact.type,
-        "description": artifact.description,
-        "path": str(folder),
-        "files": [{"path": f.path, "bytes": f.bytes} for f in artifact.files],
-        **_primary_content(folder, artifact.primary),
-    }, indent=2), ok=True)
-
-
-# Opening an artifact is almost always followed by reading its entry file, so a
-# small text one comes back with the descriptor and saves a model round trip.
-OPEN_ARTIFACT_CONTENT_MAX_BYTES = 20_000
-
-
-def _primary_content(folder: Path, primary: str | None) -> dict:
-    """The primary file's text, or why it was left out; {} when there is none."""
-    if not primary:
-        return {}
-    root = Path(folder).resolve()
-    target = (root / primary).resolve()
-    if not target.is_relative_to(root) or not target.is_file():
-        return {}
-    size = target.stat().st_size
-    if size > OPEN_ARTIFACT_CONTENT_MAX_BYTES:
-        return {"primary_content_omitted": f"{primary} is {size} bytes; read it from the scratchpad"}
-    try:
-        text = target.read_text(encoding="utf-8")
-    except (UnicodeDecodeError, OSError):
-        return {"primary_content_omitted": f"{primary} is not a text file"}
-    return {"primary_content": text}
+    if keys:
+        artifacts, unmatched = store.find(keys)
+    else:
+        artifacts, unmatched = store.list(), []
+    root = Path(store.root).absolute()
+    # Tier 1: a listing was produced. No artifacts, or unmatched keys, is still
+    # a correct answer, not a failure.
+    return ToolOutcome(content=render_listing([(root, artifacts)], fields, unmatched), ok=True)
 
 
 async def handle_recall(session: ChatSession, tc_input: dict) -> str:
@@ -1038,7 +1501,7 @@ async def handle_scratchpad(
     reading it (ENG-1276). The other actions still return plain strings
     (legacy substring classification).
     """
-    action = tc_input.get("action", "")
+    action = scratchpad_action(tc_input)
     name = tc_input.get("name", "")
 
     if not name:
@@ -1049,6 +1512,9 @@ async def handle_scratchpad(
             ok=False,
             reason="scratchpad_missing_name",
         )
+    refused_name = refuse_pad_name(name)
+    if refused_name is not None:
+        return refused_name
 
     # ACC emit helper: use the session's safe wrapper if it exists,
     # otherwise no-op. Defined as a local closure so each emit site
@@ -1074,22 +1540,20 @@ async def handle_scratchpad(
         # never sees these — observation is an orchestration concern,
         # so it lives at the dispatcher layer where the data is most
         # natural and where local/remote runtimes stay interchangeable.
-        prelim_cell = Cell(
+        prelim_cell = preliminary_cell(
             code=code,
-            stdout="",
-            stderr="",
-            error=None,
             description=description,
-            estimated_time=estimated_time or str(estimated_seconds),
+            estimated_time=estimated_time,
+            estimated_seconds=estimated_seconds,
         )
         await _fire_pre_execute(session, prelim_cell)
 
-        # Snapshot existing artifacts' content mtimes before the cell runs, so
-        # an edit the cell makes without a prior `open_artifact` call this
-        # turn still gets attributed below (see `track_edits_since`).
+        # Snapshot existing artifacts' content files before the cell runs, so
+        # an artifact edit the cell makes is attributed below (see
+        # `track_edits_since`).
         artifact_store = resolve_artifact_store(session)
-        before_artifact_mtimes = (
-            snapshot_existing_artifact_mtimes(artifact_store)
+        before_artifacts = (
+            snapshot_existing_artifacts(artifact_store)
             if artifact_store is not None
             else {}
         )
@@ -1108,37 +1572,21 @@ async def handle_scratchpad(
             # Post-execute ACC event (killed vs result) via the shared helper —
             # the streaming path emits the same.
             observe_scratchpad_cell(session, name, cell)
-            lint_messages: list[str] = []
-            if artifact_store is not None:
-                track_edits_since(session, artifact_store, before_artifact_mtimes)
-                try:
-                    import asyncio
-
-                    # the checkers might be with multi-second timeouts, run them async
-                    lint_messages = await asyncio.to_thread(
-                        lint_changed_artifact_files,
-                        artifact_store, before_artifact_mtimes,
-                    )
-                except Exception:
-                    # Best-effort: a lint crash must never fail
-                    # the cell's own result.
-                    _log.warning("artifact lint failed for this cell", exc_info=True)
+            lint = (
+                await check_cell_artifacts(session, store=artifact_store, before=before_artifacts)
+                if artifact_store is not None
+                else ArtifactLint()
+            )
         else:
-            lint_messages = []
+            lint = ArtifactLint()
         # The runtime's verdict: a raised error/timeout/kill is a failure;
         # stderr-only output (warnings) is not, and stdout containing words
         # like "failed" is not either — the streak reads this flag, never the
         # text (ENG-1276). The reason is the traceback's LAST line (the cause),
         # the machine-comparable key ENG-1286's thrash breaker will consume.
         error = (cell.error or "").strip() if cell is not None else ""
-        content = format_cell_result(cell)
-        if lint_messages:
-            # [artifact lint] follows format_cell_result's own [output]/[error]
-            # labeling convention so the agent can tell the finding apart from
-            # its own code's output.
-            content += "\n\n[artifact lint]\n" + "\n".join(lint_messages)
         return ToolOutcome(
-            content=content,
+            content=cell_content_with_lint(format_cell_result(cell), lint, cell_ok=not error),
             ok=not error,
             reason=cell_failure_reason(error),
         )
@@ -1192,7 +1640,14 @@ async def handle_scratchpad(
         return result
 
     else:
-        return f"Unknown scratchpad action: {action}"
+        # Every call that reaches here was refused before doing anything, so
+        # it is a failure the error streak counts, not a result.
+        named = f"`{action}` is not a scratchpad action" if action else "No `action` given and no `code` to run"
+        return ToolOutcome(
+            content=f"{named}. Valid actions: {', '.join(SCRATCHPAD_ACTIONS)}.",
+            ok=False,
+            reason="scratchpad_unknown_action",
+        )
 
 
 async def handle_read_image(
@@ -1202,7 +1657,8 @@ async def handle_read_image(
 
     Returns a list of content blocks (image + text) on success so the model
     sees the picture on its next turn. Returns a plain error string on
-    failure (missing file, non-image extension, oversized image, etc.).
+    failure (missing file, non-image extension, bytes that are no PNG, JPEG,
+    GIF or WebP, oversized image, etc.).
     """
     import base64
     from pathlib import Path
@@ -1212,6 +1668,7 @@ async def handle_read_image(
         MAX_IMAGE_BYTES,
         _media_type_for,
         human_size,
+        sniff_image_format,
     )
 
     file_path = (tc_input.get("file_path") or "").strip()
@@ -1222,8 +1679,25 @@ async def handle_read_image(
             ok=False, reason="missing_name",
         )
 
+    if images_refused(session):
+        # The model refused a request carrying an image a tool returned and
+        # took it without one, so another image would cost one more refused
+        # request and reach the model no better. Before the file is read.
+        return ToolOutcome(
+            content=(
+                f"Error: {file_path} was not loaded. The model provider refused a "
+                "request that carried an image earlier in this conversation, so "
+                "read_image sends no more images. Tell the user you could not "
+                "view this image."
+            ),
+            ok=False, reason="images_refused",
+        )
+
+    # Set only by a multi-person host (Cowork with the Landlock sandbox).
+    # The desktop, the CLI and the cloud pod carry none and read as before.
+    policy = cell_sandbox_of(getattr(session, "_scratchpads", None))
     try:
-        path = Path(file_path).expanduser()
+        path = _expand_home(file_path, policy)
         if not path.is_absolute():
             # Resolve relative paths against the project workspace (where
             # artifacts/decks live), not the process cwd. Under the desktop
@@ -1234,11 +1708,29 @@ async def handle_read_image(
             base = getattr(getattr(session, "_workspace", None), "base", None)
             root = Path(base) if base else Path.cwd()
             path = (root / path).resolve()
-    except OSError as exc:
+        if policy is not None:
+            path = path.resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
         # Tier 2: the model supplied a path that will not parse.
         return ToolOutcome(
             content=f"Error: invalid path '{file_path}': {exc}",
             ok=False, reason="invalid_type",
+        )
+
+    if policy is not None and not policy.allows_read(path):
+        # This process runs outside the sandbox, so it admits only what the
+        # person's own cells may read. Checked before the file is looked at,
+        # and worded without the resolved path, so the reply is the same
+        # whether another person's file exists or not.
+        return ToolOutcome(
+            content=(
+                f"Error: access denied: {file_path} is outside the files this "
+                "conversation may read (the project, the scratchpad's home and "
+                "temp folders, the shared folder and the conversation's "
+                "attachments). If the user wants you to see this image, ask "
+                "them to attach it to the conversation."
+            ),
+            ok=False, reason="access_denied",
         )
 
     if not path.is_file():
@@ -1274,8 +1766,13 @@ async def handle_read_image(
             ok=False, reason="read_failed",
         )
 
-    suffix = path.suffix.lstrip(".").lower()
-    if suffix == "bmp":
+    # The format the bytes show, not the extension: a JPEG saved as .png
+    # sent as image/png draws a refusal, and a refused image turns
+    # `read_image` off for the rest of the session. A BMP, whatever its name,
+    # goes out as PNG. Bytes in none of the formats the API takes get a text
+    # answer, and nothing is sent.
+    fmt = sniff_image_format(raw[:16])
+    if fmt == "BMP":
         try:
             import io
             from PIL import Image as _PILImage
@@ -1283,7 +1780,7 @@ async def handle_read_image(
             buf = io.BytesIO()
             _PILImage.open(io.BytesIO(raw)).save(buf, format="PNG")
             raw = buf.getvalue()
-            suffix = "png"
+            fmt = "PNG"
         except Exception as exc:
             # Tier 2 for the verdict, unclassified for the cause: a bare
             # `except Exception` around a PIL call covers a missing Pillow (a
@@ -1292,6 +1789,12 @@ async def handle_read_image(
                 content=f"Error: failed to convert BMP to PNG: {exc}",
                 ok=False, reason="bmp_convert_failed",
             )
+
+    if fmt not in ("PNG", "JPEG", "GIF", "WEBP"):
+        return ToolOutcome(
+            content=f"Error: '{path.name}' is not a readable PNG, JPEG, GIF or WebP image.",
+            ok=False, reason="not_an_image",
+        )
 
     if len(raw) * 4 // 3 > MAX_IMAGE_BYTES:
         # Tier 2: over the API's hard limit. The model chose the file and the
@@ -1306,13 +1809,15 @@ async def handle_read_image(
         )
 
     b64 = base64.standard_b64encode(raw).decode("ascii")
-    media_type = _media_type_for(suffix)
+    media_type = _media_type_for(fmt)
 
     summary = f"Loaded {path.name} ({human_size(len(raw))})."
     try:
+        import io
         from PIL import Image as _PILImage
 
-        with _PILImage.open(path) as im:
+        # The bytes already read, not a second open of the path.
+        with _PILImage.open(io.BytesIO(raw)) as im:
             summary = f"Loaded {path.name} ({im.width}x{im.height}, {human_size(len(raw))})."
     except Exception:
         pass
@@ -1343,6 +1848,182 @@ async def handle_read_image(
         ],
         ok=True,
     )
+
+
+def _expand_home(file_path: str, policy: "CellSandbox | None") -> Path:
+    """`file_path` with `~` expanded to the HOME the person's cells run with.
+
+    Under a policy the process HOME is the server's, which holds every
+    person's space; the cell's HOME is the policy's. Without one, `~` is the
+    process HOME as before.
+    """
+    if policy is not None and (file_path == "~" or file_path.startswith("~/")):
+        return policy.home_dir / file_path[1:].lstrip("/")
+    return Path(file_path).expanduser()
+
+
+def _read_roots(session: "ChatSession") -> "tuple[Path, tuple[Path, ...]]":
+    """The base for relative paths, and the folders anton manages that may be read.
+
+    Hosts and tests pass partial sessions; anything that is not a real path is
+    ignored rather than trusted.
+    """
+    workspace = getattr(session, "_workspace", None)
+    base = getattr(workspace, "base", None)
+    base = Path(base) if isinstance(base, (str, Path)) else Path.cwd()
+    owned: list[Path] = []
+    artifacts_dir = getattr(workspace, "artifacts_dir", None)
+    if isinstance(artifacts_dir, (str, Path)):
+        owned.append(Path(artifacts_dir))
+    drafts_root = getattr(session, "_skill_drafts_root", None)
+    if isinstance(drafts_root, (str, Path)):
+        owned.append(Path(drafts_root))
+    # Both hosts stage skill drafts here; the desktop host keeps its own draft
+    # tool and does not pass `_skill_drafts_root`.
+    owned.append(base / ".anton" / "skill_drafts")
+    return base, tuple(owned)
+
+
+def _line_arg(value) -> "int | None":
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("a line number cannot be a boolean")
+    # `int(2.5)` is 2: a fractional line number would silently read another range.
+    if isinstance(value, float) and not value.is_integer():
+        raise ValueError("a line number must be a whole number")
+    return int(value)
+
+
+def _flag(value) -> bool:
+    # `bool("false")` is True, and a model or gateway may send the flag as a
+    # string or a number.
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value == 1
+    return isinstance(value, str) and value.strip().lower() in ("true", "1")
+
+
+def _shown_path(path: Path, display_root: "Path | None") -> str:
+    """`path` as the result names it: relative to `display_root` when inside it."""
+    if display_root is None:
+        return str(path)
+    roots = [display_root]
+    try:
+        roots.append(display_root.resolve())
+    except (OSError, RuntimeError):
+        pass
+    for root in roots:
+        try:
+            return path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+    return str(path)
+
+
+async def handle_read_text_file(
+    session: "ChatSession", tc_input: dict, *, display_root: "Path | None" = None
+) -> ToolOutcome:
+    """Read a text file the access policy allows, as a range of lines.
+
+    Writes nothing: reading an artifact is not attributed to the turn.
+    `display_root`: name files inside it relative to it in the header and in
+    errors (the artifact generator passes its folder).
+    """
+    import asyncio
+
+    raw = tc_input.get("path")
+    if not isinstance(raw, str) or not raw.strip():
+        return ToolOutcome(content="Error: `path` is required.", ok=False, reason="missing_path")
+    # Resolving the path, the policy check and the read all touch the
+    # filesystem, which on a network mount is too slow for the event loop.
+    return await asyncio.to_thread(_read_text_file, session, raw.strip(), tc_input, display_root)
+
+
+def _read_text_file(
+    session: "ChatSession", raw: str, tc_input: dict, display_root: "Path | None"
+) -> ToolOutcome:
+    import stat
+
+    from anton.core.tools import file_access, text_file
+
+    base, owned_roots = _read_roots(session)
+    policy = cell_sandbox_of(getattr(session, "_scratchpads", None))
+    try:
+        path = _expand_home(raw, policy)
+        if not path.is_absolute():
+            path = base / path
+        resolved = path.resolve()
+    except (ValueError, RuntimeError, OSError) as exc:
+        return ToolOutcome(
+            content=f"Error: invalid path {raw!r}: {exc}", ok=False, reason="invalid_path"
+        )
+    shown = _shown_path(path, display_root)
+
+    refusal = file_access.under_policy(
+        file_access.read_refusal(resolved, workspace=base, owned_roots=owned_roots),
+        resolved, policy, outside=file_access.REFUSED_OUTSIDE,
+    )
+    if refusal is not None:
+        _log.debug("read_text_file refused %s: %s", resolved, refusal)
+        resolved_shown = _shown_path(resolved, display_root)
+        # Under a policy the target can be another person's file: name only
+        # the path as given.
+        same = resolved_shown == shown or policy is not None
+        where = shown if same else f"{shown} (it resolves to {resolved_shown})"
+        message = f"Error: access denied: {where} is {refusal}."
+        if refusal == file_access.REFUSED_OUTSIDE:
+            message += (
+                " If the user wants you to use this file, ask them to attach it"
+                " to the conversation."
+            )
+        return ToolOutcome(content=message, ok=False, reason="access_denied")
+
+    try:
+        mode = resolved.stat().st_mode
+    except (FileNotFoundError, NotADirectoryError):
+        return ToolOutcome(content=f"Error: file not found: {shown}", ok=False, reason="path_not_found")
+    except OSError as exc:
+        return ToolOutcome(content=f"Error: cannot read {shown}: {exc}", ok=False, reason="read_failed")
+    if not stat.S_ISREG(mode):
+        return ToolOutcome(content=f"Error: {shown} is not a file.", ok=False, reason="not_a_file")
+
+    try:
+        start_line = _line_arg(tc_input.get("start_line"))
+        end_line = _line_arg(tc_input.get("end_line"))
+    except (TypeError, ValueError, OverflowError):
+        return ToolOutcome(
+            content="Error: `start_line` and `end_line` must be integers.",
+            ok=False, reason="invalid_range",
+        )
+
+    try:
+        result = text_file.read_text_range(
+            resolved, shown, start_line, end_line,
+            line_numbers=_flag(tc_input.get("line_numbers")),
+        )
+    except text_file.FileTooLargeError:
+        limit_mb = text_file.MAX_FILE_BYTES // (1024 * 1024)
+        return ToolOutcome(
+            content=f"Error: {shown} is larger than {limit_mb} MB. Read the part you need in the scratchpad.",
+            ok=False, reason="file_too_large",
+        )
+    except text_file.NotTextError:
+        return ToolOutcome(
+            content=f"Error: {shown} is not a UTF-8 text file. Read it in the scratchpad.",
+            ok=False, reason="not_text",
+        )
+    except text_file.InvalidRangeError as exc:
+        return ToolOutcome(content=f"Error: {exc}.", ok=False, reason="invalid_range")
+    except OSError as exc:
+        return ToolOutcome(content=f"Error: cannot read {shown}: {exc}", ok=False, reason="read_failed")
+
+    _log.debug(
+        "read_text_file %s lines %d-%d of %d",
+        resolved, result.first, result.last, result.total_lines,
+    )
+    return ToolOutcome(content=result.render(), ok=True)
 
 
 # ---------------------------------------------------------------------------

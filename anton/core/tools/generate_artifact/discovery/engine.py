@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from anton.core.artifacts.models import GENERATOR_ARTIFACT_TYPES
+from anton.core.utils.scratchpad import CELL_NOT_RUN_REASONS, scratchpad_action
 
 from .. import sub_tools as protocol
 from . import prompts, sub_tools
@@ -45,11 +46,12 @@ def _web_tools() -> dict[str, tuple]:
 def _exec_ran(outcome) -> bool:
     """Whether a scratchpad exec result describes a cell that executed.
 
-    False for the single-scratchpad guard's challenge (`ok=True`, guidance
-    rather than a failure, hence the `reason`) and for a cell the runtime
-    reported as failed: neither is working data-access code.
+    False for an `ok=True` result whose cell never ran (the single-scratchpad
+    guard's challenge, a change the user didn't approve), hence the `reason`,
+    and for a cell the runtime reported as failed: none is working
+    data-access code.
     """
-    if getattr(outcome, "reason", "") == "new_scratchpad_challenged":
+    if getattr(outcome, "reason", "") in CELL_NOT_RUN_REASONS:
         return False
     return getattr(outcome, "ok", None) is not False
 
@@ -69,7 +71,7 @@ async def run_gathering_loop(state: "PrdState") -> None:
         `finish_gathering` — both are the best-effort case the caller
         (orchestrator.run) falls back on.
     """
-    budget = gathering_question_budget(state.session)
+    budget = gathering_question_budget(state.session, act_first=state.act_first)
     # One array for the whole shared-prefix region; availability per step is
     # decided in code by `sub_tools.rejection_for`, not by dropping entries.
     tools = state.pipeline_tools
@@ -210,11 +212,11 @@ async def run_gathering_loop(state: "PrdState") -> None:
                 # that RAN counts: a live run once recorded an exec
                 # the single-scratchpad guard had refused, and both generators
                 # received its code with the refusal text as its "Output".
-                if inp.get("action") == "exec" and inp.get("code") and _exec_ran(outcome):
+                if scratchpad_action(inp) == "exec" and inp.get("code") and _exec_ran(outcome):
                     state.scratchpad_execs.append({
                         "name": inp.get("name"),
                         "code": inp.get("code"),
-                        "output": content if isinstance(content, str) else str(content),
+                        "output": protocol.result_text(content),
                     })
                 result_blocks.append(protocol.tool_result(tc.id, content))
             elif name in ("web_search", "web_fetch"):

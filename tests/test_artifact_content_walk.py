@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from anton.core.artifacts.store import iter_content_files
-from anton.core.tools.tool_handlers import _artifact_content_mtime
+from anton.core.tools.tool_handlers import FileStamp, _artifact_files
 from anton.publish_access import _user_files
 
 
@@ -113,9 +113,9 @@ def test_user_files_survive_one_unreadable_entry(tmp_path, monkeypatch):
     assert [p.name for p in _user_files(tmp_path)] == ["index.html"]
 
 
-def test_unreadable_file_does_not_zero_the_content_mtime(tmp_path, monkeypatch):
+def test_unreadable_file_leaves_the_others_in_the_snapshot(tmp_path, monkeypatch):
     good = _touch(tmp_path / "index.html")
     os.utime(good, (1000, 1000))
     _fail_stat_for(monkeypatch, _touch(tmp_path / "gone.html"))
 
-    assert _artifact_content_mtime(tmp_path) == 1000.0
+    assert _artifact_files(tmp_path).stamps == {"index.html": FileStamp(mtime_ns=1000 * 10**9, size=1)}
